@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+.env
+.venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/
+.DS_Store
+data/snapshots/*.json
+data/normalized/*.json
+data/normalized/*.jsonl
+data/normalized/*.csv
+logs/
+
+# Local secrets (keep `.env.example` tracked)
+.env.*
+!.env.example
+
+# Generated artifacts / large datasets
+models/
+data/monitoring/
+data/calibration/
+data/fallback/
+data/official/
+data/player_sources.jsonl
+data/nba_stats_season_checkpoint.json
