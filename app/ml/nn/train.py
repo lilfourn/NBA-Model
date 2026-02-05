@@ -16,6 +16,7 @@ from app.db import schema
 from app.ml.nn.dataset import NNDataset
 from app.ml.nn.features import TrainingData, build_training_data
 from app.ml.nn.model import GRUAttentionTabularClassifier
+from app.modeling.conformal import ConformalCalibrator
 
 
 @dataclass
@@ -193,6 +194,9 @@ def train_nn(
     temperature, logloss_cal = _temperature_scale(logits, labels)
     probs_cal = 1.0 / (1.0 + np.exp(-(logits / temperature)))
     preds_cal = (probs_cal >= 0.5).astype(int)
+
+    conformal = ConformalCalibrator.calibrate(probs_cal, labels.astype(int), alpha=0.10)
+
     metrics = {
         "accuracy": float(accuracy_score(labels, preds)),
         "roc_auc": float(roc_auc_score(labels, probs)) if len(np.unique(labels)) > 1 else None,
@@ -200,6 +204,8 @@ def train_nn(
         "temperature": float(temperature),
         "logloss_cal": float(logloss_cal),
         "accuracy_cal": float(accuracy_score(labels, preds_cal)),
+        "conformal_q_hat": conformal.q_hat,
+        "conformal_n_cal": conformal.n_cal,
     }
 
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -214,6 +220,7 @@ def train_nn(
             "history_len": history_len,
             "cat_emb_dims": cat_emb_dims,
             "temperature": float(temperature),
+            "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
         },
         model_path,
     )

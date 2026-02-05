@@ -6,13 +6,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import joblib as _joblib
+
 import pandas as pd
+import torch as _torch
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
 from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs
+from app.modeling.conformal import ConformalCalibrator
 from app.modeling.db_logs import load_db_game_logs
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler
@@ -47,6 +51,7 @@ class ScoredPick:
     sigma_hat: float | None
     calibration_status: str
     n_eff: float | None
+    conformal_set_size: int | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -66,6 +71,19 @@ class ScoringResult:
             "total_scored": self.total_scored,
             "picks": [p.to_dict() for p in self.picks],
         }
+
+
+def _conformal_set_size(calibrators: list[ConformalCalibrator], p_over: float) -> int | None:
+    """Majority-vote conformal set size across available calibrators.
+
+    Returns 1 (confident unique prediction) or 2 (ambiguous).
+    Returns None if no calibrators are available.
+    """
+    if not calibrators:
+        return None
+    sizes = [cal.predict(p_over).set_size for cal in calibrators]
+    # Majority vote: if most say set_size=1, return 1
+    return 1 if sum(1 for s in sizes if s == 1) > len(sizes) / 2 else 2
 
 
 def _latest_snapshot_id(engine: Engine) -> str | None:
@@ -280,6 +298,26 @@ def score_ensemble(
     lr_path = _latest_model_path(models_path, "baseline_logreg_*.joblib")
     xgb_path = _latest_model_path(models_path, "xgb_*.joblib")
 
+    # Load conformal calibrators from saved models
+    conformal_cals: list[ConformalCalibrator] = []
+    for _mp in [lr_path, xgb_path]:
+        if _mp and _mp.exists():
+            try:
+                _pl = _joblib.load(str(_mp))
+                _cd = _pl.get("conformal")
+                if _cd:
+                    conformal_cals.append(ConformalCalibrator(**_cd))
+            except Exception:  # noqa: BLE001
+                pass
+    if nn_path and nn_path.exists():
+        try:
+            _pl = _torch.load(str(nn_path), map_location="cpu")
+            _cd = _pl.get("conformal")
+            if _cd:
+                conformal_cals.append(ConformalCalibrator(**_cd))
+        except Exception:  # noqa: BLE001
+            pass
+
     calibrator = None
     if calibration_path:
         calibrator = ForecastDistributionCalibrator.load(calibration_path)
@@ -441,6 +479,7 @@ def score_ensemble(
                 "sigma_hat": float(f.get("sigma_hat") or 0.0) if f else None,
                 "calibration_status": status,
                 "n_eff": n_eff_val,
+                "conformal_set_size": _conformal_set_size(conformal_cals, p_final),
             }
         )
 
@@ -468,6 +507,7 @@ def score_ensemble(
             sigma_hat=item["sigma_hat"],
             calibration_status=item["calibration_status"],
             n_eff=item["n_eff"],
+            conformal_set_size=item.get("conformal_set_size"),
         )
         for item in top_picks
     ]

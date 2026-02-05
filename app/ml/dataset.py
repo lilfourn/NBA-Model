@@ -489,6 +489,16 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     for key in extras_df.columns:
         frame[key] = extras_df[key]
 
+    # Derived line movement features
+    line_score = pd.to_numeric(frame.get("line_score"), errors="coerce").fillna(0.0)
+    line_delta = pd.to_numeric(frame.get("line_score_delta"), errors="coerce").fillna(0.0)
+    mins_to_start = pd.to_numeric(frame.get("minutes_to_start"), errors="coerce").fillna(360.0)
+    frame["line_move_pct"] = np.where(line_score > 0, line_delta / line_score, 0.0)
+    # Late movement signal: movement magnitude weighted by proximity to game time
+    # Closer to game time (lower minutes) = sharper signal
+    time_weight = np.clip(1.0 - mins_to_start / 360.0, 0.0, 1.0)
+    frame["line_move_late"] = line_delta.abs() * time_weight
+
     frame = frame.replace([float("inf"), float("-inf")], pd.NA)
     # Ensure feature columns exist even when we couldn't compute for a row.
     for col in [
@@ -512,6 +522,8 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         "recent_vs_season",
         "minutes_trend",
         "stat_std_5",
+        "line_move_pct",
+        "line_move_late",
         *OPPONENT_FEATURE_COLS,
     ]:
         if col not in frame.columns:

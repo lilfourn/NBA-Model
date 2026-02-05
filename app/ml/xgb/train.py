@@ -16,6 +16,7 @@ from app.db import schema
 from app.ml.dataset import load_training_data
 from app.ml.stat_mappings import stat_value_from_row
 from app.ml.train import CATEGORICAL_COLS, MIN_TRAIN_ROWS, NUMERIC_COLS, _time_split
+from app.modeling.conformal import ConformalCalibrator
 
 XGBOOST_PARAMS = {
     "n_estimators": 600,
@@ -107,10 +108,15 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
 
     y_proba = model.predict_proba(X_test)[:, 1]
     y_pred = (y_proba >= 0.5).astype(int)
+
+    conformal = ConformalCalibrator.calibrate(y_proba, y_test.to_numpy(), alpha=0.10)
+
     metrics = {
         "accuracy": float(accuracy_score(y_test, y_pred)),
         "roc_auc": float(roc_auc_score(y_test, y_proba)) if len(np.unique(y_test)) > 1 else None,
         "logloss": float(log_loss(y_test, y_proba)),
+        "conformal_q_hat": conformal.q_hat,
+        "conformal_n_cal": conformal.n_cal,
     }
 
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -122,6 +128,7 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
             "feature_cols": list(X.columns),
             "categorical_cols": CATEGORICAL_COLS,
             "numeric_cols": NUMERIC_COLS,
+            "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
         },
         model_path,
     )

@@ -20,6 +20,7 @@ from sklearn.preprocessing import OneHotEncoder
 from app.db import schema
 from app.ml.dataset import load_training_data
 from app.ml.stat_mappings import stat_value_from_row
+from app.modeling.conformal import ConformalCalibrator
 
 MIN_TRAIN_ROWS = 50
 
@@ -61,6 +62,8 @@ NUMERIC_COLS = [
     "recent_vs_season",
     "minutes_trend",
     "stat_std_5",
+    "line_move_pct",
+    "line_move_late",
 ]
 
 
@@ -160,15 +163,27 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
         y_pred = pipeline.predict(X_test)
         y_proba = pipeline.predict_proba(X_test)[:, 1]
 
+    # Conformal calibration on holdout
+    conformal = ConformalCalibrator.calibrate(y_proba, y_test.to_numpy(), alpha=0.10)
+
     metrics = {
         "accuracy": float(accuracy_score(y_test, y_pred)),
         "roc_auc": float(roc_auc_score(y_test, y_proba)) if len(np.unique(y_test)) > 1 else None,
+        "conformal_q_hat": conformal.q_hat,
+        "conformal_n_cal": conformal.n_cal,
     }
 
     model_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
     model_path = model_dir / f"baseline_logreg_{timestamp}.joblib"
-    joblib.dump({"model": pipeline, "feature_cols": {"categorical": CATEGORICAL_COLS, "numeric": NUMERIC_COLS}}, model_path)
+    joblib.dump(
+        {
+            "model": pipeline,
+            "feature_cols": {"categorical": CATEGORICAL_COLS, "numeric": NUMERIC_COLS},
+            "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
+        },
+        model_path,
+    )
 
     run_id = uuid4()
     with engine.begin() as conn:
