@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -150,6 +151,9 @@ def main() -> None:
     oof_xgb = np.full(n, np.nan)
     oof_lgbm = np.full(n, np.nan)
     oof_nn = np.full(n, np.nan)
+
+    # Suppress sklearn matmul RuntimeWarnings from polynomial feature interactions
+    warnings.filterwarnings("ignore", message=".*encountered in matmul", category=RuntimeWarning)
 
     for fold in range(args.n_folds):
         test_start = fold * fold_size

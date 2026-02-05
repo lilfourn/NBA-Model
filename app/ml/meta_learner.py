@@ -6,6 +6,7 @@ and outputs a calibrated ensemble probability.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+warnings.filterwarnings("ignore", message=".*encountered in matmul", category=RuntimeWarning)
 
 from app.db import schema
 from app.ml.artifacts import load_joblib_artifact

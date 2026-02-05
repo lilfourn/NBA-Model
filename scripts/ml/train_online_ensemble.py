@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -262,6 +263,8 @@ def _load_training_frame_from_db(engine, *, days_back: int) -> pd.DataFrame:
 
 
 def main() -> None:
+    warnings.filterwarnings("ignore", message=".*encountered in matmul", category=RuntimeWarning)
+
     ap = argparse.ArgumentParser(description="Train an online contextual Hedge ensemble from logged predictions.")
     ap.add_argument("--database-url", default=None)
     ap.add_argument("--log-path", default=PRED_LOG_DEFAULT)
