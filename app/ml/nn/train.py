@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from app.db import schema
-from app.ml.calibration import CalibratedExpert
+from app.ml.calibration import best_calibrator
 from app.ml.nn.dataset import NNDataset
 from app.ml.nn.features import TrainingData, build_training_data
 from app.ml.nn.model import GRUAttentionTabularClassifier
@@ -201,10 +201,10 @@ def train_nn(
 
     conformal = ConformalCalibrator.calibrate(probs_cal, labels.astype(int), alpha=0.10)
 
-    isotonic_data = None
+    calibrator_data = None
     try:
-        isotonic = CalibratedExpert.fit(probs_cal, labels.astype(int))
-        isotonic_data = isotonic.to_dict()
+        calibrator = best_calibrator(probs_cal, labels.astype(int))
+        calibrator_data = calibrator.to_dict()
     except ValueError:
         pass
 
@@ -232,8 +232,8 @@ def train_nn(
         "temperature": float(temperature),
         "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
     }
-    if isotonic_data:
-        payload["isotonic"] = isotonic_data
+    if calibrator_data:
+        payload["isotonic"] = calibrator_data
     torch.save(payload, model_path)
 
     run_id = uuid4()

@@ -11,10 +11,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import numpy as np  # noqa: E402
+
 from app.db.engine import get_engine  # noqa: E402
 from app.ml.dataset import _load_name_overrides  # noqa: E402
 from app.ml.stat_mappings import stat_value_from_row  # noqa: E402
+from app.modeling.gating_model import GatingModel, build_context_features  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler, logloss  # noqa: E402
+from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler  # noqa: E402
 from app.utils.names import normalize_name  # noqa: E402
 from scripts.ops.log_decisions import PRED_LOG_DEFAULT  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
@@ -402,9 +406,16 @@ def main() -> None:
 
     joined = joined.sort_values("decision_time_parsed")
     ens = ContextualHedgeEnsembler(experts=list(experts), eta=float(args.eta), shrink_to_uniform=float(args.shrink))
+    nn_cap = {"p_nn": 0.10}
+    ts = ThompsonSamplingEnsembler(experts=list(experts), max_weight=nn_cap)
 
     losses: dict[str, float] = {name: 0.0 for name in ["ensemble", *experts]}
     counts: dict[str, int] = {name: 0 for name in ["ensemble", *experts]}
+
+    # Collect data for gating model training
+    gating_expert_probs: dict[str, list[float]] = {col: [] for col in experts}
+    gating_labels: list[float] = []
+    gating_n_effs: list[float] = []
 
     for row in joined.itertuples(index=False):
         expert_probs = {col: getattr(row, col) for col in experts}
@@ -424,6 +435,24 @@ def main() -> None:
             counts[col] += 1
         ens.update(expert_probs, y, ctx)
 
+        # Thompson Sampling update
+        stat_type = str(getattr(row, "stat_type") or "")
+        is_live = bool(getattr(row, "is_live") or False)
+        n_eff_val = float(getattr(row, "n_eff")) if getattr(row, "n_eff") is not None else None
+        ctx_tuple = (
+            stat_type,
+            "live" if is_live else "pregame",
+            "high" if (n_eff_val or 0) >= 15 else "low",
+        )
+        ts.update(expert_probs, y, ctx_tuple)
+
+        # Collect for gating model
+        gating_labels.append(float(y))
+        gating_n_effs.append(n_eff_val or 0.0)
+        for col in experts:
+            p = expert_probs.get(col)
+            gating_expert_probs[col].append(float(p) if p is not None and not pd.isna(p) else 0.5)
+
     def avg(name: str) -> float | None:
         n = counts.get(name, 0)
         if n <= 0:
@@ -433,9 +462,31 @@ def main() -> None:
     summary = {name: avg(name) for name in ["ensemble", *experts]}
     print({"rows": int(counts["ensemble"]), "avg_logloss": summary})
 
+    # Save Hedge ensemble
     out_path = Path(args.out)
     ens.save(out_path)
-    print(f"Wrote ensemble weights -> {out_path}")
+    print(f"Wrote Hedge ensemble weights -> {out_path}")
+
+    # Save Thompson Sampling ensemble
+    ts_path = out_path.parent / "thompson_weights.json"
+    ts.save(str(ts_path))
+    print(f"Wrote Thompson Sampling weights -> {ts_path} (n_updates={ts.n_updates})")
+
+    # Train and save Gating Model
+    if len(gating_labels) >= 30:
+        try:
+            ep_arrays = {col: np.array(gating_expert_probs[col]) for col in experts}
+            ctx_feats = build_context_features(ep_arrays, n_eff=np.array(gating_n_effs))
+            gm = GatingModel(experts=list(experts), max_weight=nn_cap)
+            gm.fit(ctx_feats, ep_arrays, np.array(gating_labels))
+            gm_path = out_path.parent / "gating_model.joblib"
+            gm.save(str(gm_path))
+            print(f"Wrote Gating Model -> {gm_path} (n_train={gm.n_train})")
+        except Exception as e:  # noqa: BLE001
+            print(f"Gating model training failed: {e}")
+    else:
+        print(f"Not enough data for gating model ({len(gating_labels)} < 30 rows).")
+
 
 
 if __name__ == "__main__":

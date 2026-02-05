@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from app.ml.calibration import CalibratedExpert
+from app.ml.calibration import CalibratedExpert, load_calibrator
 from app.ml.nn.dataset import NNDataset
 from app.ml.nn.features import build_inference_data
 from app.ml.nn.model import GRUAttentionTabularClassifier
@@ -155,12 +155,12 @@ def infer_over_probs(
         probs_list.append(torch.sigmoid(logits / temperature).cpu().numpy().reshape(-1))
     probs = np.concatenate(probs_list)
 
-    # Apply isotonic calibration if available
-    isotonic_data = payload.get("isotonic")
-    if isotonic_data is not None:
+    # Apply probability calibration if available (isotonic or Platt)
+    cal_data = payload.get("isotonic")
+    if cal_data is not None:
         try:
-            isotonic = CalibratedExpert.from_dict(isotonic_data)
-            probs = isotonic.transform(probs)
+            calibrator = load_calibrator(cal_data)
+            probs = calibrator.transform(probs)
         except Exception:  # noqa: BLE001
             pass
 

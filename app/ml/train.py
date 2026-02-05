@@ -18,7 +18,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from app.db import schema
-from app.ml.calibration import CalibratedExpert
+from app.ml.calibration import best_calibrator
 from app.ml.dataset import load_training_data
 from app.ml.stat_mappings import stat_value_from_row
 from app.modeling.conformal import ConformalCalibrator
@@ -172,11 +172,11 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
     # Conformal calibration on holdout
     conformal = ConformalCalibrator.calibrate(y_proba, y_test.to_numpy(), alpha=0.10)
 
-    # Isotonic calibration on holdout
-    isotonic_data = None
+    # Probability calibration on holdout (auto-selects isotonic vs Platt)
+    calibrator_data = None
     try:
-        isotonic = CalibratedExpert.fit(y_proba, y_test.to_numpy())
-        isotonic_data = isotonic.to_dict()
+        calibrator = best_calibrator(y_proba, y_test.to_numpy())
+        calibrator_data = calibrator.to_dict()
     except ValueError:
         pass
 
@@ -195,8 +195,8 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
         "feature_cols": {"categorical": CATEGORICAL_COLS, "numeric": NUMERIC_COLS},
         "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
     }
-    if isotonic_data:
-        artifact["isotonic"] = isotonic_data
+    if calibrator_data:
+        artifact["isotonic"] = calibrator_data
     joblib.dump(artifact, model_path)
 
     run_id = uuid4()

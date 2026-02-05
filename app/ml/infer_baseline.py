@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.ml.artifacts import load_joblib_artifact
-from app.ml.calibration import CalibratedExpert
+from app.ml.calibration import CalibratedExpert, PlattCalibrator, load_calibrator
 from app.ml.dataset import _add_history_features
 from app.ml.train import CATEGORICAL_COLS, NUMERIC_COLS
 
@@ -22,23 +22,23 @@ class InferenceResult:
     model_path: str
 
 
-def _load_model(path: str) -> tuple[Any, dict[str, list[str]], CalibratedExpert | None]:
+def _load_model(path: str) -> tuple[Any, dict[str, list[str]], CalibratedExpert | PlattCalibrator | None]:
     payload = load_joblib_artifact(path)
     if not isinstance(payload, dict) or "model" not in payload:
         raise ValueError(f"Unexpected model artifact format: {path}")
     feature_cols = payload.get("feature_cols") or {}
     if not isinstance(feature_cols, dict):
         feature_cols = {}
-    isotonic = None
+    calibrator = None
     if "isotonic" in payload:
         try:
-            isotonic = CalibratedExpert.from_dict(payload["isotonic"])
+            calibrator = load_calibrator(payload["isotonic"])
         except Exception:  # noqa: BLE001
             pass
     return payload["model"], {
         "categorical": list(feature_cols.get("categorical") or CATEGORICAL_COLS),
         "numeric": list(feature_cols.get("numeric") or NUMERIC_COLS),
-    }, isotonic
+    }, calibrator
 
 
 def _load_inference_frame(engine: Engine, snapshot_id: str) -> pd.DataFrame:
@@ -92,7 +92,7 @@ def infer_over_probs(*, engine: Engine, model_path: str, snapshot_id: str) -> In
     if frame.empty:
         return InferenceResult(frame=frame, probs=np.zeros((0,), dtype=np.float32), model_path=model_path)
 
-    model, feature_cols, isotonic = _load_model(model_path)
+    model, feature_cols, calibrator = _load_model(model_path)
     cat_cols = feature_cols["categorical"]
     num_cols = feature_cols["numeric"]
 
@@ -120,6 +120,6 @@ def infer_over_probs(*, engine: Engine, model_path: str, snapshot_id: str) -> In
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*encountered in matmul", category=RuntimeWarning)
         probs = model.predict_proba(X)[:, 1].astype(np.float32)
-    if isotonic is not None:
-        probs = isotonic.transform(probs)
+    if calibrator is not None:
+        probs = calibrator.transform(probs)
     return InferenceResult(frame=frame, probs=probs, model_path=model_path)

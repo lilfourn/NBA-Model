@@ -13,7 +13,7 @@ from lightgbm import LGBMClassifier
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 
 from app.db import schema
-from app.ml.calibration import CalibratedExpert
+from app.ml.calibration import best_calibrator
 from app.ml.dataset import load_training_data
 from app.ml.stat_mappings import stat_value_from_row
 from app.ml.train import CATEGORICAL_COLS, MIN_TRAIN_ROWS, NUMERIC_COLS, _time_split
@@ -134,10 +134,10 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
 
     conformal = ConformalCalibrator.calibrate(y_proba, y_test.to_numpy(), alpha=0.10)
 
-    isotonic_data = None
+    calibrator_data = None
     try:
-        isotonic = CalibratedExpert.fit(y_proba, y_test.to_numpy())
-        isotonic_data = isotonic.to_dict()
+        calibrator = best_calibrator(y_proba, y_test.to_numpy())
+        calibrator_data = calibrator.to_dict()
     except ValueError:
         pass
 
@@ -159,8 +159,8 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
         "numeric_cols": NUMERIC_COLS,
         "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
     }
-    if isotonic_data:
-        artifact["isotonic"] = isotonic_data
+    if calibrator_data:
+        artifact["isotonic"] = calibrator_data
     joblib.dump(artifact, model_path)
 
     run_id = uuid4()

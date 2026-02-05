@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import torch as _torch
 from sqlalchemy import text
@@ -22,9 +23,12 @@ from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs
 from app.modeling.conformal import ConformalCalibrator
 from app.modeling.db_logs import load_db_game_logs
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator
+from app.modeling.gating_model import GatingModel, build_context_features
+from app.modeling.hybrid_ensemble import HybridEnsembleCombiner
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler
 from app.modeling.probability import confidence_from_probability
 from app.modeling.stat_forecast import ForecastParams, LeaguePriors, StatForecastPredictor
+from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler
 from app.modeling.types import Projection
 from app.ml.stat_mappings import (
     stat_components,
@@ -597,6 +601,33 @@ def score_ensemble(
     else:
         ens = ContextualHedgeEnsembler(experts=experts, eta=0.2, shrink_to_uniform=0.01, max_weight=nn_cap)
 
+    # Load Thompson Sampling ensemble (optional)
+    thompson_path = Path(models_dir) / "thompson_weights.json"
+    thompson: ThompsonSamplingEnsembler | None = None
+    if thompson_path.exists():
+        try:
+            thompson = ThompsonSamplingEnsembler.load(str(thompson_path))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Load Gating Model (optional)
+    gating_path = Path(models_dir) / "gating_model.joblib"
+    gating: GatingModel | None = None
+    if gating_path.exists():
+        try:
+            gating = GatingModel.load(str(gating_path))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Build hybrid combiner if Thompson or Gating available
+    hybrid: HybridEnsembleCombiner | None = None
+    if thompson is not None or gating is not None:
+        hybrid = HybridEnsembleCombiner.from_components(
+            thompson=thompson,
+            gating=gating,
+            experts=experts,
+        )
+
     scored: list[dict[str, Any]] = []
     for row in frame.itertuples(index=False):
         proj_id = str(getattr(row, "projection_id", ""))
@@ -630,9 +661,32 @@ def score_ensemble(
             except Exception:  # noqa: BLE001
                 pass
         ctx = Context(stat_type=stat_type, is_live=is_live, n_eff=n_eff_val)
-        # Primary: use meta-learner when all 5 experts available
+        # Primary: hybrid combiner (Thompson + Gating + Meta)
+        # Fallback chain: hybrid → meta-learner → Hedge
         p_raw = None
-        if p_meta_val is not None and math.isfinite(p_meta_val):
+        if hybrid is not None:
+            try:
+                # Build context features for gating model
+                avail = {k: v for k, v in expert_probs.items() if v is not None}
+                ctx_feats = None
+                if avail and gating is not None and gating.is_fitted:
+                    ctx_feats = build_context_features(
+                        {k: np.array([v]) for k, v in avail.items()},
+                        n_eff=np.array([n_eff_val or 0.0]),
+                    )[0]
+                ctx_tuple = (stat_type, "live" if is_live else "pregame",
+                             "high" if (n_eff_val or 0) >= 15 else "low")
+                p_hybrid = hybrid.predict(
+                    expert_probs, ctx_tuple,
+                    context_features=ctx_feats,
+                    p_meta=p_meta_val if p_meta_val is not None and math.isfinite(p_meta_val) else None,
+                    n_eff=n_eff_val,
+                )
+                if math.isfinite(p_hybrid):
+                    p_raw = p_hybrid
+            except Exception:  # noqa: BLE001
+                pass
+        if p_raw is None and p_meta_val is not None and math.isfinite(p_meta_val):
             p_raw = p_meta_val
         if p_raw is None:
             p_raw = float(ens.predict(expert_probs, ctx))
