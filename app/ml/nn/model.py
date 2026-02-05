@@ -37,12 +37,18 @@ class GRUAttentionTabularClassifier(nn.Module):
         in_dim = num_numeric + cat_out_dim + seq_hidden
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, mlp_hidden),
+            nn.BatchNorm1d(mlp_hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(mlp_hidden, mlp_hidden),
+            nn.BatchNorm1d(mlp_hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(mlp_hidden, 1),
+            nn.Linear(mlp_hidden, mlp_hidden // 2),
+            nn.BatchNorm1d(mlp_hidden // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden // 2, 1),
         )
 
     def forward(self, cat_ids: torch.Tensor, x_num: torch.Tensor, x_seq: torch.Tensor) -> torch.Tensor:

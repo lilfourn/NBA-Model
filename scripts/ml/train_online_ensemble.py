@@ -20,7 +20,7 @@ from scripts.ops.log_decisions import PRED_LOG_DEFAULT  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
-EXPERT_COLS_DEFAULT = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb"]
+EXPERT_COLS_DEFAULT = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
 
 
 def _parse_timestamp(series: pd.Series) -> pd.Series:
@@ -156,6 +156,53 @@ def _load_outcomes(engine, df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _write_back_outcomes(
+    log_df: pd.DataFrame,
+    resolved: pd.DataFrame,
+    *,
+    path: Path,
+    only_missing: bool = True,
+) -> int:
+    if resolved.empty or "__row_id" not in resolved.columns:
+        return 0
+
+    if "actual_value" not in log_df.columns:
+        log_df["actual_value"] = pd.NA
+    if "over_label" not in log_df.columns:
+        log_df["over_label"] = pd.NA
+
+    updates = resolved.dropna(subset=["__row_id", "actual_value"]).copy()
+    if updates.empty:
+        return 0
+
+    updates["__row_id"] = updates["__row_id"].astype(int)
+    updates = updates.sort_values("__row_id").drop_duplicates(subset=["__row_id"], keep="last")
+
+    updated_rows = 0
+    for row_id_raw, actual_value, over_label in updates[["__row_id", "actual_value", "over_label"]].itertuples(index=False, name=None):
+        row_id = int(row_id_raw)
+        if row_id < 0 or row_id >= len(log_df):
+            continue
+        if only_missing and pd.notna(log_df.at[row_id, "actual_value"]):
+            continue
+
+        if actual_value is None or pd.isna(actual_value):
+            continue
+
+        log_df.at[row_id, "actual_value"] = float(actual_value)
+        log_df.at[row_id, "over_label"] = int(over_label) if over_label is not None and not pd.isna(over_label) else pd.NA
+        updated_rows += 1
+
+    if updated_rows <= 0:
+        return 0
+
+    out_df = log_df.drop(columns=["__row_id"], errors="ignore")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    out_df.to_csv(tmp_path, index=False)
+    tmp_path.replace(path)
+    return updated_rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Train an online contextual Hedge ensemble from logged predictions.")
     ap.add_argument("--database-url", default=None)
@@ -170,6 +217,11 @@ def main() -> None:
         default=2,
         help="Minimum number of non-null expert probs required per row.",
     )
+    ap.add_argument(
+        "--no-write-outcomes",
+        action="store_true",
+        help="Disable writing resolved actual_value/over_label back into prediction_log.csv.",
+    )
     args = ap.parse_args()
 
     load_env()
@@ -180,13 +232,32 @@ def main() -> None:
         print(f"Prediction log not found: {log_path}")
         return
 
-    df = pd.read_csv(log_path)
-    if df.empty:
+    raw_df = pd.read_csv(log_path)
+    if raw_df.empty:
         print("Prediction log is empty.")
         return
 
-    df["player_id"] = df.get("player_id").apply(_normalize_id)
-    df["game_id"] = df.get("game_id").apply(_normalize_id)
+    required = {"player_id", "game_id", "stat_type", "line_score"}
+    req_missing = required - set(raw_df.columns)
+    if req_missing:
+        raise SystemExit(f"Prediction log missing required columns: {sorted(req_missing)}")
+
+    raw_df = raw_df.reset_index(drop=True)
+    raw_df["__row_id"] = raw_df.index.astype(int)
+    raw_df["player_id"] = raw_df["player_id"].apply(_normalize_id)
+    raw_df["game_id"] = raw_df["game_id"].apply(_normalize_id)
+    raw_df["decision_time_parsed"] = _parse_timestamp(raw_df.get("decision_time"))
+    if raw_df["decision_time_parsed"].isna().all():
+        raw_df["decision_time_parsed"] = _parse_timestamp(raw_df.get("created_at"))
+
+    resolved_all = _load_outcomes(engine, raw_df)
+    if args.no_write_outcomes:
+        print("Outcome write-back disabled (--no-write-outcomes).")
+    else:
+        updated_rows = _write_back_outcomes(raw_df, resolved_all, path=log_path, only_missing=True)
+        print(f"Outcome write-back: updated {updated_rows} row(s) in {log_path}.")
+
+    df = raw_df.copy()
 
     experts = args.experts or EXPERT_COLS_DEFAULT
     missing = [col for col in experts if col not in df.columns]
@@ -196,15 +267,6 @@ def main() -> None:
         experts = [col for col in experts if col in df.columns]
         if not experts:
             raise SystemExit("No expert columns found in prediction log.")
-
-    required = {"player_id", "game_id", "stat_type", "line_score"}
-    req_missing = required - set(df.columns)
-    if req_missing:
-        raise SystemExit(f"Prediction log missing required columns: {sorted(req_missing)}")
-
-    df["decision_time_parsed"] = _parse_timestamp(df.get("decision_time"))
-    if df["decision_time_parsed"].isna().all():
-        df["decision_time_parsed"] = _parse_timestamp(df.get("created_at"))
 
     for col in experts:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -220,10 +282,17 @@ def main() -> None:
     df["is_live"] = df.get("is_live", False).fillna(False).astype(bool)
     df["n_eff"] = pd.to_numeric(df.get("n_eff"), errors="coerce")
 
-    joined = _load_outcomes(engine, df)
-    if joined.empty:
+    if resolved_all.empty:
         print("No outcomes available yet for logged rows.")
         return
+
+    joined = resolved_all[resolved_all["__row_id"].isin(df["__row_id"])].copy()
+    if joined.empty:
+        print("No outcomes available yet for rows eligible for ensemble training.")
+        return
+
+    for col in experts:
+        joined[col] = pd.to_numeric(joined.get(col), errors="coerce")
 
     joined = joined.sort_values("decision_time_parsed")
     ens = ContextualHedgeEnsembler(experts=list(experts), eta=float(args.eta), shrink_to_uniform=float(args.shrink))

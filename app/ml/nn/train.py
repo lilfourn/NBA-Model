@@ -154,6 +154,7 @@ def train_nn(
         cat_cardinalities=cat_cardinalities,
         cat_emb_dims=cat_emb_dims,
         seq_d_in=2,
+        dropout=0.3,
     )
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -162,6 +163,7 @@ def train_nn(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     best_loss = float("inf")
     best_state = None
@@ -169,6 +171,7 @@ def train_nn(
 
     for _ in range(epochs):
         _train_epoch(model, train_loader, optimizer, device)
+        scheduler.step()
         probs, labels = _predict(model, test_loader, device)
         eps = 1e-6
         logloss = -np.mean(labels * np.log(probs + eps) + (1 - labels) * np.log(1 - probs + eps))

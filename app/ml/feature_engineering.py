@@ -190,6 +190,11 @@ def _empty_history(league_mean: float) -> dict[str, float]:
         "recent_vs_season": 1.0,
         "minutes_trend": 1.0,
         "stat_std_5": 0.0,
+        "stat_rate_per_min": 0.0,
+        "line_vs_mean_ratio": 1.0,
+        "hot_streak_count": 0.0,
+        "cold_streak_count": 0.0,
+        "season_game_number": 0.0,
     }
 
 
@@ -307,6 +312,34 @@ def compute_history_features(
         recent5 = vals[-min(5, vals.size):]
         stat_std_5 = float(recent5.std(ddof=0))
 
+    # Stat rate per minute (efficiency): recent 5-game stat / minutes ratio.
+    stat_rate_per_min = 0.0
+    if stat_mean_5 > 0 and minutes_mean_5 > 0:
+        stat_rate_per_min = float(stat_mean_5 / minutes_mean_5)
+
+    # Line vs historical mean ratio: how aggressive is the line relative to player average.
+    line_vs_mean_ratio = 1.0
+    if hist_mean > 0:
+        line_vs_mean_ratio = float(line_score / hist_mean)
+
+    # Hot/cold streak: consecutive recent games over/under the line.
+    hot_streak_count = 0.0
+    cold_streak_count = 0.0
+    if vals.size > 0:
+        for v in reversed(vals):
+            if v > line_score:
+                hot_streak_count += 1.0
+            else:
+                break
+        for v in reversed(vals):
+            if v <= line_score:
+                cold_streak_count += 1.0
+            else:
+                break
+
+    # Season game number: how many games this player has played this season (fatigue proxy).
+    season_game_number = float(n)
+
     return {
         "hist_n": float(n),
         "hist_mean": float(hist_mean),
@@ -328,4 +361,9 @@ def compute_history_features(
         "recent_vs_season": float(recent_vs_season),
         "minutes_trend": float(minutes_trend),
         "stat_std_5": float(stat_std_5),
+        "stat_rate_per_min": float(stat_rate_per_min),
+        "line_vs_mean_ratio": float(line_vs_mean_ratio),
+        "hot_streak_count": float(hot_streak_count),
+        "cold_streak_count": float(cold_streak_count),
+        "season_game_number": float(season_game_number),
     }

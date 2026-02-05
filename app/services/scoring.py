@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
+from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs
 from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs
 from app.modeling.conformal import ConformalCalibrator
@@ -47,6 +48,7 @@ class ScoredPick:
     p_nn: float | None
     p_lr: float | None
     p_xgb: float | None
+    p_lgbm: float | None
     mu_hat: float | None
     sigma_hat: float | None
     calibration_status: str
@@ -416,10 +418,11 @@ def score_ensemble(
     nn_path = _latest_model_path(models_path, "nn_gru_attention_*.pt")
     lr_path = _latest_model_path(models_path, "baseline_logreg_*.joblib")
     xgb_path = _latest_model_path(models_path, "xgb_*.joblib")
+    lgbm_path = _latest_model_path(models_path, "lgbm_*.joblib")
 
     # Load conformal calibrators from saved models
     conformal_cals: list[ConformalCalibrator] = []
-    for _mp in [lr_path, xgb_path]:
+    for _mp in [lr_path, xgb_path, lgbm_path]:
         if _mp and _mp.exists():
             try:
                 _pl = _joblib.load(str(_mp))
@@ -536,7 +539,28 @@ def score_ensemble(
                     continue
                 p_xgb[str(proj_id)] = prob
 
-    experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb"]
+    # LightGBM expert (optional)
+    p_lgbm: dict[str, float] = {}
+    if lgbm_path:
+        try:
+            lgbm_inf = infer_lgbm_over_probs(
+                engine=engine,
+                model_path=str(lgbm_path),
+                snapshot_id=str(resolved_snapshot),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        else:
+            for idx, r in enumerate(lgbm_inf.frame.itertuples(index=False)):
+                proj_id = getattr(r, "projection_id", None)
+                if proj_id is None:
+                    continue
+                prob = float(lgbm_inf.probs[idx])
+                if not math.isfinite(prob):
+                    continue
+                p_lgbm[str(proj_id)] = prob
+
+    experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
     if Path(ensemble_weights_path).exists():
         ens = ContextualHedgeEnsembler.load(ensemble_weights_path)
     else:
@@ -555,6 +579,7 @@ def score_ensemble(
             "p_nn": _safe_prob(p_nn.get(proj_id)),
             "p_lr": _safe_prob(p_lr.get(proj_id)),
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
+            "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
@@ -596,6 +621,7 @@ def score_ensemble(
                 "p_nn": expert_probs["p_nn"],
                 "p_lr": expert_probs["p_lr"],
                 "p_xgb": expert_probs["p_xgb"],
+                "p_lgbm": expert_probs["p_lgbm"],
                 "mu_hat": float(f.get("mu_hat") or 0.0) if f else None,
                 "sigma_hat": float(f.get("sigma_hat") or 0.0) if f else None,
                 "calibration_status": status,
@@ -627,6 +653,7 @@ def score_ensemble(
             p_nn=item["p_nn"],
             p_lr=item["p_lr"],
             p_xgb=item["p_xgb"],
+            p_lgbm=item["p_lgbm"],
             mu_hat=item["mu_hat"],
             sigma_hat=item["sigma_hat"],
             calibration_status=item["calibration_status"],

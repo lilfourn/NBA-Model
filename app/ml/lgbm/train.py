@@ -9,8 +9,8 @@ from uuid import uuid4
 import joblib
 import numpy as np
 import pandas as pd
+from lightgbm import LGBMClassifier
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
-from xgboost import XGBClassifier
 
 from app.db import schema
 from app.ml.dataset import load_training_data
@@ -18,20 +18,17 @@ from app.ml.stat_mappings import stat_value_from_row
 from app.ml.train import CATEGORICAL_COLS, MIN_TRAIN_ROWS, NUMERIC_COLS, _time_split
 from app.modeling.conformal import ConformalCalibrator
 
-XGBOOST_PARAMS = {
+LGBM_PARAMS: dict[str, Any] = {
     "n_estimators": 600,
-    "max_depth": 4,
+    "max_depth": 5,
     "learning_rate": 0.05,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
-    "min_child_weight": 10,
+    "min_child_samples": 20,
     "reg_alpha": 0.5,
     "reg_lambda": 2.0,
-    "gamma": 0.1,
-    "eval_metric": "logloss",
-    "early_stopping_rounds": 30,
-    "use_label_encoder": False,
-    "verbosity": 0,
+    "num_leaves": 31,
+    "verbosity": -1,
     "random_state": 42,
 }
 
@@ -41,17 +38,6 @@ class TrainResult:
     model_path: str
     metrics: dict[str, Any]
     rows: int
-
-
-def _load_tuned_params() -> dict[str, Any] | None:
-    path = Path("data/tuning/best_params_xgb.json")
-    if not path.exists():
-        return None
-    import json
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
@@ -76,8 +62,6 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
 
     df["over"] = (df["actual_value"] > df["line_score"]).astype(int)
 
-    # One-hot encode categoricals for XGBoost (native categorical support is fragile
-    # across joblib serialization, so we stay consistent with the LR pipeline).
     df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].fillna("unknown").astype(str)
     for col in NUMERIC_COLS:
         if col not in df.columns:
@@ -93,10 +77,21 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     return X, y, df
 
 
-def train_xgboost(engine, model_dir: Path) -> TrainResult:
+def _load_tuned_params() -> dict[str, Any] | None:
+    path = Path("data/tuning/best_params_lgbm.json")
+    if not path.exists():
+        return None
+    import json
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def train_lightgbm(engine, model_dir: Path) -> TrainResult:
     df = load_training_data(engine)
     if df.empty:
-        raise RuntimeError("No training data available. Did you load NBA stats and build features?")
+        raise RuntimeError("No training data available.")
 
     X, y, df_used = _prepare_features(df)
     if df_used.empty:
@@ -104,19 +99,22 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
     if y.nunique() < 2:
         raise RuntimeError("Not enough class variety to train yet.")
     if len(df_used) < MIN_TRAIN_ROWS:
-        raise RuntimeError(f"Not enough training data available yet (rows={len(df_used)}).")
+        raise RuntimeError(f"Not enough training data (rows={len(df_used)}).")
 
     X_train, X_test, y_train, y_test = _time_split(df_used, X, y)
 
-    params = _load_tuned_params() or XGBOOST_PARAMS
-    model = XGBClassifier(**params)
+    params = _load_tuned_params() or LGBM_PARAMS
+    model = LGBMClassifier(**params)
     model.fit(
         X_train,
         y_train,
         eval_set=[(X_test, y_test)],
-        verbose=False,
+        callbacks=[
+            __import__("lightgbm").early_stopping(30, verbose=False),
+            __import__("lightgbm").log_evaluation(0),
+        ],
     )
-    print(f"XGB best iteration: {model.best_iteration} / {params.get('n_estimators', 600)}")
+    print(f"LGBM best iteration: {model.best_iteration_} / {params.get('n_estimators', 600)}")
 
     y_proba = model.predict_proba(X_test)[:, 1]
     y_pred = (y_proba >= 0.5).astype(int)
@@ -133,7 +131,7 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
 
     model_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-    model_path = model_dir / f"xgb_{timestamp}.joblib"
+    model_path = model_dir / f"lgbm_{timestamp}.joblib"
     joblib.dump(
         {
             "model": model,
@@ -152,10 +150,10 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
                 {
                     "id": run_id,
                     "created_at": datetime.now(timezone.utc),
-                    "model_name": "xgboost",
+                    "model_name": "lightgbm",
                     "train_rows": int(len(df_used)),
                     "metrics": metrics,
-                    "params": XGBOOST_PARAMS,
+                    "params": params,
                     "artifact_path": str(model_path),
                 }
             )

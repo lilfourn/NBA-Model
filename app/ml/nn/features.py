@@ -24,6 +24,7 @@ from app.ml.feature_engineering import (
 )
 from app.ml.opponent_features import (
     build_opponent_defensive_averages,
+    build_opponent_defensive_ranks,
     compute_opponent_features,
     _load_team_game_stats,
 )
@@ -340,6 +341,7 @@ def build_training_data(
     # Opponent defensive context
     team_game_stats = _load_team_game_stats(engine)
     opp_def_avgs = build_opponent_defensive_averages(team_game_stats)
+    opp_def_ranks = build_opponent_defensive_ranks(opp_def_avgs)
 
     nba_player_teams = pd.read_sql(
         text("select id as nba_player_id, team_abbreviation from nba_players"),
@@ -395,6 +397,7 @@ def build_training_data(
             stat_type=stat_type,
             opp_def_avgs=opp_def_avgs,
             is_home=is_home,
+            opp_def_ranks=opp_def_ranks,
         )
         extras.update(opp_feats)
 
@@ -522,6 +525,7 @@ def build_inference_data(
     # Opponent defensive context for inference
     team_game_stats = _load_team_game_stats(engine)
     opp_def_avgs = build_opponent_defensive_averages(team_game_stats)
+    opp_def_ranks_inf = build_opponent_defensive_ranks(opp_def_avgs)
 
     nba_player_teams_inf = pd.read_sql(
         text("select id as nba_player_id, team_abbreviation from nba_players"),
@@ -616,6 +620,7 @@ def build_inference_data(
             stat_type=stat_type_inf,
             opp_def_avgs=opp_def_avgs,
             is_home=is_home_inf,
+            opp_def_ranks=opp_def_ranks_inf,
         )
         extras.update(opp_feats_inf)
 

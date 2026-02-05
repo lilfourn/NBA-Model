@@ -22,6 +22,7 @@ from app.ml.feature_engineering import (
 )
 from app.ml.opponent_features import (
     build_opponent_defensive_averages,
+    build_opponent_defensive_ranks,
     compute_opponent_features,
     _load_team_game_stats,
 )
@@ -298,6 +299,7 @@ OPPONENT_FEATURE_COLS = [
     "opp_def_points_avg",
     "opp_def_rebounds_avg",
     "opp_def_assists_avg",
+    "opp_def_rank",
 ]
 
 
@@ -360,6 +362,7 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     # Opponent defensive context
     team_game_stats = _load_team_game_stats(engine)
     opp_def_avgs = build_opponent_defensive_averages(team_game_stats)
+    opp_def_ranks = build_opponent_defensive_ranks(opp_def_avgs)
 
     # Build player -> team abbreviation lookup from nba_players
     nba_player_teams = pd.read_sql(
@@ -481,6 +484,7 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
             stat_type=str(stat_type) if stat_type is not None else "",
             opp_def_avgs=opp_def_avgs,
             is_home=is_home,
+            opp_def_ranks=opp_def_ranks,
         )
 
         extras_rows.append({**hist_feats, **opp_feats})
@@ -524,6 +528,11 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         "stat_std_5",
         "line_move_pct",
         "line_move_late",
+        "stat_rate_per_min",
+        "line_vs_mean_ratio",
+        "hot_streak_count",
+        "cold_streak_count",
+        "season_game_number",
         *OPPONENT_FEATURE_COLS,
     ]:
         if col not in frame.columns:

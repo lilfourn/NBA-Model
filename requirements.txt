@@ -15,5 +15,8 @@ pandas
 scipy
 scikit-learn
 xgboost
+lightgbm
+shap
+optuna
 lxml
 torch

@@ -16,6 +16,7 @@ export interface ScoredPick {
   p_nn: number | null;
   p_lr: number | null;
   p_xgb: number | null;
+  p_lgbm: number | null;
   mu_hat: number | null;
   sigma_hat: number | null;
   calibration_status: string;
@@ -121,6 +122,135 @@ export async function fetchJobs(limit: number = 20): Promise<Job[]> {
 
 export async function fetchJob(jobId: string): Promise<Job> {
   const res = await fetch(`${API_URL}/api/jobs/${jobId}`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+// --- Stats / Model Metrics ---
+
+export interface TrainingRun {
+  id: string;
+  created_at: string | null;
+  model_name: string;
+  train_rows: number;
+  accuracy: number | null;
+  roc_auc: number | null;
+  logloss: number | null;
+  conformal_q_hat: number | null;
+}
+
+export interface TrainingHistoryResponse {
+  runs: TrainingRun[];
+}
+
+export interface ExpertSummary {
+  model_name: string;
+  accuracy: number | null;
+  roc_auc: number | null;
+  logloss: number | null;
+  conformal_q_hat: number | null;
+  train_rows: number;
+  created_at: string | null;
+}
+
+export interface ExpertComparisonResponse {
+  experts: ExpertSummary[];
+}
+
+export interface HitRatePoint {
+  index: number;
+  ensemble_hit_rate: number | null;
+  p_forecast_cal_hit_rate: number | null;
+  p_nn_hit_rate: number | null;
+  p_lr_hit_rate: number | null;
+  p_xgb_hit_rate: number | null;
+  p_lgbm_hit_rate: number | null;
+  date: string | null;
+}
+
+export interface HitRateResponse {
+  total_predictions: number;
+  total_resolved: number;
+  overall_hit_rate: number | null;
+  rolling: HitRatePoint[];
+}
+
+export interface CalibrationEntry {
+  stat_type: string;
+  train_rows: number | null;
+  val_rows: number | null;
+  nll_before: number | null;
+  nll_after: number | null;
+  crps_before: number | null;
+  crps_after: number | null;
+  cov90_before: number | null;
+  cov90_after: number | null;
+  pit_ks_before: number | null;
+  pit_ks_after: number | null;
+}
+
+export interface CalibrationResponse {
+  stat_types: CalibrationEntry[];
+}
+
+export interface EnsembleContext {
+  context_key: string;
+  stat_type: string;
+  regime: string;
+  neff_bucket: string;
+  weights: Record<string, number>;
+}
+
+export interface EnsembleWeightsResponse {
+  experts: string[];
+  contexts: EnsembleContext[];
+}
+
+export interface ConfidenceBin {
+  range_start: number;
+  range_end: number;
+  count: number;
+  hits: number | null;
+  misses: number | null;
+  hit_rate: number | null;
+}
+
+export interface ConfidenceDistResponse {
+  bins: ConfidenceBin[];
+}
+
+export async function fetchTrainingHistory(): Promise<TrainingHistoryResponse> {
+  const res = await fetch(`${API_URL}/api/stats/training-history`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchExpertComparison(): Promise<ExpertComparisonResponse> {
+  const res = await fetch(`${API_URL}/api/stats/expert-comparison`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchHitRate(window: number = 50): Promise<HitRateResponse> {
+  const res = await fetch(`${API_URL}/api/stats/hit-rate?window=${window}`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCalibration(): Promise<CalibrationResponse> {
+  const res = await fetch(`${API_URL}/api/stats/calibration`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchEnsembleWeights(): Promise<EnsembleWeightsResponse> {
+  const res = await fetch(`${API_URL}/api/stats/ensemble-weights`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchConfidenceDist(bins: number = 20): Promise<ConfidenceDistResponse> {
+  const res = await fetch(`${API_URL}/api/stats/confidence-dist?bins=${bins}`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }

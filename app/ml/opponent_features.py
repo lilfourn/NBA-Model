@@ -150,6 +150,38 @@ def build_opponent_defensive_averages(
     return result
 
 
+def build_opponent_defensive_ranks(
+    opp_def_avgs: dict[str, pd.DataFrame],
+) -> dict[str, dict[str, int]]:
+    """Build per-stat ordinal rank (1=fewest allowed, 30=most allowed) for each team.
+
+    Uses each team's latest available defensive average row.
+    Returns: {stat_col: {team_abbr: rank}}
+    """
+    stat_cols = [
+        "opp_def_points", "opp_def_rebounds", "opp_def_assists",
+        "opp_def_steals", "opp_def_blocks", "opp_def_turnovers",
+        "opp_def_fg3m", "opp_def_fgm",
+    ]
+    team_latest: dict[str, pd.Series] = {}
+    for team_abbr, df in opp_def_avgs.items():
+        if df.empty:
+            continue
+        team_latest[str(team_abbr)] = df.iloc[-1]
+
+    ranks: dict[str, dict[str, int]] = {}
+    for col in stat_cols:
+        vals: dict[str, float] = {}
+        for team_abbr, row in team_latest.items():
+            if col in row.index and pd.notna(row[col]):
+                vals[team_abbr] = float(row[col])
+        if not vals:
+            continue
+        sorted_teams = sorted(vals.keys(), key=lambda t: vals[t])
+        ranks[col] = {t: rank + 1 for rank, t in enumerate(sorted_teams)}
+    return ranks
+
+
 def compute_opponent_features(
     *,
     player_team_abbr: str | None,
@@ -158,6 +190,7 @@ def compute_opponent_features(
     stat_type: str,
     opp_def_avgs: dict[str, pd.DataFrame],
     is_home: int | None,
+    opp_def_ranks: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, float]:
     """Compute opponent defensive features for a single row."""
     features: dict[str, float] = {
@@ -166,6 +199,7 @@ def compute_opponent_features(
         "opp_def_points_avg": 0.0,
         "opp_def_rebounds_avg": 0.0,
         "opp_def_assists_avg": 0.0,
+        "opp_def_rank": 15.0,
     }
 
     if not opp_team_abbr or opp_team_abbr not in opp_def_avgs:
@@ -237,6 +271,17 @@ def compute_opponent_features(
                     break
             if found:
                 features["opp_def_stat_avg"] = total
+
+    # Opponent defensive rank for the primary stat component (1=best D, 30=worst D).
+    if opp_def_ranks and opp_team_abbr:
+        key = normalize_stat_type(stat_type)
+        if key:
+            components = STAT_COMPONENTS.get(key)
+            rank_col = f"opp_def_{components[0]}" if components else None
+            if rank_col and rank_col in opp_def_ranks:
+                features["opp_def_rank"] = float(
+                    opp_def_ranks[rank_col].get(opp_team_abbr, 15)
+                )
 
     return features
 

@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import joblib
 import pandas as pd
 from sqlalchemy import text
 
@@ -14,9 +15,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db.engine import get_engine  # noqa: E402
+from app.db.prediction_logs import append_prediction_rows  # noqa: E402
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs  # noqa: E402
 from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs  # noqa: E402
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs  # noqa: E402
+from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs  # noqa: E402
 from app.modeling.db_logs import load_db_game_logs  # noqa: E402
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler  # noqa: E402
@@ -225,6 +228,11 @@ def main() -> None:
     parser.add_argument("--log-decisions", action="store_true")
     parser.add_argument("--log-path", default=PRED_LOG_DEFAULT)
     parser.add_argument(
+        "--no-db-log",
+        action="store_true",
+        help="Skip inserting logged predictions into Postgres projection_predictions.",
+    )
+    parser.add_argument(
         "--log-top-only",
         action="store_true",
         help="Log only the displayed top picks (default: log all scored rows).",
@@ -269,6 +277,7 @@ def main() -> None:
     nn_path = _latest_model_path(models_dir, "nn_gru_attention_*.pt")
     lr_path = _latest_model_path(models_dir, "baseline_logreg_*.joblib")
     xgb_path = _latest_model_path(models_dir, "xgb_*.joblib")
+    lgbm_path = _latest_model_path(models_dir, "lgbm_*.joblib")
 
     calibrator = None
     if args.calibration:
@@ -380,9 +389,33 @@ def main() -> None:
                     continue
                 p_xgb[str(proj_id)] = prob
 
+    # LightGBM expert (optional)
+    p_lgbm: dict[str, float] = {}
+    if lgbm_path:
+        try:
+            lgbm_inf = infer_lgbm_over_probs(
+                engine=engine,
+                model_path=str(lgbm_path),
+                snapshot_id=str(snapshot_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"Warning: LGBM expert failed ({lgbm_path.name}): {exc.__class__.__name__}: {exc}. "
+                "Continuing without LGBM."
+            )
+        else:
+            for idx, r in enumerate(lgbm_inf.frame.itertuples(index=False)):
+                proj_id = getattr(r, "projection_id", None)
+                if proj_id is None:
+                    continue
+                prob = float(lgbm_inf.probs[idx])
+                if not math.isfinite(prob):
+                    continue
+                p_lgbm[str(proj_id)] = prob
+
     # Load conformal calibrators from saved models
     conformal_cals: list[ConformalCalibrator] = []
-    for _mp in [lr_path, xgb_path]:
+    for _mp in [lr_path, xgb_path, lgbm_path]:
         if _mp and _mp.exists():
             try:
                 _pl = joblib.load(str(_mp))
@@ -401,7 +434,7 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             pass
 
-    experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb"]
+    experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
     if Path(args.ensemble_weights).exists():
         ens = ContextualHedgeEnsembler.load(args.ensemble_weights)
     else:
@@ -421,6 +454,7 @@ def main() -> None:
             "p_nn": _safe_prob(p_nn.get(proj_id)),
             "p_lr": _safe_prob(p_lr.get(proj_id)),
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
+            "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
@@ -470,6 +504,7 @@ def main() -> None:
                 "p_nn": expert_probs["p_nn"],
                 "p_lr": expert_probs["p_lr"],
                 "p_xgb": expert_probs["p_xgb"],
+                "p_lgbm": expert_probs["p_lgbm"],
                 "mu_hat": float(f.get("mu_hat") or 0.0) if f else None,
                 "sigma_hat": float(f.get("sigma_hat") or 0.0) if f else None,
                 "calibration_status": status,
@@ -493,6 +528,7 @@ def main() -> None:
             "p_nn": item.get("p_nn"),
             "p_lr": item.get("p_lr"),
             "p_xgb": item.get("p_xgb"),
+            "p_lgbm": item.get("p_lgbm"),
         }
         item["edge"] = _compute_edge(item["prob_over"], ep, item.get("conformal_set_size"), n_eff=item.get("n_eff"))
         item["grade"] = _grade_from_edge(item["edge"])
@@ -533,6 +569,9 @@ def main() -> None:
                     "is_live": bool(item.get("is_live") or False),
                     "decision_time": decision_time,
                     "line_score": line_score,
+                    "pick": item.get("pick"),
+                    "confidence": item.get("confidence"),
+                    "prob_over": item.get("prob_over"),
                     "mu_hat": mu_hat,
                     "sigma_hat": sigma_hat,
                     "p_over_raw": p_over_raw,
@@ -541,6 +580,7 @@ def main() -> None:
                     "p_nn": item.get("p_nn"),
                     "p_lr": item.get("p_lr"),
                     "p_xgb": item.get("p_xgb"),
+                    "p_lgbm": item.get("p_lgbm"),
                     "p_final": item.get("prob_over"),
                     "model_version": item.get("model_version"),
                     "calibration_version": calibration_version,
@@ -551,6 +591,9 @@ def main() -> None:
             )
         append_prediction_log(pd.DataFrame(rows), path=args.log_path)
         print(f"\nLogged {len(rows)} predictions -> {args.log_path}")
+        if not args.no_db_log:
+            inserted = append_prediction_rows(engine, rows)
+            print(f"Logged {inserted} predictions -> projection_predictions")
 
 
 if __name__ == "__main__":

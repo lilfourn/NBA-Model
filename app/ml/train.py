@@ -64,6 +64,12 @@ NUMERIC_COLS = [
     "stat_std_5",
     "line_move_pct",
     "line_move_late",
+    "opp_def_rank",
+    "stat_rate_per_min",
+    "line_vs_mean_ratio",
+    "hot_streak_count",
+    "cold_streak_count",
+    "season_game_number",
 ]
 
 

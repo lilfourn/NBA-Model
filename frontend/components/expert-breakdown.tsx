@@ -37,6 +37,7 @@ export function ExpertBreakdown({ pick }: { pick: ScoredPick }) {
           <Bar label="Neural Net" value={pick.p_nn} />
           <Bar label="LogReg" value={pick.p_lr} />
           <Bar label="XGBoost" value={pick.p_xgb} />
+          <Bar label="LightGBM" value={pick.p_lgbm} />
         </div>
         <div className="space-y-1.5">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
