@@ -7,6 +7,7 @@ from typing import Any
 from curl_cffi import requests as curl_requests
 
 from app.clients.base import CrawlerClient
+from app.clients.shared import get_shared_cache
 from app.core.config import settings
 
 DEFAULT_HEADERS = {
@@ -32,6 +33,7 @@ def _get_client() -> CrawlerClient:
             proxy=settings.nba_stats_proxy or None,
             default_headers=DEFAULT_HEADERS,
             min_request_interval=1.0,
+            cache=get_shared_cache(),
         )
     return _client
 

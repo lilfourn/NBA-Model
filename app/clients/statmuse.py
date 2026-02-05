@@ -4,6 +4,7 @@ import re
 from urllib.parse import quote
 
 from app.clients.base import CrawlerClient
+from app.clients.shared import get_shared_cache
 from app.core.config import settings
 
 _client: CrawlerClient | None = None
@@ -27,6 +28,7 @@ def _get_client() -> CrawlerClient:
             },
             should_retry=lambda status: status in {403, 429, 500, 502, 503, 504},
             min_request_interval=1.5,
+            cache=get_shared_cache(),
         )
     return _client
 

@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from app.clients.base import CrawlerClient
+from app.clients.shared import get_shared_cache
 from app.core.config import settings
 
 PLAYER_LINK_PATTERN = re.compile(r"/players/[a-z]/[a-z0-9]+\.html")
@@ -30,6 +31,7 @@ def _get_client() -> CrawlerClient:
             },
             should_retry=lambda status: status in {403, 429, 500, 502, 503, 504},
             min_request_interval=2.0,
+            cache=get_shared_cache(),
         )
     return _client
 
