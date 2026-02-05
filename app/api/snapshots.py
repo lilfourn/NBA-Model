@@ -1,16 +1,16 @@
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
 
-from app.db.engine import get_engine
+from app.db.engine import get_async_engine
 
 router = APIRouter()
 
 
 @router.get("/metrics/snapshots", tags=["metrics"])
-def snapshots_metrics(limit: int = Query(10, ge=1, le=100)) -> dict:
-    engine = get_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(
+async def snapshots_metrics(limit: int = Query(10, ge=1, le=100)) -> dict:
+    engine = get_async_engine()
+    async with engine.connect() as conn:
+        result = await conn.execute(
             text(
                 """
                 select id, fetched_at, data_count, included_count, snapshot_path
@@ -20,20 +20,21 @@ def snapshots_metrics(limit: int = Query(10, ge=1, le=100)) -> dict:
                 """
             ),
             {"limit": limit},
-        ).all()
+        )
+        rows = result.all()
 
-        if not rows:
-            raise HTTPException(status_code=404, detail="No snapshots loaded")
+    if not rows:
+        raise HTTPException(status_code=404, detail="No snapshots loaded")
 
-        snapshots = [
-            {
-                "id": str(row.id),
-                "fetched_at": row.fetched_at.isoformat() if row.fetched_at else None,
-                "data_count": row.data_count,
-                "included_count": row.included_count,
-                "snapshot_path": row.snapshot_path,
-            }
-            for row in rows
-        ]
+    snapshots = [
+        {
+            "id": str(row.id),
+            "fetched_at": row.fetched_at.isoformat() if row.fetched_at else None,
+            "data_count": row.data_count,
+            "included_count": row.included_count,
+            "snapshot_path": row.snapshot_path,
+        }
+        for row in rows
+    ]
 
-        return {"count": len(snapshots), "snapshots": snapshots}
+    return {"count": len(snapshots), "snapshots": snapshots}

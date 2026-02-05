@@ -603,8 +603,13 @@ def main() -> None:
         append_prediction_log(pd.DataFrame(rows), path=args.log_path)
         print(f"\nLogged {len(rows)} predictions -> {args.log_path}")
         if not args.no_db_log:
-            inserted = append_prediction_rows(engine, rows)
-            print(f"Logged {inserted} predictions -> projection_predictions")
+            try:
+                inserted = append_prediction_rows(engine, rows)
+                print(f"Logged {inserted} predictions -> projection_predictions")
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                print(f"WARNING: DB prediction logging failed: {exc}")
 
 
 if __name__ == "__main__":

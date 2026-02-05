@@ -1,23 +1,23 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import text
 
-from app.db.engine import get_engine
+from app.db.engine import get_async_engine
 
 router = APIRouter()
 
 
 @router.get("/metrics/line-movement", tags=["metrics"])
-def line_movement_metrics() -> dict:
-    engine = get_engine()
-    with engine.connect() as conn:
-        latest = conn.execute(
+async def line_movement_metrics() -> dict:
+    engine = get_async_engine()
+    async with engine.connect() as conn:
+        latest = (await conn.execute(
             text("select id, fetched_at from snapshots order by fetched_at desc limit 1")
-        ).first()
+        )).first()
         if not latest:
             raise HTTPException(status_code=404, detail="No snapshots loaded")
 
         snapshot_id = latest.id
-        rows = conn.execute(
+        rows = (await conn.execute(
             text(
                 """
                 select line_movement, count(*)
@@ -28,14 +28,14 @@ def line_movement_metrics() -> dict:
                 """
             ),
             {"sid": snapshot_id},
-        ).all()
+        )).all()
 
-        counts = {str(row[0] or "null"): row[1] for row in rows}
-        total = sum(counts.values())
+    counts = {str(row[0] or "null"): row[1] for row in rows}
+    total = sum(counts.values())
 
-        return {
-            "snapshot_id": str(snapshot_id),
-            "fetched_at": latest.fetched_at.isoformat() if latest.fetched_at else None,
-            "total": total,
-            "counts": counts,
-        }
+    return {
+        "snapshot_id": str(snapshot_id),
+        "fetched_at": latest.fetched_at.isoformat() if latest.fetched_at else None,
+        "total": total,
+        "counts": counts,
+    }

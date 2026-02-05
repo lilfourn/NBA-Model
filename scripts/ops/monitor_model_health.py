@@ -32,18 +32,31 @@ def _logloss(y: int, p: float) -> float:
     return -(y * math.log(p) + (1 - y) * math.log(1.0 - p))
 
 
-def _load_prediction_log(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
+def _load_resolved_predictions(engine, *, days_back: int = 90) -> pd.DataFrame:
+    """Load resolved predictions directly from DB."""
+    from sqlalchemy import text as sa_text
+    df = pd.read_sql(
+        sa_text(
+            """
+            select
+                prob_over as p_final,
+                p_forecast_cal, p_nn, p_lr, p_xgb, p_lgbm,
+                over_label,
+                coalesce(decision_time, created_at) as decision_time
+            from projection_predictions
+            where over_label is not null
+              and actual_value is not null
+              and coalesce(decision_time, created_at) >= now() - (:days_back * interval '1 day')
+            order by coalesce(decision_time, created_at) asc
+            """
+        ),
+        engine,
+        params={"days_back": int(max(1, days_back))},
+    )
     for col in EXPERT_COLS + ["p_final"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
-
-
-def _load_outcomes(engine, df: pd.DataFrame) -> pd.DataFrame:
-    """Lightweight outcome join — reuses logic from train_online_ensemble."""
-    from scripts.ml.train_online_ensemble import _load_outcomes
-    return _load_outcomes(engine, df)
 
 
 def _check_rolling_metrics(
@@ -141,7 +154,7 @@ def _check_ensemble_weights(weights_path: str) -> list[dict]:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Monitor model health from prediction log.")
     ap.add_argument("--database-url", default=None)
-    ap.add_argument("--log-path", default="data/monitoring/prediction_log.csv")
+    ap.add_argument("--days-back", type=int, default=90)
     ap.add_argument("--ensemble-weights", default="models/ensemble_weights.json")
     ap.add_argument("--output", default="data/reports/model_health.json")
     ap.add_argument("--alert-email", action="store_true", help="Send email if alerts fire.")
@@ -149,18 +162,8 @@ def main() -> None:
 
     load_env()
 
-    log_path = Path(args.log_path)
-    if not log_path.exists():
-        print(f"No prediction log at {log_path}")
-        return
-
-    df = _load_prediction_log(str(log_path))
-    if df.empty:
-        print("Prediction log is empty.")
-        return
-
     engine = get_engine(args.database_url)
-    joined = _load_outcomes(engine, df)
+    joined = _load_resolved_predictions(engine, days_back=args.days_back)
 
     all_alerts: list[dict] = []
 
@@ -184,7 +187,7 @@ def main() -> None:
     all_alerts.extend(weight_alerts)
 
     report = {
-        "prediction_log_rows": len(df),
+        "prediction_log_rows": len(joined),
         "outcome_rows": len(joined) if not joined.empty else 0,
         "rolling_window": ROLLING_WINDOW,
         "expert_metrics": expert_metrics,

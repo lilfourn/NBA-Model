@@ -154,7 +154,7 @@ docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -
 ensemble_status=${PIPESTATUS[0]}
 
 docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
-  python -m scripts.ops.monitor_model_health --log-path data/monitoring/prediction_log.csv --alert-email \
+  python -m scripts.ops.monitor_model_health --alert-email \
   2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"
 # Health monitoring is advisory; don't fail the pipeline on it.
 set -e

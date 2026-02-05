@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from pathlib import Path
@@ -8,21 +9,20 @@ import pandas as pd
 from fastapi import APIRouter, Query
 from sqlalchemy import text
 
-from app.db.engine import get_engine
+from app.db.engine import get_async_engine, get_engine
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
-PRED_LOG_PATH = Path("data/monitoring/prediction_log.csv")
 ENSEMBLE_WEIGHTS_PATH = Path("models/ensemble_weights.json")
 CALIBRATION_DIR = Path("data/calibration")
 EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
 
 
 @router.get("/training-history")
-def training_history() -> dict:
-    engine = get_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(
+async def training_history() -> dict:
+    engine = get_async_engine()
+    async with engine.connect() as conn:
+        result = await conn.execute(
             text(
                 """
                 select id, created_at, model_name, train_rows, metrics, params
@@ -30,7 +30,8 @@ def training_history() -> dict:
                 order by created_at asc
                 """
             )
-        ).all()
+        )
+        rows = result.all()
 
     runs = []
     for r in rows:
@@ -51,10 +52,10 @@ def training_history() -> dict:
 
 
 @router.get("/expert-comparison")
-def expert_comparison() -> dict:
-    engine = get_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(
+async def expert_comparison() -> dict:
+    engine = get_async_engine()
+    async with engine.connect() as conn:
+        result = await conn.execute(
             text(
                 """
                 select distinct on (model_name)
@@ -63,7 +64,8 @@ def expert_comparison() -> dict:
                 order by model_name, created_at desc
                 """
             )
-        ).all()
+        )
+        rows = result.all()
 
     experts = []
     for r in rows:
@@ -82,17 +84,7 @@ def expert_comparison() -> dict:
     return {"experts": experts}
 
 
-def _load_prediction_log_csv() -> pd.DataFrame | None:
-    if not PRED_LOG_PATH.exists():
-        return None
-    df = pd.read_csv(PRED_LOG_PATH)
-    if df.empty:
-        return None
-    return df
-
-
-def _load_prediction_records() -> pd.DataFrame | None:
-    # Prefer canonical DB records; fallback to legacy CSV log for local/dev usage.
+def _load_prediction_records_sync() -> pd.DataFrame | None:
     try:
         engine = get_engine()
         df = pd.read_sql(
@@ -118,12 +110,12 @@ def _load_prediction_records() -> pd.DataFrame | None:
             return df
     except Exception:  # noqa: BLE001
         pass
-    return _load_prediction_log_csv()
+    return None
 
 
 @router.get("/hit-rate")
-def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
-    df = _load_prediction_records()
+async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
+    df = await asyncio.to_thread(_load_prediction_records_sync)
     if df is None:
         return {"total_predictions": 0, "total_resolved": 0, "overall_hit_rate": None, "rolling": []}
 
@@ -209,7 +201,7 @@ def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
 
 
 @router.get("/calibration")
-def calibration() -> dict:
+async def calibration() -> dict:
     if not CALIBRATION_DIR.exists():
         return {"stat_types": []}
 
@@ -242,7 +234,7 @@ def calibration() -> dict:
 
 
 @router.get("/ensemble-weights")
-def ensemble_weights() -> dict:
+async def ensemble_weights() -> dict:
     if not ENSEMBLE_WEIGHTS_PATH.exists():
         return {"experts": [], "contexts": []}
 
@@ -274,8 +266,8 @@ def ensemble_weights() -> dict:
 
 
 @router.get("/confidence-dist")
-def confidence_dist(bins: int = Query(20, ge=5, le=50)) -> dict:
-    df = _load_prediction_records()
+async def confidence_dist(bins: int = Query(20, ge=5, le=50)) -> dict:
+    df = await asyncio.to_thread(_load_prediction_records_sync)
     if df is None:
         return {"bins": []}
 

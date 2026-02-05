@@ -200,9 +200,24 @@ def append_prediction_rows(engine: Engine, rows: list[dict[str, Any]]) -> int:
     if not prepared:
         return 0
 
-    with engine.begin() as conn:
-        conn.execute(pg_insert(schema.projection_predictions).values(prepared))
-    return len(prepared)
+    batch_size = 100
+    inserted = 0
+    for i in range(0, len(prepared), batch_size):
+        batch = prepared[i : i + batch_size]
+        try:
+            with engine.begin() as conn:
+                conn.execute(pg_insert(schema.projection_predictions).values(batch))
+            inserted += len(batch)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[prediction_logs] batch {i//batch_size} failed ({len(batch)} rows): {exc}")
+            for row in batch:
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(pg_insert(schema.projection_predictions).values([row]))
+                    inserted += 1
+                except Exception as row_exc:  # noqa: BLE001
+                    print(f"[prediction_logs] row {row.get('projection_id')} failed: {row_exc}")
+    return inserted
 
 
 def _resolve_over_under_outcome(*, line_score: float, actual_value: float) -> tuple[int, str]:
