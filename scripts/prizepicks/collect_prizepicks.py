@@ -11,6 +11,7 @@ from app.clients.logging import log_run_summary, log_validation, set_log_path  #
 from app.clients.prizepicks import fetch_projections  # noqa: E402
 from app.collectors.snapshots import write_snapshot  # noqa: E402
 from app.collectors.validators import validate_prizepicks_response  # noqa: E402
+from app.core.config import settings  # noqa: E402
 from app.db.engine import get_engine  # noqa: E402
 from app.db.feature_builder import build_projection_features  # noqa: E402
 from app.db.prizepicks_loader import load_snapshot  # noqa: E402
@@ -39,7 +40,7 @@ def main() -> None:
     import time as _time
     _start = _time.monotonic()
 
-    set_log_path("logs/collection.jsonl")
+    set_log_path(settings.collection_log_path)
 
     payload = fetch_projections(per_page=args.per_page)
 

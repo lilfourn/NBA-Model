@@ -1,0 +1,2 @@
+{"timestamp": "2026-02-05T23:15:09.200078+00:00", "n_updates": 433, "hedge_avg": {"p_forecast_cal": 0.1133, "p_lgbm": 0.3076, "p_lr": 0.1385, "p_nn": 0.1329, "p_xgb": 0.3076}}
+{"timestamp": "2026-02-05T23:17:02.821311+00:00", "n_updates": 433, "hedge_avg": {"p_forecast_cal": 0.1133, "p_lgbm": 0.3076, "p_lr": 0.1385, "p_nn": 0.1329, "p_xgb": 0.3076}, "thompson_avg": {"p_forecast_cal": 0.5368, "p_lgbm": 0.5, "p_lr": 0.5328, "p_nn": 0.574, "p_xgb": 0.5}}

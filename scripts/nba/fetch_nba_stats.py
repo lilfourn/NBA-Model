@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
 
 from app.clients.logging import log_run_summary, set_log_path  # noqa: E402
 from app.clients.nba_stats import fetch_league_game_log  # noqa: E402
+from app.core.config import settings  # noqa: E402
 from app.db.engine import get_engine  # noqa: E402
 from app.db.nba_loader import load_league_game_logs  # noqa: E402
 
@@ -36,7 +37,7 @@ def main() -> None:
     import time as _time
     _start = _time.monotonic()
 
-    set_log_path("logs/collection.jsonl")
+    set_log_path(settings.collection_log_path)
 
     season = args.season or os.getenv("NBA_SEASON") or current_season()
 

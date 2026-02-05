@@ -212,6 +212,118 @@ Log rotation (delete logs older than 7 days):
 
 Email alerts on failures are sent from `scripts/cron_collect.sh` and `scripts/cron_train.sh` using `scripts/ops/send_email.py`.
 
+## Modal Serverless (Neon + Cron)
+
+`modal_app.py` mirrors the two host cron pipelines on Modal:
+
+- `collect_every_3h` -> every 3 hours (America/Chicago):
+  - runs migrations
+  - collects PrizePicks snapshot
+  - scores/logs ensemble predictions
+- `train_daily` -> daily 14:00 (America/Chicago):
+  - runs migrations
+  - refreshes NBA stats
+  - resolves outcomes
+  - trains LR/NN/XGB/LGBM/meta/ensemble
+  - runs model health report
+- `api` -> FastAPI ASGI web endpoint (autoscaling serverless API URL)
+
+Both jobs use a persistent Modal Volume (`nba-stats-state`) for `models/`, `data/`, and `logs/`.
+
+### 1) Create Modal Secret (Neon + pipeline env)
+
+Create one secret containing your Neon DB URL and required runtime env vars:
+
+```bash
+modal secret create nba-stats-env \
+  DATABASE_URL="postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require" \
+  CORS_ALLOW_ORIGINS="https://your-frontend-domain.com,http://localhost:3000" \
+  PRIZEPICKS_API_URL="http://partner-api.prizepicks.com" \
+  LEAGUE_ID=7 \
+  SMTP_HOST="smtp.gmail.com" \
+  SMTP_PORT=587 \
+  SMTP_USER="your_email@gmail.com" \
+  SMTP_PASSWORD="your_app_password" \
+  SMTP_TO="you@example.com"
+```
+
+If you prefer `NEON_DATABASE_URL`, `modal_app.py` maps it to `DATABASE_URL` automatically.
+
+`modal_app.py` enforces secure TLS config in `DATABASE_URL` by requiring an
+`sslmode` query param with one of:
+
+- `require`
+- `verify-ca`
+- `verify-full`
+
+Override only if absolutely necessary by setting `MODAL_ENFORCE_DB_SSLMODE=0`.
+
+### 2) Deploy Modal App
+
+```bash
+modal deploy modal_app.py
+```
+
+### 3) API endpoint (Modal web URL)
+
+Get the deployed API URL:
+
+```bash
+modal run modal_app.py::api_url
+```
+
+API scaling knobs (optional env vars before deploy):
+
+- `MODAL_API_MIN_CONTAINERS=0` (default, scale to zero for minimal idle CPU)
+- `MODAL_API_MIN_CONTAINERS=1` (keep one warm container always ready)
+- `MODAL_API_MAX_CONTAINERS=3` (default max horizontal scale)
+- `MODAL_API_CONCURRENCY=100` (requests/container)
+- `MODAL_API_SCALEDOWN_WINDOW_SECONDS=300` (idle window before scale down)
+
+### 4) Validate GPU runtime (optional)
+
+```bash
+modal run modal_app.py::gpu_check
+```
+
+`gpu_check` intentionally skips DB preflight so you can validate CUDA/GPU access
+before setting all Neon env vars.
+
+### 5) Run on-demand jobs (optional)
+
+```bash
+modal run modal_app.py::collect_now
+```
+
+```bash
+modal run modal_app.py::train_now
+```
+
+## Local API In Background (Unique Port)
+
+Start one background API process on a free port (auto-selected):
+
+```bash
+./scripts/ops/run_api_background.sh
+```
+
+The script prints the URL, PID, and log path, and writes:
+
+- `logs/api_latest.port`
+- `logs/api_latest.pid`
+
+Stop the background API:
+
+```bash
+./scripts/ops/stop_api_background.sh
+```
+
+Stop a specific port instance:
+
+```bash
+./scripts/ops/stop_api_background.sh 8123
+```
+
 ## Gmail SMTP Alerts
 
 Set the following in `.env` (use a Gmail App Password):

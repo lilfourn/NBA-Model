@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     app_name: str = "NBA Stats API"
     environment: str = "development"
     log_level: str = "INFO"
+    cors_allow_origins: str = Field(default="http://localhost:3000", validation_alias="CORS_ALLOW_ORIGINS")
     prizepicks_api_url: str = Field(
         default="http://partner-api.prizepicks.com",
         validation_alias="PRIZEPICKS_API_URL",
@@ -114,6 +115,10 @@ class Settings(BaseSettings):
     collection_log_path: str = Field(default="logs/collection.jsonl", validation_alias="COLLECTION_LOG_PATH")
 
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
 
     model_config = SettingsConfigDict(
         env_file=".env",
