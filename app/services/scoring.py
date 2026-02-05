@@ -102,22 +102,28 @@ class ScoringResult:
 # --- Probability shrinkage ---
 # Real sports betting edges are small.  Even the sharpest models rarely
 # exceed 60-65% true probability.  Raw model outputs of 99%+ are almost
-# certainly overfit.  We shrink toward 0.5 using a Beta-prior blend.
+# certainly overfit.  We shrink toward the empirical base rate using a
+# Beta-prior blend.
 #
-# shrunk = (1 - k) * raw + k * 0.5   where k depends on n_eff.
+# shrunk = (1 - k) * raw + k * SHRINK_ANCHOR   where k depends on n_eff.
 # With n_eff >= 30 games of history, k = SHRINK_MIN (modest pull).
-# With little data, k = SHRINK_MAX (heavy pull toward 50/50).
-SHRINK_MIN = 0.10   # even best-data picks get 10% pull toward 0.5
-SHRINK_MAX = 0.35   # low-data picks get 35% pull
+# With little data, k = SHRINK_MAX (heavy pull toward prior).
+#
+# SHRINK_ANCHOR: empirical OVER base rate from training data (~42%).
+# Shrinking toward 0.5 when the true base rate is lower inflates OVER
+# predictions and destroys calibration.
+SHRINK_ANCHOR = 0.42
+SHRINK_MIN = 0.05   # best-data picks: 5% pull (models are already calibrated)
+SHRINK_MAX = 0.25   # low-data picks: 25% pull toward base rate
 
 
 def shrink_probability(p: float, n_eff: float | None = None) -> float:
-    """Shrink a probability toward 0.5 based on data quality."""
+    """Shrink a probability toward empirical base rate based on data quality."""
     if n_eff is not None and n_eff > 0:
         k = SHRINK_MAX - (SHRINK_MAX - SHRINK_MIN) * min(1.0, n_eff / 30.0)
     else:
         k = SHRINK_MAX
-    return (1.0 - k) * p + k * 0.5
+    return (1.0 - k) * p + k * SHRINK_ANCHOR
 
 
 def _compute_edge(

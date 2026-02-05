@@ -47,18 +47,22 @@ def test_max_weight_absent_when_empty() -> None:
 
 
 def test_shrinkage_preserves_direction() -> None:
-    """Shrinkage should never flip OVER to UNDER or vice versa."""
-    for p_raw in [0.51, 0.55, 0.60, 0.70, 0.80, 0.90, 0.99]:
+    """Shrinkage should pull toward anchor (0.42) but not flip far predictions."""
+    # Strong OVER predictions stay above anchor
+    for p_raw in [0.60, 0.70, 0.80, 0.90, 0.99]:
         p_shrunk = shrink_probability(p_raw, n_eff=None)
-        assert p_shrunk >= 0.5, f"OVER p={p_raw} flipped to {p_shrunk}"
-    for p_raw in [0.49, 0.45, 0.40, 0.30, 0.20, 0.10, 0.01]:
+        assert p_shrunk > 0.42, f"Strong OVER p={p_raw} pulled below anchor to {p_shrunk}"
+    # Strong UNDER predictions stay below anchor
+    for p_raw in [0.30, 0.20, 0.10, 0.01]:
         p_shrunk = shrink_probability(p_raw, n_eff=None)
-        assert p_shrunk <= 0.5, f"UNDER p={p_raw} flipped to {p_shrunk}"
+        assert p_shrunk < 0.42, f"Strong UNDER p={p_raw} pulled above anchor to {p_shrunk}"
 
 
-def test_shrinkage_at_half_stays_half() -> None:
-    p = shrink_probability(0.5, n_eff=10.0)
-    assert abs(p - 0.5) < 1e-9
+def test_shrinkage_at_anchor_stays_at_anchor() -> None:
+    """Shrinking the anchor value should return the anchor itself."""
+    from app.services.scoring import SHRINK_ANCHOR
+    p = shrink_probability(SHRINK_ANCHOR, n_eff=10.0)
+    assert abs(p - SHRINK_ANCHOR) < 1e-9
 
 
 def test_uniform_weights_balanced_output() -> None:
@@ -71,7 +75,8 @@ def test_uniform_weights_balanced_output() -> None:
 
 
 def test_reduced_shrinkage_values() -> None:
-    """Verify shrinkage constants are in the reduced range."""
-    from app.services.scoring import SHRINK_MIN, SHRINK_MAX
-    assert SHRINK_MIN == 0.10
-    assert SHRINK_MAX == 0.35
+    """Verify shrinkage constants use base-rate anchor."""
+    from app.services.scoring import SHRINK_MIN, SHRINK_MAX, SHRINK_ANCHOR
+    assert SHRINK_MIN == 0.05
+    assert SHRINK_MAX == 0.25
+    assert SHRINK_ANCHOR == 0.42

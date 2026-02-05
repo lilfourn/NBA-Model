@@ -17,3 +17,4 @@ shap
 optuna
 lxml
 torch
+matplotlib

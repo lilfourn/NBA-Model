@@ -135,7 +135,7 @@ class ThompsonSamplingEnsembler:
 
         for e in self.experts:
             p = expert_probs.get(e)
-            if p is None:
+            if p is None or (isinstance(p, float) and not np.isfinite(p)):
                 continue
             p = float(np.clip(p, EPS, 1.0 - EPS))
             reward = 1.0 - abs(y_f - p)

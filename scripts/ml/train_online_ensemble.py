@@ -493,24 +493,30 @@ def main() -> None:
         hedge_weights = ens.to_state_dict().get("weights", {})
         thompson_avg = None
         if ts.n_updates > 0:
-            # Get average Thompson weights across all contexts
+            # Get average Thompson weights across all contexts using alpha/beta
             ts_state = ts.to_state_dict()
+            alpha_dict = ts_state.get("alpha", {})
+            beta_dict = ts_state.get("beta", {})
             all_experts_set: set[str] = set()
-            for ctx_data in ts_state.get("posteriors", {}).values():
-                all_experts_set.update(ctx_data.keys())
+            for ctx_alpha in alpha_dict.values():
+                all_experts_set.update(ctx_alpha.keys())
             if all_experts_set:
                 thompson_avg = {}
                 for e in sorted(all_experts_set):
-                    alphas = []
-                    betas = []
-                    for ctx_data in ts_state.get("posteriors", {}).values():
-                        if e in ctx_data:
-                            alphas.append(ctx_data[e]["alpha"])
-                            betas.append(ctx_data[e]["beta"])
-                    if alphas:
-                        mean_alpha = sum(alphas) / len(alphas)
-                        mean_beta = sum(betas) / len(betas)
-                        thompson_avg[e] = mean_alpha / (mean_alpha + mean_beta)
+                    a_vals = []
+                    b_vals = []
+                    for ctx_key in alpha_dict:
+                        a = alpha_dict[ctx_key].get(e)
+                        b = beta_dict.get(ctx_key, {}).get(e)
+                        if a is not None and b is not None:
+                            import math
+                            if math.isfinite(a) and math.isfinite(b) and (a + b) > 0:
+                                a_vals.append(a)
+                                b_vals.append(b)
+                    if a_vals:
+                        mean_a = sum(a_vals) / len(a_vals)
+                        mean_b = sum(b_vals) / len(b_vals)
+                        thompson_avg[e] = mean_a / (mean_a + mean_b)
 
         log_weights(
             hedge_weights=hedge_weights if isinstance(hedge_weights, dict) else None,
