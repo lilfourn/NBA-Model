@@ -48,6 +48,13 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
         df = df[df["in_game"].fillna(False) == False]  # noqa: E712
 
     df["over"] = (df["actual_value"] > df["line_score"]).astype(int)
+
+    # Deduplicate: keep earliest snapshot per player+game+stat to prevent
+    # the same prediction leaking across folds via multiple snapshots.
+    dedup_cols = ["player_id", "nba_game_id", "stat_type"]
+    if all(c in df.columns for c in dedup_cols):
+        df = df.sort_values("fetched_at").drop_duplicates(subset=dedup_cols, keep="first")
+
     df["_sort_ts"] = pd.to_datetime(df["fetched_at"], errors="coerce")
     df = df.dropna(subset=["_sort_ts"]).sort_values("_sort_ts").reset_index(drop=True)
 
