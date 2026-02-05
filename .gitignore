@@ -28,5 +28,6 @@ data/monitoring/
 data/calibration/
 data/fallback/
 data/official/
+data/cache/
 data/player_sources.jsonl
 data/nba_stats_season_checkpoint.json
