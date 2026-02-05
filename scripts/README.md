@@ -11,6 +11,8 @@ The `scripts/` directory is organized by domain:
 
 ## Stable Entry Points
 
-For convenience and backwards compatibility, the old paths (e.g. `scripts/train_nn_model.py`)
-still exist as thin wrappers that call into the organized subpackages above.
+Run scripts as modules from the repo root, for example:
 
+- `python -m scripts.prizepicks.collect_prizepicks`
+- `python -m scripts.nba.fetch_nba_stats --date-from 2026-02-01 --date-to 2026-02-03`
+- `python -m scripts.ml.train_nn_model`

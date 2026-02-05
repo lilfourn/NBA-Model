@@ -8,7 +8,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.modeling.time_utils import central_date_range  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def main() -> None:
@@ -37,7 +37,7 @@ def main() -> None:
         run(
             [
                 sys.executable,
-                str(ROOT / "scripts" / "fetch_nba_stats.py"),
+                str(ROOT / "scripts" / "nba" / "fetch_nba_stats.py"),
                 "--date-from",
                 date_from,
                 "--date-to",
@@ -48,7 +48,7 @@ def main() -> None:
 
     if not args.skip_train:
         run(
-            [sys.executable, str(ROOT / "scripts" / "train_nn_model.py")],
+            [sys.executable, str(ROOT / "scripts" / "ml" / "train_nn_model.py")],
             check=False,
         )
 
@@ -56,7 +56,7 @@ def main() -> None:
         run(
             [
                 sys.executable,
-                str(ROOT / "scripts" / "run_top_picks_nn.py"),
+                str(ROOT / "scripts" / "ml" / "run_top_picks_nn.py"),
                 "--top",
                 str(args.top),
             ],

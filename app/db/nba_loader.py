@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 
 from app.db import schema
+from app.ml.feature_engineering import clear_gamelog_frame_cache
 from app.utils.names import normalize_name
 
 MAX_QUERY_PARAMS = 60000
@@ -204,4 +205,5 @@ def load_league_game_logs(rows: list[dict[str, Any]], *, engine: Engine) -> dict
             ),
         }
 
+    clear_gamelog_frame_cache(str(engine.url))
     return counts

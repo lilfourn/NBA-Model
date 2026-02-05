@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
 from app.db.engine import get_engine  # noqa: E402
 from app.db.nba_loader import load_league_game_logs  # noqa: E402
 from app.clients.nba_stats import fetch_league_game_log  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def _month_ranges(start: date, end: date) -> list[tuple[date, date]]:

@@ -9,14 +9,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db.engine import get_engine  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def _print_counts(conn) -> None:
     proj_counts = conn.execute(
         text(
             """
-            select lower(coalesce(attributes->>'odds_type','standard')) as odds_type, count(*)
+            select
+                case
+                    when coalesce(odds_type, 0) = 0 then 'standard'
+                    when odds_type = 1 then 'goblin'
+                    when odds_type = 2 then 'demon'
+                    else lower(coalesce(attributes->>'odds_type', 'unknown'))
+                end as odds_type,
+                count(*)
             from projections
             group by 1
             order by 2 desc
@@ -26,7 +33,14 @@ def _print_counts(conn) -> None:
     pf_counts = conn.execute(
         text(
             """
-            select lower(coalesce(p.attributes->>'odds_type','standard')) as odds_type, count(*)
+            select
+                case
+                    when coalesce(p.odds_type, 0) = 0 then 'standard'
+                    when p.odds_type = 1 then 'goblin'
+                    when p.odds_type = 2 then 'demon'
+                    else lower(coalesce(p.attributes->>'odds_type', 'unknown'))
+                end as odds_type,
+                count(*)
             from projection_features pf
             join projections p
               on p.snapshot_id = pf.snapshot_id
@@ -68,7 +82,14 @@ def main() -> None:
                 using projections p
                 where p.snapshot_id = pf.snapshot_id
                   and p.projection_id = pf.projection_id
-                  and lower(coalesce(p.attributes->>'odds_type','standard')) <> 'standard'
+                  and coalesce(
+                        p.odds_type,
+                        case lower(coalesce(p.attributes->>'odds_type', 'standard'))
+                            when 'goblin' then 1
+                            when 'demon' then 2
+                            else 0
+                        end
+                    ) <> 0
                 """
             )
         ).rowcount
@@ -77,7 +98,14 @@ def main() -> None:
             text(
                 """
                 delete from projections p
-                where lower(coalesce(p.attributes->>'odds_type','standard')) <> 'standard'
+                where coalesce(
+                    p.odds_type,
+                    case lower(coalesce(p.attributes->>'odds_type', 'standard'))
+                        when 'goblin' then 1
+                        when 'demon' then 2
+                        else 0
+                    end
+                ) <> 0
                 """
             )
         ).rowcount

@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
 from sqlalchemy import text  # noqa: E402
 from app.db.engine import get_engine  # noqa: E402
 from app.ml.nn.train import train_nn  # noqa: E402
-from scripts.train_baseline_model import load_env, report_training_data_state  # noqa: E402
+from scripts.ml.train_baseline_model import load_env, report_training_data_state  # noqa: E402
 
 
 def report_nn_data_state(engine) -> None:

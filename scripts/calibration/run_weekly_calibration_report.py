@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def _norm_cdf_np(z: np.ndarray) -> np.ndarray:

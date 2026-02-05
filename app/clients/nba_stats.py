@@ -124,3 +124,80 @@ def fetch_league_game_log(
         },
     )
     return _extract_rows(payload)
+
+
+def fetch_shot_chart_detail(
+    *,
+    game_id: str,
+    season: str,
+    season_type: str = "Regular Season",
+    player_id: str = "0",
+    team_id: str = "0",
+    league_id: str = "00",
+    context_measure: str = "FGA",
+) -> list[dict[str, Any]]:
+    """
+    Fetch shot chart rows for a single game/player (player_id=0 returns all players).
+
+    This is used for derived markets like Dunks, where we count made dunk attempts
+    from ACTION_TYPE.
+    """
+    params: dict[str, Any] = {
+        "AheadBehind": "",
+        "CFID": "33",
+        "CFPARAMS": season,
+        "ClutchTime": "",
+        "Conference": "",
+        "ContextFilter": "",
+        "ContextMeasure": context_measure,
+        "DateFrom": "",
+        "DateTo": "",
+        "Division": "",
+        "EndPeriod": "10",
+        "EndRange": "28800",
+        "GROUP_ID": "",
+        "GameEventID": "",
+        "GameID": game_id,
+        "GameSegment": "",
+        "LastNGames": "0",
+        "LeagueID": league_id,
+        "Location": "",
+        "Month": "0",
+        "OnOff": "",
+        "OpponentTeamID": "0",
+        "Outcome": "",
+        "Period": "0",
+        "PlayerID": player_id,
+        "PlayerPosition": "",
+        "PointDiff": "",
+        "Position": "",
+        "RangeType": "0",
+        "RookieYear": "",
+        "Season": season,
+        "SeasonSegment": "",
+        "SeasonType": season_type,
+        "StartPeriod": "1",
+        "StartRange": "0",
+        "TeamID": team_id,
+        "VsConference": "",
+        "VsDivision": "",
+        "VsPlayerID1": "",
+        "VsPlayerID2": "",
+        "VsPlayerID3": "",
+        "VsPlayerID4": "",
+        "VsPlayerID5": "",
+        "VsTeamID": "",
+    }
+    payload = _request("shotchartdetail", params)
+    result_sets = payload.get("resultSets") or payload.get("resultSet") or []
+    if isinstance(result_sets, dict):
+        result_sets = [result_sets]
+    for result in result_sets:
+        if (result.get("name") or "").lower() == "shot_chart_detail":
+            headers = result.get("headers") or []
+            rows = result.get("rowSet") or []
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                out.append({header: row[idx] for idx, header in enumerate(headers)})
+            return out
+    return []

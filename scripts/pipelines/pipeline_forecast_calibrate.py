@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def main() -> None:
@@ -32,7 +32,7 @@ def main() -> None:
     if not args.skip_dataset:
         cmd = [
             sys.executable,
-            str(ROOT / "scripts" / "build_forecast_backtest_dataset.py"),
+            str(ROOT / "scripts" / "calibration" / "build_forecast_backtest_dataset.py"),
             "--output",
             args.dataset,
         ]
@@ -48,7 +48,7 @@ def main() -> None:
         run(
             [
                 sys.executable,
-                str(ROOT / "scripts" / "calibrate_forecast_distribution.py"),
+                str(ROOT / "scripts" / "calibration" / "calibrate_forecast_distribution.py"),
                 "--input",
                 args.dataset,
                 "--output",
@@ -65,7 +65,7 @@ def main() -> None:
         run(
             [
                 sys.executable,
-                str(ROOT / "scripts" / "run_top_picks_forecast.py"),
+                str(ROOT / "scripts" / "ml" / "run_top_picks_forecast.py"),
                 "--use-db",
                 "--include-non-today",
                 "--top",

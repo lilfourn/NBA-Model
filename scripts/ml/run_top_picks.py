@@ -64,7 +64,7 @@ def main() -> None:
 
     game_log_files = discover_game_log_files(args.official_dir)
     if not game_log_files:
-        print("No official game logs found. Run scripts/fetch_nba_player_gamelogs.py first.")
+        print("No official game logs found. Run scripts/nba/fetch_nba_player_gamelogs.py first.")
         return
 
     game_logs = load_game_logs(game_log_files)

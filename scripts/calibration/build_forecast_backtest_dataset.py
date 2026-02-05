@@ -13,7 +13,7 @@ from app.modeling.db_logs import load_db_game_logs  # noqa: E402
 from app.modeling.stat_forecast import ForecastParams, LeaguePriors, StatForecastPredictor  # noqa: E402
 from app.modeling.stat_mappings import SPECIAL_STATS, STAT_TYPE_MAP, stat_value  # noqa: E402
 from app.modeling.types import Projection  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 DEFAULT_STAT_TYPES = [

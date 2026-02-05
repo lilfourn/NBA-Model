@@ -16,4 +16,8 @@ def probability_over(line: float, mean: float, std: float, *, min_std: float = 0
 
 
 def confidence_from_probability(prob_over: float) -> float:
+    prob_over = float(prob_over)
+    if not math.isfinite(prob_over):
+        return 0.5
+    prob_over = min(max(prob_over, 0.0), 1.0)
     return max(prob_over, 1.0 - prob_over)

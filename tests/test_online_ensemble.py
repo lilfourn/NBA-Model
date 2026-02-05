@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler
 
 
@@ -46,3 +48,29 @@ def test_save_and_load_roundtrip(tmp_path) -> None:
     for key in before:
         assert abs(before[key] - after[key]) < 1e-12
 
+
+def test_predict_ignores_nonfinite_expert_probs() -> None:
+    ens = ContextualHedgeEnsembler(experts=["a", "b"])
+    ctx = Context(stat_type="Points", is_live=False, n_eff=10.0)
+    p = ens.predict({"a": float("nan"), "b": 0.9}, ctx)
+    assert math.isfinite(p)
+    assert abs(p - 0.9) < 1e-9
+
+
+def test_predict_falls_back_when_context_weights_corrupt() -> None:
+    ens = ContextualHedgeEnsembler(experts=["a", "b"])
+    ctx = Context(stat_type="Points", is_live=False, n_eff=10.0)
+    ens.weights[ctx.key()] = {"a": float("nan"), "b": float("nan")}
+    p = ens.predict({"a": 0.8, "b": 0.2}, ctx)
+    assert math.isfinite(p)
+    assert abs(p - 0.5) < 1e-9
+
+
+def test_update_skips_nonfinite_expert_probs() -> None:
+    ens = ContextualHedgeEnsembler(experts=["a", "b"], eta=1.0, shrink_to_uniform=0.0)
+    ctx = Context(stat_type="Assists", is_live=False, n_eff=10.0)
+    ens.update({"a": float("nan"), "b": 0.9}, y=1, ctx=ctx)
+    w = ens.weights_for_context(ctx)
+    assert math.isfinite(w["a"])
+    assert math.isfinite(w["b"])
+    assert abs((w["a"] + w["b"]) - 1.0) < 1e-12

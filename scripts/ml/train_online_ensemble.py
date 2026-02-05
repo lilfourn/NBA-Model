@@ -16,8 +16,8 @@ from app.ml.dataset import _load_name_overrides  # noqa: E402
 from app.ml.stat_mappings import stat_value_from_row  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler, logloss  # noqa: E402
 from app.utils.names import normalize_name  # noqa: E402
-from scripts.log_decisions import PRED_LOG_DEFAULT  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ops.log_decisions import PRED_LOG_DEFAULT  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 EXPERT_COLS_DEFAULT = ["p_forecast_cal", "p_nn", "p_lr"]
@@ -91,7 +91,7 @@ def _load_outcomes(engine, df: pd.DataFrame) -> pd.DataFrame:
         return name_overrides.get(key, key)
 
     players = players.copy()
-    players["normalized_name_key"] = players.apply(to_name_key, axis=1)
+    players["normalized_name_key"] = [to_name_key(row) for row in players.to_dict(orient="records")]
 
     nba_players = pd.read_sql(
         text("select id as nba_player_id, name_key from nba_players where name_key = any(:keys)"),
@@ -147,7 +147,10 @@ def _load_outcomes(engine, df: pd.DataFrame) -> pd.DataFrame:
         return merged.head(0)
 
     out = merged.merge(stats, on=["nba_player_id", "game_date"], how="left")
-    out["actual_value"] = out.apply(lambda r: stat_value_from_row(r.get("stat_type"), r), axis=1)
+    out["actual_value"] = [
+        stat_value_from_row(getattr(row, "stat_type", None), row)
+        for row in out.itertuples(index=False)
+    ]
     out = out.dropna(subset=["actual_value", "line_score"])
     out["over_label"] = (out["actual_value"].astype(float) > out["line_score"].astype(float)).astype(int)
     return out

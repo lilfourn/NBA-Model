@@ -5,13 +5,21 @@ import re
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.core.config import settings
 from app.utils.names import normalize_name
-from app.ml.feature_engineering import compute_history_features, compute_league_means, prepare_gamelogs
+from app.ml.feature_engineering import (
+    build_logs_by_player,
+    compute_history_features,
+    compute_league_means,
+    load_gamelogs_frame,
+    prepare_gamelogs,
+    slice_player_logs_before_cutoff,
+)
 from app.ml.stat_mappings import STAT_COLUMNS, normalize_stat_type, stat_value_from_row
 
 COMBO_SPLIT = re.compile(r"\s*\+\s*")
@@ -126,7 +134,7 @@ def load_training_data(engine: Engine) -> pd.DataFrame:
             on ng.game_date = (g.start_time at time zone 'America/New_York')::date
             and ng.home_team_abbreviation = upper(coalesce(htm.normalized_abbr, ht.abbreviation))
             and ng.away_team_abbreviation = upper(coalesce(atm.normalized_abbr, at.abbreviation))
-        where lower(coalesce(p.attributes->>'odds_type', 'standard')) = 'standard'
+        where coalesce(p.odds_type, 0) = 0
           and lower(coalesce(p.event_type, p.attributes->>'event_type', '')) <> 'combo'
         """
     )
@@ -205,7 +213,8 @@ def load_training_data(engine: Engine) -> pd.DataFrame:
                 fta,
                 cast(stats_json->>'OREB' as float) as oreb,
                 cast(stats_json->>'DREB' as float) as dreb,
-                cast(stats_json->>'PF' as float) as pf
+                cast(stats_json->>'PF' as float) as pf,
+                cast(stats_json->>'DUNKS' as float) as dunks
             from nba_player_game_stats
             where game_id = any(:game_ids)
             """
@@ -275,32 +284,7 @@ def _map_nba_player_ids(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
 
 
 def _load_gamelogs(engine: Engine) -> pd.DataFrame:
-    query = text(
-        """
-        select
-            s.player_id,
-            ng.game_date as game_date,
-            s.minutes,
-            s.points,
-            s.rebounds,
-            s.assists,
-            s.steals,
-            s.blocks,
-            s.turnovers,
-            s.fg3m,
-            s.fg3a,
-            s.fgm,
-            s.fga,
-            s.ftm,
-            s.fta,
-            cast(s.stats_json->>'OREB' as float) as oreb,
-            cast(s.stats_json->>'DREB' as float) as dreb,
-            cast(s.stats_json->>'PF' as float) as pf
-        from nba_player_game_stats s
-        join nba_games ng on ng.id = s.game_id
-        """
-    )
-    return pd.read_sql(query, engine)
+    return load_gamelogs_frame(engine)
 
 
 def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
@@ -311,10 +295,9 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     frame = _map_nba_player_ids(frame, engine)
     gamelogs = prepare_gamelogs(_load_gamelogs(engine))
     league_means = compute_league_means(gamelogs)
-    logs_by_player = {
-        str(player_id): group.reset_index(drop=True)
-        for player_id, group in gamelogs.groupby("player_id", sort=False)
-    }
+    logs_by_player, log_dates_by_player = build_logs_by_player(gamelogs)
+    empty_logs = gamelogs.iloc[0:0]
+    empty_dates = np.array([], dtype="datetime64[ns]")
 
     fetched_at = pd.to_datetime(frame["fetched_at"], errors="coerce")
     start_time = None
@@ -340,7 +323,10 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         stat_key = normalize_stat_type(stat_type)
         line_score = getattr(row, "line_score", None)
         cutoff = getattr(row, "cutoff_time", None)
-        logs = logs_by_player.get(str(nba_player_id), pd.DataFrame(columns=gamelogs.columns))
+        player_key = str(nba_player_id)
+        logs = logs_by_player.get(player_key, empty_logs)
+        log_dates = log_dates_by_player.get(player_key, empty_dates)
+        logs = slice_player_logs_before_cutoff(logs, log_dates, cutoff)
         extras_rows.append(
             compute_history_features(
                 stat_type=str(stat_type) if stat_type is not None else "",
@@ -348,6 +334,7 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
                 cutoff=cutoff,
                 player_logs=logs,
                 league_mean=float(league_means.get(str(stat_key or ""), 0.0)),
+                logs_prefiltered=True,
             )
         )
 

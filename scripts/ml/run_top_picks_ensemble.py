@@ -22,9 +22,13 @@ from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler  # no
 from app.modeling.probability import confidence_from_probability  # noqa: E402
 from app.modeling.stat_forecast import ForecastParams, LeaguePriors, StatForecastPredictor  # noqa: E402
 from app.modeling.types import Projection  # noqa: E402
-from app.ml.stat_mappings import stat_components, stat_diff_components  # noqa: E402
-from scripts.log_decisions import PRED_LOG_DEFAULT, append_prediction_log  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from app.ml.stat_mappings import (  # noqa: E402
+    stat_components,
+    stat_diff_components,
+    stat_weighted_components,
+)
+from scripts.ops.log_decisions import PRED_LOG_DEFAULT, append_prediction_log  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def _latest_model_path(models_dir: Path, pattern: str) -> Path | None:
@@ -38,6 +42,23 @@ def _latest_snapshot_id(engine) -> str | None:
     with engine.connect() as conn:
         return conn.execute(text("select id from snapshots order by fetched_at desc limit 1")).scalar()
 
+
+def _auto_calibration_path(calibration_arg: str | None) -> str | None:
+    if calibration_arg:
+        return calibration_arg
+    base = Path("data/calibration")
+    if not base.exists():
+        return None
+    candidates = list(base.glob("forecast_calibration_*.json"))
+    default = base / "forecast_calibration.json"
+    if default.exists():
+        candidates.append(default)
+    if not candidates:
+        return None
+    # Prefer most-recently modified calibration.
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(candidates[0])
+
 def _snapshot_id_for_game_date(engine, game_date: str) -> str | None:
     """
     Return the most recent snapshot id (by fetched_at) that contains at least one
@@ -49,18 +70,14 @@ def _snapshot_id_for_game_date(engine, game_date: str) -> str | None:
         return conn.execute(
             text(
                 """
-                select s.id
-                from snapshots s
-                where exists (
-                    select 1
-                    from projection_features pf
-                    join projections p
-                      on p.snapshot_id = pf.snapshot_id
-                     and p.projection_id = pf.projection_id
-                    where pf.snapshot_id = s.id
-                      and (pf.start_time at time zone 'America/New_York')::date = :game_date
-                      and lower(coalesce(p.attributes->>'odds_type','standard')) = 'standard'
-                )
+                select pf.snapshot_id
+                from projection_features pf
+                join projections p
+                  on p.snapshot_id = pf.snapshot_id
+                 and p.projection_id = pf.projection_id
+                join snapshots s on s.id = pf.snapshot_id
+                where (pf.start_time at time zone 'America/New_York')::date = :game_date
+                  and coalesce(p.odds_type, 0) = 0
                 order by s.fetched_at desc
                 limit 1
                 """
@@ -80,6 +97,25 @@ def _p_over_raw(*, mu: float, sigma: float, line: float, continuity: float = 0.5
     return 1.0 - _normal_cdf(z)
 
 
+def _safe_prob(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value_f):
+        return None
+    return value_f
+
+
+def _row_get(row: object, key: str) -> object:
+    getter = getattr(row, "get", None)
+    if callable(getter):
+        return getter(key)
+    return getattr(row, key, None)
+
+
 def _risk_adjusted_confidence(*, p_over: float, n_eff: float | None, status: str) -> float:
     p_pick = max(p_over, 1.0 - p_over)
     rho = 0.85
@@ -92,7 +128,7 @@ def _risk_adjusted_confidence(*, p_over: float, n_eff: float | None, status: str
     return 0.5 + rho * (p_pick - 0.5)
 
 
-def _load_projection_frame(engine, snapshot_id: str) -> pd.DataFrame:
+def _load_projection_frame(engine, snapshot_id: str, *, include_non_today: bool) -> pd.DataFrame:
     query = text(
         """
         select
@@ -118,37 +154,46 @@ def _load_projection_frame(engine, snapshot_id: str) -> pd.DataFrame:
             and p.projection_id = pf.projection_id
         join players pl on pl.id = pf.player_id
         where pf.snapshot_id = :snapshot_id
-          and lower(coalesce(p.attributes->>'odds_type', 'standard')) = 'standard'
+          and coalesce(p.odds_type, 0) = 0
           and lower(coalesce(p.event_type, p.attributes->>'event_type', '')) <> 'combo'
           and (pl.combo is null or pl.combo = false)
+          and (:include_non_today = true or coalesce(pf.today, false) = true)
           and (pf.is_live is null or pf.is_live = false)
           and (pf.in_game is null or pf.in_game = false)
           and (pf.minutes_to_start is null or pf.minutes_to_start >= 0)
         """
     )
-    return pd.read_sql(query, engine, params={"snapshot_id": snapshot_id})
+    return pd.read_sql(
+        query,
+        engine,
+        params={"snapshot_id": snapshot_id, "include_non_today": bool(include_non_today)},
+    )
 
 
 def _is_supported_stat_type(stat_type: str) -> bool:
     if not stat_type:
         return False
-    return stat_components(stat_type) is not None or stat_diff_components(stat_type) is not None
+    return (
+        stat_components(stat_type) is not None
+        or stat_diff_components(stat_type) is not None
+        or stat_weighted_components(stat_type) is not None
+    )
 
 
-def _to_projection(row: pd.Series) -> Projection:
+def _to_projection(row: object) -> Projection:
     return Projection(
-        projection_id=str(row.get("projection_id")),
-        player_id=str(row.get("player_id") or ""),
-        player_name=str(row.get("player_name") or ""),
-        stat_type=str(row.get("stat_type") or ""),
-        line_score=float(row.get("line_score") or 0.0),
-        start_time=row.get("start_time"),
-        game_id=row.get("game_id"),
+        projection_id=str(_row_get(row, "projection_id")),
+        player_id=str(_row_get(row, "player_id") or ""),
+        player_name=str(_row_get(row, "player_name") or ""),
+        stat_type=str(_row_get(row, "stat_type") or ""),
+        line_score=float(_row_get(row, "line_score") or 0.0),
+        start_time=_row_get(row, "start_time"),
+        game_id=_row_get(row, "game_id"),
         event_type=None,
-        projection_type=row.get("projection_type"),
-        trending_count=row.get("trending_count"),
-        is_today=bool(row.get("today")) if row.get("today") is not None else None,
-        is_combo=bool(row.get("combo") or False),
+        projection_type=_row_get(row, "projection_type"),
+        trending_count=_row_get(row, "trending_count"),
+        is_today=bool(_row_get(row, "today")) if _row_get(row, "today") is not None else None,
+        is_combo=bool(_row_get(row, "combo") or False),
     )
 
 
@@ -166,6 +211,11 @@ def main() -> None:
     parser.add_argument("--ensemble-weights", default="models/ensemble_weights.json")
     parser.add_argument("--top", type=int, default=25)
     parser.add_argument("--min-games", type=int, default=5)
+    parser.add_argument(
+        "--include-non-today",
+        action="store_true",
+        help="Include projections not flagged as today by PrizePicks.",
+    )
     parser.add_argument("--rank", default="risk_adj", choices=["risk_adj", "confidence", "edge", "ev"])
     parser.add_argument("--decimal-odds", type=float, default=None)
     parser.add_argument("--break-even-prob", type=float, default=None)
@@ -190,7 +240,11 @@ def main() -> None:
         print("No snapshots found.")
         return
 
-    frame = _load_projection_frame(engine, str(snapshot_id))
+    frame = _load_projection_frame(
+        engine,
+        str(snapshot_id),
+        include_non_today=bool(args.include_non_today),
+    )
     if frame.empty:
         print("No projections available for this snapshot.")
         return
@@ -203,6 +257,10 @@ def main() -> None:
         if frame.empty:
             print("No supported projections left after filtering.")
             return
+
+    args.calibration = _auto_calibration_path(args.calibration)
+    if args.calibration:
+        print(f"Using calibration: {args.calibration}")
 
     models_dir = Path(args.models_dir)
     nn_path = _latest_model_path(models_dir, "nn_gru_attention_*.pt")
@@ -226,14 +284,17 @@ def main() -> None:
     )
 
     forecast_map: dict[str, dict[str, object]] = {}
-    for _, row in frame.iterrows():
+    for row in frame.itertuples(index=False):
         proj = _to_projection(row)
         pred = forecast.predict(proj)
         if pred is None:
             continue
+        p_fc = _safe_prob(pred.prob_over)
+        if p_fc is None:
+            continue
         details = pred.details or {}
         forecast_map[proj.projection_id] = {
-            "p_forecast_cal": float(pred.prob_over),
+            "p_forecast_cal": p_fc,
             "mu_hat": float(details.get("raw_mean", pred.mean or 0.0)),
             "sigma_hat": float(details.get("raw_std", pred.std or 0.0)),
             "n_eff": details.get("n_eff"),
@@ -244,22 +305,52 @@ def main() -> None:
     # NN expert (optional)
     p_nn: dict[str, float] = {}
     if nn_path:
-        nn_inf = infer_nn_over_probs(engine=engine, model_path=str(nn_path), snapshot_id=str(snapshot_id))
-        for idx, r in nn_inf.frame.reset_index(drop=True).iterrows():
-            proj_id = r.get("projection_id")
-            if proj_id is None:
-                continue
-            p_nn[str(proj_id)] = float(nn_inf.probs[idx])
+        try:
+            nn_inf = infer_nn_over_probs(
+                engine=engine,
+                model_path=str(nn_path),
+                snapshot_id=str(snapshot_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"Warning: NN expert failed ({nn_path.name}): {exc.__class__.__name__}: {exc}. "
+                "Continuing without NN."
+            )
+        else:
+            for idx, r in enumerate(nn_inf.frame.itertuples(index=False)):
+                proj_id = getattr(r, "projection_id", None)
+                if proj_id is None:
+                    continue
+                prob = float(nn_inf.probs[idx])
+                if not math.isfinite(prob):
+                    continue
+                p_nn[str(proj_id)] = prob
 
     # LR expert (optional)
     p_lr: dict[str, float] = {}
     if lr_path:
-        lr_inf = infer_lr_over_probs(engine=engine, model_path=str(lr_path), snapshot_id=str(snapshot_id))
-        for idx, r in lr_inf.frame.reset_index(drop=True).iterrows():
-            proj_id = r.get("projection_id")
-            if proj_id is None:
-                continue
-            p_lr[str(proj_id)] = float(lr_inf.probs[idx])
+        try:
+            lr_inf = infer_lr_over_probs(
+                engine=engine,
+                model_path=str(lr_path),
+                snapshot_id=str(snapshot_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"Warning: LR expert failed ({lr_path.name}): {exc.__class__.__name__}: {exc}. "
+                "Continuing without LR. "
+                "If this is a scikit-learn version mismatch, retrain with: "
+                "`python -m scripts.ml.train_baseline_model`."
+            )
+        else:
+            for idx, r in enumerate(lr_inf.frame.itertuples(index=False)):
+                proj_id = getattr(r, "projection_id", None)
+                if proj_id is None:
+                    continue
+                prob = float(lr_inf.probs[idx])
+                if not math.isfinite(prob):
+                    continue
+                p_lr[str(proj_id)] = prob
 
     experts = ["p_forecast_cal", "p_nn", "p_lr"]
     if Path(args.ensemble_weights).exists():
@@ -268,20 +359,20 @@ def main() -> None:
         ens = ContextualHedgeEnsembler(experts=experts, eta=0.2, shrink_to_uniform=0.01)
 
     scored = []
-    for _, row in frame.iterrows():
-        proj_id = str(row.get("projection_id"))
-        stat_type = str(row.get("stat_type") or "")
+    skipped_nonfinite = 0
+    for row in frame.itertuples(index=False):
+        proj_id = str(getattr(row, "projection_id", ""))
+        stat_type = str(getattr(row, "stat_type", "") or "")
         if not stat_type or not proj_id:
             continue
 
         f = forecast_map.get(proj_id) or {}
-        p_forecast_cal = f.get("p_forecast_cal")
         expert_probs = {
-            "p_forecast_cal": float(p_forecast_cal) if p_forecast_cal is not None else None,
-            "p_nn": p_nn.get(proj_id),
-            "p_lr": p_lr.get(proj_id),
+            "p_forecast_cal": _safe_prob(f.get("p_forecast_cal")),
+            "p_nn": _safe_prob(p_nn.get(proj_id)),
+            "p_lr": _safe_prob(p_lr.get(proj_id)),
         }
-        is_live = bool(row.get("is_live") or False)
+        is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
         try:
             n_eff_val = float(n_eff) if n_eff is not None else None
@@ -289,6 +380,9 @@ def main() -> None:
             n_eff_val = None
         ctx = Context(stat_type=stat_type, is_live=is_live, n_eff=n_eff_val)
         p_final = float(ens.predict(expert_probs, ctx))
+        if not math.isfinite(p_final):
+            skipped_nonfinite += 1
+            continue
         pick = "OVER" if p_final >= 0.5 else "UNDER"
         conf = float(confidence_from_probability(p_final))
         status = str(f.get("calibration_status") or "raw") if f else "raw"
@@ -304,15 +398,18 @@ def main() -> None:
             else:
                 decimal_odds = float(args.decimal_odds) if args.decimal_odds is not None else (1.0 / p_be)
                 score = (p_adj * decimal_odds) - 1.0
+        if not math.isfinite(float(score)):
+            skipped_nonfinite += 1
+            continue
 
         scored.append(
             {
                 "projection_id": proj_id,
-                "player_id": str(row.get("player_id") or ""),
-                "player_name": str(row.get("player_name") or ""),
-                "game_id": row.get("game_id"),
+                "player_id": str(getattr(row, "player_id", "") or ""),
+                "player_name": str(getattr(row, "player_name", "") or ""),
+                "game_id": getattr(row, "game_id", None),
                 "stat_type": stat_type,
-                "line_score": float(row.get("line_score") or 0.0),
+                "line_score": float(getattr(row, "line_score", 0.0) or 0.0),
                 "is_live": is_live,
                 "pick": pick,
                 "prob_over": p_final,
@@ -332,6 +429,8 @@ def main() -> None:
     if not scored:
         print("No rows scored. Check filters and data coverage.")
         return
+    if skipped_nonfinite:
+        print(f"Note: skipped {skipped_nonfinite} projections due to non-finite probabilities/scores.")
 
     scored.sort(key=lambda item: item["rank_score"], reverse=True)
     top = scored[: args.top]

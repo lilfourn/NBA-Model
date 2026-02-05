@@ -66,7 +66,7 @@ def _load_inference_frame(engine: Engine, snapshot_id: str) -> pd.DataFrame:
             and p.projection_id = pf.projection_id
         join players pl on pl.id = pf.player_id
         where pf.snapshot_id = :snapshot_id
-          and lower(coalesce(p.attributes->>'odds_type', 'standard')) = 'standard'
+          and coalesce(p.odds_type, 0) = 0
           and lower(coalesce(p.event_type, p.attributes->>'event_type', '')) <> 'combo'
           and (pl.combo is null or pl.combo = false)
           and (pf.is_live is null or pf.is_live = false)

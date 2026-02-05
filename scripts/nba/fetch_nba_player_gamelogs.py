@@ -1,9 +1,11 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import sys
+from threading import Lock
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -179,6 +181,26 @@ def _load_sources_by_name(path: str | None) -> dict[str, dict[str, object]]:
     return mapping
 
 
+def _run_with_retries(
+    fn,
+    *,
+    retries: int,
+    backoff_seconds: float,
+) -> list[PlayerGameLog]:
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt >= retries:
+                break
+            sleep(max(0.0, float(backoff_seconds)) * (2**attempt))
+    if last_error is not None:
+        raise last_error
+    return []
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch NBA player game logs.")
     parser.add_argument("--season", required=True, help="Season string, e.g. 2025-26")
@@ -223,7 +245,25 @@ def main() -> None:
         help="When no dates are supplied, use the last N completed days (Central time).",
     )
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Output directory")
-    parser.add_argument("--sleep", type=float, default=0.0, help="Sleep seconds after request")
+    parser.add_argument("--sleep", type=float, default=0.0, help="Minimum seconds between fallback requests.")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=2,
+        help="Max parallel player fetch workers for fallback sources.",
+    )
+    parser.add_argument(
+        "--fallback-retries",
+        type=int,
+        default=2,
+        help="Retries per fallback source request.",
+    )
+    parser.add_argument(
+        "--fallback-backoff",
+        type=float,
+        default=1.0,
+        help="Base exponential backoff seconds for fallback retries.",
+    )
     args = parser.parse_args()
 
     source = args.source
@@ -280,11 +320,31 @@ def main() -> None:
     season_end_year = _season_end_year(args.season)
     sources_by_id = _load_sources(args.sources_file)
     sources_by_name = _load_sources_by_name(args.sources_file)
-    all_logs: list[PlayerGameLog] = []
-    for player in players:
+    max_workers = max(1, int(args.max_workers))
+    fallback_retries = max(0, int(args.fallback_retries))
+    fallback_backoff = max(0.0, float(args.fallback_backoff))
+
+    request_lock = Lock()
+    next_allowed: dict[str, float] = {"ts": 0.0}
+
+    def throttle_request() -> None:
+        interval = max(0.0, float(args.sleep))
+        if interval <= 0:
+            return
+        while True:
+            with request_lock:
+                now = monotonic()
+                if now >= next_allowed["ts"]:
+                    next_allowed["ts"] = now + interval
+                    return
+                wait_for = next_allowed["ts"] - now
+            if wait_for > 0:
+                sleep(wait_for)
+
+    def fetch_player_logs(player: dict[str, str]) -> list[PlayerGameLog]:
         player_name = player.get("name")
         if not player_name:
-            continue
+            return []
         player_id = player.get("id")
         normalized = normalize_player_name(player_name)
         source_row = None
@@ -294,40 +354,67 @@ def main() -> None:
             source_row = sources_by_name.get(normalized)
         if source in ("auto", "basketball_reference"):
             try:
-                slug = None
-                if source_row:
-                    slug = source_row.get("basketball_reference_slug")
-                if not slug:
-                    slug = search_player_slug(player_name)
-                if slug:
+                def fetch_bref() -> list[PlayerGameLog]:
+                    slug = None
+                    if source_row:
+                        slug = source_row.get("basketball_reference_slug")
+                    if not slug:
+                        throttle_request()
+                        slug = search_player_slug(player_name)
+                    if not slug:
+                        return []
+                    throttle_request()
                     html = fetch_player_gamelog_html(slug, season_end_year)
                     rows = parse_gamelog_table(html)
-                    all_logs.extend(
-                        normalize_bref(
-                            rows,
-                            player_name=player_name,
-                            season=args.season,
-                            season_type=args.season_type,
-                        )
+                    return normalize_bref(
+                        rows,
+                        player_name=player_name,
+                        season=args.season,
+                        season_type=args.season_type,
                     )
-                    continue
+
+                bref_logs = _run_with_retries(
+                    fetch_bref,
+                    retries=fallback_retries,
+                    backoff_seconds=fallback_backoff,
+                )
+                if bref_logs:
+                    return bref_logs
             except Exception:
                 if source == "basketball_reference":
                     raise
         if source in ("auto", "statmuse"):
             try:
-                query = None
-                if source_row:
-                    query = source_row.get("statmuse_query")
-                if not query:
-                    query = build_player_gamelog_query(player_name, season_end_year)
-                html = fetch_ask_html(query)
-                rows = parse_first_stats_table(html)
-                all_logs.extend(normalize_statmuse(rows, player_name=player_name))
+                def fetch_statmuse() -> list[PlayerGameLog]:
+                    query = None
+                    if source_row:
+                        query = source_row.get("statmuse_query")
+                    if not query:
+                        query = build_player_gamelog_query(player_name, season_end_year)
+                    throttle_request()
+                    html = fetch_ask_html(query)
+                    rows = parse_first_stats_table(html)
+                    return normalize_statmuse(rows, player_name=player_name)
+
+                return _run_with_retries(
+                    fetch_statmuse,
+                    retries=fallback_retries,
+                    backoff_seconds=fallback_backoff,
+                )
             except Exception:
                 if source == "statmuse":
                     raise
-                continue
+        return []
+
+    all_logs: list[PlayerGameLog] = []
+    if max_workers <= 1 or len(players) <= 1:
+        for player in players:
+            all_logs.extend(fetch_player_logs(player))
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(fetch_player_logs, player) for player in players]
+            for future in as_completed(futures):
+                all_logs.extend(future.result())
 
     date_from = date_from or "start"
     date_to = date_to or _today_iso()
@@ -340,9 +427,6 @@ def main() -> None:
     )
     write_jsonl(_serialize_logs(all_logs, args.season, args.season_type), output_path)
     print(f"Wrote {len(all_logs)} game logs -> {output_path}")
-
-    if args.sleep:
-        sleep(args.sleep)
 
 
 if __name__ == "__main__":

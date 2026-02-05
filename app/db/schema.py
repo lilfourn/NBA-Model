@@ -331,3 +331,12 @@ Index("idx_projection_features_player_id", projection_features.c.player_id)
 Index("idx_projection_features_game_id", projection_features.c.game_id)
 Index("idx_nba_players_name_key", nba_players.c.name_key)
 Index("idx_nba_player_stats_game_id", nba_player_game_stats.c.game_id)
+Index("idx_nba_player_stats_player_id", nba_player_game_stats.c.player_id)
+Index("idx_nba_player_stats_player_game", nba_player_game_stats.c.player_id, nba_player_game_stats.c.game_id)
+Index(
+    "idx_nba_games_date_home_away",
+    nba_games.c.game_date,
+    nba_games.c.home_team_abbreviation,
+    nba_games.c.away_team_abbreviation,
+)
+Index("idx_projections_snapshot_odds_type", projections.c.snapshot_id, projections.c.odds_type)

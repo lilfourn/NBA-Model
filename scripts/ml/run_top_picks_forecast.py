@@ -15,8 +15,8 @@ from app.modeling.game_logs import discover_game_log_files, load_game_logs, merg
 from app.modeling.prizepicks_data import load_projections  # noqa: E402
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator  # noqa: E402
 from app.modeling.stat_forecast import ForecastParams, LeaguePriors, StatForecastPredictor  # noqa: E402
-from scripts.log_decisions import PRED_LOG_DEFAULT, append_prediction_log  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ops.log_decisions import PRED_LOG_DEFAULT, append_prediction_log  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def _normal_cdf(z: float) -> float:
@@ -108,7 +108,7 @@ def main() -> None:
     else:
         game_log_files = discover_game_log_files(args.official_dir)
         if not game_log_files:
-            print("No official game logs found. Run scripts/fetch_nba_player_gamelogs.py first.")
+            print("No official game logs found. Run scripts/nba/fetch_nba_player_gamelogs.py first.")
             return
         game_logs = load_game_logs(game_log_files)
         fallback_files = discover_game_log_files(args.fallback_dir)

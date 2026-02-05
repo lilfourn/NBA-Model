@@ -13,14 +13,21 @@ from app.ml.dataset import (
     _build_team_abbrev_cte,
     _load_name_overrides,
     _load_team_abbrev_overrides,
-    compute_actual_value,
 )
 from app.ml.feature_engineering import (
+    build_logs_by_player,
     compute_history_features,
     compute_league_means,
+    load_gamelogs_frame,
     prepare_gamelogs,
+    slice_player_logs_before_cutoff,
 )
-from app.ml.stat_mappings import normalize_stat_type, stat_components, stat_diff_components
+from app.ml.stat_mappings import (
+    normalize_stat_type,
+    stat_components,
+    stat_diff_components,
+    stat_value_from_row,
+)
 from app.utils.names import normalize_name
 
 
@@ -53,24 +60,18 @@ def _cutoff_time(fetched_at: datetime | None, start_time: datetime | None) -> da
     return fetched_at or start_time
 
 
-def _player_logs_map(gamelogs: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    return {
-        str(player_id): group.reset_index(drop=True)
-        for player_id, group in gamelogs.groupby("player_id", sort=False)
-    }
-
-
 def build_history_features_for_row(
-    row: pd.Series,
+    row: Any,
     player_logs: pd.DataFrame,
     league_means: dict[str, float],
     *,
     L: int = 10,
     min_std: float = 1e-6,
+    logs_prefiltered: bool = False,
 ) -> tuple[dict[str, float], np.ndarray]:
-    stat_type = str(row.get("stat_type") or "")
-    line_score = _safe_numeric(row.get("line_score"), 0.0)
-    cutoff = row.get("cutoff_time")
+    stat_type = str(getattr(row, "stat_type", "") or "")
+    line_score = _safe_numeric(getattr(row, "line_score", None), 0.0)
+    cutoff = getattr(row, "cutoff_time", None)
     if cutoff is not None and not isinstance(cutoff, pd.Timestamp):
         cutoff = pd.to_datetime(cutoff, errors="coerce")
     if isinstance(cutoff, pd.Timestamp) and cutoff.tz is not None:
@@ -83,10 +84,11 @@ def build_history_features_for_row(
         cutoff=cutoff,
         player_logs=player_logs,
         league_mean=float(league_means.get(str(stat_key or ""), 0.0)),
+        logs_prefiltered=logs_prefiltered,
     )
 
     hist = player_logs
-    if cutoff is not None:
+    if cutoff is not None and not logs_prefiltered:
         hist = hist[hist["game_date"] < cutoff]
     if len(hist) == 0:
         seq = np.zeros((L, 2), dtype=np.float32)
@@ -166,7 +168,7 @@ def load_nn_training_frame(engine: Engine) -> pd.DataFrame:
             on ng.game_date = (g.start_time at time zone 'America/New_York')::date
             and ng.home_team_abbreviation = upper(coalesce(htm.normalized_abbr, ht.abbreviation))
             and ng.away_team_abbreviation = upper(coalesce(atm.normalized_abbr, at.abbreviation))
-        where lower(coalesce(p.attributes->>'odds_type', 'standard')) = 'standard'
+        where coalesce(p.odds_type, 0) = 0
           and lower(coalesce(p.event_type, p.attributes->>'event_type', '')) <> 'combo'
         """
     )
@@ -203,32 +205,7 @@ def _map_nba_player_ids(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
 
 
 def load_gamelogs(engine: Engine) -> pd.DataFrame:
-    query = text(
-        """
-        select
-            s.player_id,
-            ng.game_date as game_date,
-            s.minutes,
-            s.points,
-            s.rebounds,
-            s.assists,
-            s.steals,
-            s.blocks,
-            s.turnovers,
-            s.fg3m,
-            s.fg3a,
-            s.fgm,
-            s.fga,
-            s.ftm,
-            s.fta,
-            cast(s.stats_json->>'OREB' as float) as oreb,
-            cast(s.stats_json->>'DREB' as float) as dreb,
-            cast(s.stats_json->>'PF' as float) as pf
-        from nba_player_game_stats s
-        join nba_games ng on ng.id = s.game_id
-        """
-    )
-    return pd.read_sql(query, engine)
+    return load_gamelogs_frame(engine)
 
 
 def build_training_data(
@@ -301,7 +278,10 @@ def build_training_data(
         )
 
     frame = frame.merge(stats, on=["nba_player_id", "nba_game_id"], how="left")
-    frame["actual_value"] = frame.apply(compute_actual_value, axis=1)
+    frame["actual_value"] = [
+        stat_value_from_row(getattr(row, "stat_type", None), row)
+        for row in frame.itertuples(index=False)
+    ]
     frame = frame.dropna(subset=["line_score", "actual_value"])
     frame["over"] = (frame["actual_value"] > frame["line_score"]).astype(int)
 
@@ -319,18 +299,24 @@ def build_training_data(
 
     gamelogs = prepare_gamelogs(load_gamelogs(engine))
     league_means = compute_league_means(gamelogs)
-    logs_by_player = _player_logs_map(gamelogs)
+    logs_by_player, log_dates_by_player = build_logs_by_player(gamelogs)
+    empty_logs = gamelogs.iloc[0:0]
+    empty_dates = np.array([], dtype="datetime64[ns]")
 
     extras_rows: list[dict[str, float]] = []
     sequences: list[np.ndarray] = []
-    for _, row in frame.iterrows():
-        player_id = row.get("nba_player_id")
-        logs = logs_by_player.get(str(player_id), pd.DataFrame(columns=gamelogs.columns))
+    for row in frame.itertuples(index=False):
+        player_key = str(getattr(row, "nba_player_id", ""))
+        cutoff = getattr(row, "cutoff_time", None)
+        logs = logs_by_player.get(player_key, empty_logs)
+        log_dates = log_dates_by_player.get(player_key, empty_dates)
+        logs = slice_player_logs_before_cutoff(logs, log_dates, cutoff)
         extras, seq = build_history_features_for_row(
             row,
             logs,
             league_means,
             L=history_len,
+            logs_prefiltered=True,
         )
         extras_rows.append(extras)
         sequences.append(seq)
@@ -407,7 +393,7 @@ def build_inference_frame(engine: Engine, snapshot_id: str) -> pd.DataFrame:
             and p.projection_id = pf.projection_id
         join players pl on pl.id = pf.player_id
         where pf.snapshot_id = :snapshot_id
-          and lower(coalesce(p.attributes->>'odds_type', 'standard')) = 'standard'
+          and coalesce(p.odds_type, 0) = 0
           and lower(coalesce(p.event_type, p.attributes->>'event_type', '')) <> 'combo'
           and (pl.combo is null or pl.combo = false)
           and (pf.is_live is null or pf.is_live = false)
@@ -433,7 +419,7 @@ def build_inference_data(
     name_overrides = _load_name_overrides()
     frame = _apply_name_overrides(frame, name_overrides)
     frame = _map_nba_player_ids(frame, engine)
-    frame = frame.dropna(subset=["nba_player_id"])
+    frame = frame.dropna(subset=["nba_player_id"]).copy()
     fetched_at = pd.to_datetime(frame["fetched_at"], errors="coerce")
     start_time = pd.to_datetime(frame["start_time"], errors="coerce")
     frame["cutoff_time"] = [
@@ -443,18 +429,24 @@ def build_inference_data(
 
     gamelogs = prepare_gamelogs(load_gamelogs(engine))
     league_means = compute_league_means(gamelogs)
-    logs_by_player = _player_logs_map(gamelogs)
+    logs_by_player, log_dates_by_player = build_logs_by_player(gamelogs)
+    empty_logs = gamelogs.iloc[0:0]
+    empty_dates = np.array([], dtype="datetime64[ns]")
 
     extras_rows: list[dict[str, float]] = []
     sequences: list[np.ndarray] = []
-    for _, row in frame.iterrows():
-        player_id = row.get("nba_player_id")
-        logs = logs_by_player.get(str(player_id), pd.DataFrame(columns=gamelogs.columns))
+    for row in frame.itertuples(index=False):
+        player_key = str(getattr(row, "nba_player_id", ""))
+        cutoff = getattr(row, "cutoff_time", None)
+        logs = logs_by_player.get(player_key, empty_logs)
+        log_dates = log_dates_by_player.get(player_key, empty_dates)
+        logs = slice_player_logs_before_cutoff(logs, log_dates, cutoff)
         extras, seq = build_history_features_for_row(
             row,
             logs,
             league_means,
             L=history_len,
+            logs_prefiltered=True,
         )
         extras_rows.append(extras)
         sequences.append(seq)

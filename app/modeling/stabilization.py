@@ -21,4 +21,6 @@ STABILIZATION_GAMES: dict[str, float] = {
     "Blks+Stls": 20.0,
     "Two Pointers Made": 12.0,
     "Two Pointers Attempted": 12.0,
+    "Fantasy Score": 10.0,
+    "Dunks": 30.0,
 }

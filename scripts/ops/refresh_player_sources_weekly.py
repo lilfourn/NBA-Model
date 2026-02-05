@@ -40,7 +40,7 @@ def main() -> None:
 
     cmd = [
         sys.executable,
-        str(ROOT / "scripts" / "build_player_source_index.py"),
+        str(ROOT / "scripts" / "ops" / "build_player_source_index.py"),
         "--season",
         season,
         "--normalized-dir",

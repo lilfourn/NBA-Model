@@ -533,7 +533,7 @@ def load_snapshot(
                         line_score
                     from projections
                     where snapshot_id = :snapshot_id
-                      and lower(coalesce(attributes->>'odds_type', 'standard')) = 'standard'
+                      and coalesce(odds_type, 0) = 0
                     """
                 ),
                 {"snapshot_id": prev_snapshot_id},

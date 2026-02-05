@@ -73,7 +73,7 @@ def build_projection_features(engine: Engine, snapshot_id: UUID) -> dict[str, An
         join snapshots s on s.id = p.snapshot_id
         left join players pl on pl.id = p.player_id
         where p.snapshot_id = :snapshot_id
-          and lower(coalesce(p.attributes->>'odds_type', 'standard')) = 'standard'
+          and coalesce(p.odds_type, 0) = 0
         on conflict (snapshot_id, projection_id) do update
         set
             league_id = excluded.league_id,

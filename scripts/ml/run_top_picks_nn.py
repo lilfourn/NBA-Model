@@ -12,7 +12,7 @@ from app.ml.nn.infer import format_predictions, infer_over_probs  # noqa: E402
 from app.modeling.baseline import BaselinePredictor  # noqa: E402
 from app.modeling.game_logs import discover_game_log_files, load_game_logs, merge_game_logs  # noqa: E402
 from app.modeling.types import Projection  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def _latest_model_path(models_dir: Path) -> Path | None:
@@ -77,7 +77,7 @@ def main() -> None:
     models_dir = Path(args.models_dir)
     model_path = _latest_model_path(models_dir)
     if not model_path:
-        print("No NN model found. Train first with scripts/train_nn_model.py")
+        print("No NN model found. Train first with scripts/ml/train_nn_model.py")
         return
 
     inference = infer_over_probs(

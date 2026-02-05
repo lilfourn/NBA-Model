@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.modeling.time_utils import central_today, central_yesterday  # noqa: E402
-from scripts.train_baseline_model import load_env  # noqa: E402
+from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def main() -> None:
@@ -29,6 +29,12 @@ def main() -> None:
     ap.add_argument("--report", default=None, help="Defaults to dated path under data/calibration/reports/")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--include-non-today", action="store_true")
+    ap.add_argument(
+        "--score",
+        default="forecast",
+        choices=["forecast", "ensemble"],
+        help="Which scorer to run after calibration.",
+    )
     ap.add_argument("--rank", default="risk_adj", choices=["risk_adj", "confidence", "edge", "ev"])
     ap.add_argument("--decimal-odds", type=float, default=None)
     ap.add_argument("--break-even-prob", type=float, default=None)
@@ -63,7 +69,7 @@ def main() -> None:
         run(
             [
                 sys.executable,
-                str(ROOT / "scripts" / "build_forecast_backtest_dataset.py"),
+                str(ROOT / "scripts" / "calibration" / "build_forecast_backtest_dataset.py"),
                 "--output",
                 args.dataset,
                 "--date-from",
@@ -81,7 +87,7 @@ def main() -> None:
         run(
             [
                 sys.executable,
-                str(ROOT / "scripts" / "run_weekly_calibration_report.py"),
+                str(ROOT / "scripts" / "calibration" / "run_weekly_calibration_report.py"),
                 "--dataset",
                 args.dataset,
                 "--asof",
@@ -107,27 +113,48 @@ def main() -> None:
         )
 
     if not args.skip_top:
-        cmd = [
-            sys.executable,
-            str(ROOT / "scripts" / "run_top_picks_forecast.py"),
-            "--use-db",
-            "--top",
-            str(args.top),
-            "--calibration",
-            calibration_path,
-            "--rank",
-            args.rank,
-        ]
-        if args.decimal_odds is not None:
-            cmd += ["--decimal-odds", str(args.decimal_odds)]
-        if args.break_even_prob is not None:
-            cmd += ["--break-even-prob", str(args.break_even_prob)]
-        if args.include_non_today:
-            cmd.append("--include-non-today")
-        if args.log_decisions:
-            cmd.append("--log-decisions")
-            cmd.append("--log-all")
-        run(cmd, check=True)
+        if args.score == "ensemble":
+            cmd = [
+                sys.executable,
+                str(ROOT / "scripts" / "ml" / "run_top_picks_ensemble.py"),
+                "--top",
+                str(args.top),
+                "--calibration",
+                calibration_path,
+                "--rank",
+                args.rank,
+            ]
+            if args.decimal_odds is not None:
+                cmd += ["--decimal-odds", str(args.decimal_odds)]
+            if args.break_even_prob is not None:
+                cmd += ["--break-even-prob", str(args.break_even_prob)]
+            if args.include_non_today:
+                cmd.append("--include-non-today")
+            if args.log_decisions:
+                cmd.append("--log-decisions")
+            run(cmd, check=True)
+        else:
+            cmd = [
+                sys.executable,
+                str(ROOT / "scripts" / "ml" / "run_top_picks_forecast.py"),
+                "--use-db",
+                "--top",
+                str(args.top),
+                "--calibration",
+                calibration_path,
+                "--rank",
+                args.rank,
+            ]
+            if args.decimal_odds is not None:
+                cmd += ["--decimal-odds", str(args.decimal_odds)]
+            if args.break_even_prob is not None:
+                cmd += ["--break-even-prob", str(args.break_even_prob)]
+            if args.include_non_today:
+                cmd.append("--include-non-today")
+            if args.log_decisions:
+                cmd.append("--log-decisions")
+                cmd.append("--log-all")
+            run(cmd, check=True)
 
     if args.cleanup:
         run(

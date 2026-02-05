@@ -20,8 +20,14 @@ class InferenceResult:
     probs: np.ndarray
 
 
-def load_model(path: str, num_numeric: int) -> tuple[GRUAttentionTabularClassifier, dict[str, Any]]:
-    payload = torch.load(path, map_location="cpu")
+def load_model(
+    path: str,
+    num_numeric: int,
+    *,
+    payload: dict[str, Any] | None = None,
+) -> tuple[GRUAttentionTabularClassifier, dict[str, Any]]:
+    if payload is None:
+        payload = torch.load(path, map_location="cpu")
     cat_maps = payload["cat_maps"]
     cat_emb_dims = payload.get("cat_emb_dims", [8, 8, 4])
     cat_cardinalities = [len(mapping) + 1 for mapping in cat_maps.values()]
@@ -70,7 +76,7 @@ def infer_over_probs(
         )
 
     num_numeric = numeric.shape[1]
-    model, info = load_model(model_path, num_numeric=num_numeric)
+    model, info = load_model(model_path, num_numeric=num_numeric, payload=payload)
     cat_maps = info["cat_maps"]
     temperature = float(info.get("temperature") or temperature)
     if temperature <= 0:

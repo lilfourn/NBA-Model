@@ -12,6 +12,9 @@ STATE_VERSION = 1
 
 
 def clip01(p: float, *, eps: float = EPS) -> float:
+    p = float(p)
+    if not math.isfinite(p):
+        return 0.5
     if p < eps:
         return eps
     if p > 1.0 - eps:
@@ -119,23 +122,41 @@ class ContextualHedgeEnsembler:
         ctx_key = ctx.key()
         w = self._get_weights(ctx_key)
 
-        avail = [
-            expert
-            for expert in self.experts
-            if expert in expert_probs and expert_probs[expert] is not None
-        ]
+        avail = []
+        for expert in self.experts:
+            if expert not in expert_probs:
+                continue
+            p = expert_probs[expert]
+            if p is None:
+                continue
+            try:
+                p_val = float(p)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(p_val):
+                continue
+            avail.append(expert)
         if not avail:
             return 0.5
 
-        wsum = sum(float(w.get(expert, 0.0)) for expert in avail)
-        if wsum <= 0:
+        weights = []
+        for expert in avail:
+            w_val = float(w.get(expert, 0.0))
+            if not math.isfinite(w_val) or w_val < 0:
+                w_val = 0.0
+            weights.append(w_val)
+
+        wsum = sum(weights)
+        if (not math.isfinite(wsum)) or wsum <= 0:
             # If weights got corrupted, fall back to uniform over available experts.
             z = sum(logit(float(expert_probs[expert])) for expert in avail) / float(len(avail))
             return sigmoid(z)
 
         z = 0.0
-        for expert in avail:
-            z += (float(w.get(expert, 0.0)) / (wsum + 1e-12)) * logit(float(expert_probs[expert]))
+        for expert, w_val in zip(avail, weights):
+            if w_val <= 0:
+                continue
+            z += (w_val / (wsum + 1e-12)) * logit(float(expert_probs[expert]))
         return sigmoid(z)
 
     def update(self, expert_probs: dict[str, float | None], y: int, ctx: Context) -> None:
@@ -151,11 +172,17 @@ class ContextualHedgeEnsembler:
             p = expert_probs.get(expert)
             if p is None:
                 continue
-            loss = logloss(int(y), float(p))
+            try:
+                p_val = float(p)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(p_val):
+                continue
+            loss = logloss(int(y), p_val)
             w[expert] = float(w.get(expert, 0.0)) * math.exp(-self.eta * loss)
 
         total = sum(float(w.get(expert, 0.0)) for expert in self.experts)
-        if total <= 0:
+        if (not math.isfinite(total)) or total <= 0:
             self.weights[ctx_key] = self._init_weights()
             return
         for expert in self.experts:
@@ -213,11 +240,17 @@ class ContextualHedgeEnsembler:
             for expert in inst.experts:
                 if expert in weights_obj:
                     try:
-                        w[expert] = float(weights_obj[expert])
+                        value = float(weights_obj[expert])
                     except (TypeError, ValueError):
                         continue
+                    if not math.isfinite(value) or value < 0:
+                        w[expert] = 0.0
+                    else:
+                        w[expert] = value
             total = sum(w.values())
-            if total > 0:
+            if (not math.isfinite(total)) or total <= 0:
+                w = inst._init_weights()
+            else:
                 for expert in w:
                     w[expert] /= total
             inst.weights[ctx_key] = w
@@ -239,4 +272,3 @@ class ContextualHedgeEnsembler:
         if not isinstance(state, dict):
             raise ValueError("Invalid ensemble state file")
         return cls.from_state_dict(state)
-

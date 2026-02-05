@@ -23,7 +23,7 @@ def line_movement_metrics() -> dict:
                 select line_movement, count(*)
                 from projections
                 where snapshot_id = :sid
-                  and lower(coalesce(attributes->>'odds_type', 'standard')) = 'standard'
+                  and coalesce(odds_type, 0) = 0
                 group by line_movement
                 """
             ),

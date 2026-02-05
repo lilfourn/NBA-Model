@@ -18,7 +18,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from app.db import schema
-from app.ml.dataset import compute_actual_value, load_training_data
+from app.ml.dataset import load_training_data
+from app.ml.stat_mappings import stat_value_from_row
 
 MIN_TRAIN_ROWS = 50
 
@@ -68,7 +69,10 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     if "player_name" in df.columns:
         df = df[~df["player_name"].fillna("").astype(str).str.contains("+", regex=False)]
 
-    df["actual_value"] = df.apply(compute_actual_value, axis=1)
+    df["actual_value"] = [
+        stat_value_from_row(getattr(row, "stat_type", None), row)
+        for row in df.itertuples(index=False)
+    ]
     df = df.dropna(subset=["line_score", "actual_value", "fetched_at"])
 
     # Avoid training on in-game lines (different regime + leakage risk).

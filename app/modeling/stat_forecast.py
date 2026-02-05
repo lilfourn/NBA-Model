@@ -18,12 +18,16 @@ from app.modeling.forecast_calibration import ForecastDistributionCalibrator
 def _to_float(value) -> float | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
-        return float(value)
+        value = float(value)
+        return value if math.isfinite(value) else None
     try:
-        return float(value)
+        value = float(value)
     except (TypeError, ValueError):
         return None
+    return value if math.isfinite(value) else None
 
 
 def minutes_value(stats: dict) -> float | None:

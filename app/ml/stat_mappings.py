@@ -51,6 +51,8 @@ STAT_COMPONENTS: dict[str, list[str]] = {
     "offensivereboundscombo": ["oreb"],
     "defensivereboundscombo": ["dreb"],
     "personalfoulscombo": ["pf"],
+    # Other markets
+    "dunks": ["dunks"],
 }
 
 
@@ -58,6 +60,19 @@ STAT_COMPONENTS: dict[str, list[str]] = {
 SPECIAL_DIFFS: dict[str, tuple[str, str]] = {
     "twopointersmade": ("fgm", "fg3m"),
     "twopointersattempted": ("fga", "fg3a"),
+}
+
+WEIGHTED_SUMS: dict[str, dict[str, float]] = {
+    # PrizePicks NBA Fantasy Score (common scoring):
+    # PTS + 1.2*REB + 1.5*AST + 3*STL + 3*BLK - 1*TOV
+    "fantasyscore": {
+        "points": 1.0,
+        "rebounds": 1.2,
+        "assists": 1.5,
+        "steals": 3.0,
+        "blocks": 3.0,
+        "turnovers": -1.0,
+    }
 }
 
 
@@ -84,6 +99,12 @@ def stat_diff_components(stat_type: Any) -> tuple[str, str] | None:
         return None
     return SPECIAL_DIFFS.get(normalized)
 
+def stat_weighted_components(stat_type: Any) -> dict[str, float] | None:
+    normalized = normalize_stat_type(stat_type)
+    if not normalized:
+        return None
+    return WEIGHTED_SUMS.get(normalized)
+
 
 def _to_float(value: Any) -> float | None:
     if value is None:
@@ -99,6 +120,13 @@ def _to_float(value: Any) -> float | None:
     return num
 
 
+def _row_get(row: Any, key: str) -> Any:
+    getter = getattr(row, "get", None)
+    if callable(getter):
+        return getter(key)
+    return getattr(row, key, None)
+
+
 def stat_value_from_row(stat_type: Any, row: Any) -> float | None:
     """
     Compute the stat total from a row that has DB columns (points, rebounds, fg3m, ...).
@@ -107,18 +135,28 @@ def stat_value_from_row(stat_type: Any, row: Any) -> float | None:
     diff = stat_diff_components(stat_type)
     if diff is not None:
         base_col, sub_col = diff
-        base = _to_float(row.get(base_col))
-        sub = _to_float(row.get(sub_col))
+        base = _to_float(_row_get(row, base_col))
+        sub = _to_float(_row_get(row, sub_col))
         if base is None or sub is None:
             return None
         return base - sub
+
+    weights = stat_weighted_components(stat_type)
+    if weights:
+        total = 0.0
+        for col, weight in weights.items():
+            value = _to_float(_row_get(row, col))
+            if value is None:
+                return None
+            total += float(weight) * float(value)
+        return total
 
     components = stat_components(stat_type)
     if not components:
         return None
     total = 0.0
     for component in components:
-        value = _to_float(row.get(component))
+        value = _to_float(_row_get(row, component))
         if value is None:
             return None
         total += value
