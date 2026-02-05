@@ -124,7 +124,9 @@ def build_history_features_for_row(
 
     hist = player_logs
     if cutoff is not None and not logs_prefiltered:
-        hist = hist[hist["game_date"] < cutoff]
+        # Normalize to start of day to exclude same-day games (leakage fix)
+        cutoff_day = cutoff.normalize() if hasattr(cutoff, 'normalize') else cutoff
+        hist = hist[hist["game_date"] < cutoff_day]
     if len(hist) == 0:
         seq = np.zeros((L, 2), dtype=np.float32)
     else:
@@ -324,6 +326,12 @@ def build_training_data(
     frame = frame[frame["minutes_to_start"].fillna(0) >= 0]
     frame = frame[frame["is_live"].fillna(False) == False]  # noqa: E712
     frame = frame[frame["in_game"].fillna(False) == False]  # noqa: E712
+
+    # Deduplicate: keep earliest snapshot per player+game+stat to prevent
+    # the same prediction leaking across train/test via multiple snapshots.
+    dedup_cols = ["nba_player_id", "nba_game_id", "stat_type"]
+    if all(c in frame.columns for c in dedup_cols):
+        frame = frame.sort_values("fetched_at").drop_duplicates(subset=dedup_cols, keep="first")
 
     fetched_at = pd.to_datetime(frame["fetched_at"], errors="coerce")
     start_time = pd.to_datetime(frame["start_time"], errors="coerce")

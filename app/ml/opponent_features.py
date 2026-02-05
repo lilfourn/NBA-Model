@@ -216,6 +216,8 @@ def compute_opponent_features(
             # Strip timezone to match tz-naive game_date column
             if hasattr(game_date_ts, "tz") and game_date_ts.tz is not None:
                 game_date_ts = game_date_ts.tz_localize(None)
+            # Normalize to start of day to exclude same-day games (leakage fix)
+            game_date_ts = game_date_ts.normalize()
             mask = opp_df["game_date"] < game_date_ts
             opp_df = opp_df[mask]
 

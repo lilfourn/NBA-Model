@@ -114,6 +114,10 @@ def slice_player_logs_before_cutoff(
     cutoff_ts = _cutoff_date(cutoff)
     if cutoff_ts is None or pd.isna(cutoff_ts):
         return player_logs
+    # Normalize to start of day so same-day games are excluded.
+    # game_date is midnight; without this, a cutoff of 14:00 on game day
+    # would include the current game's stats → data leakage.
+    cutoff_ts = cutoff_ts.normalize()
     cutoff_np = np.datetime64(cutoff_ts.to_datetime64())
     end = int(np.searchsorted(log_dates, cutoff_np, side="left"))
     if end <= 0:
