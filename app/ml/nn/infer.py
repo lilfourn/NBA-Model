@@ -58,6 +58,7 @@ def infer_over_probs(
     payload = torch.load(model_path, map_location="cpu")
     cat_maps = payload["cat_maps"]
     history_len = int(payload.get("history_len", 10))
+    numeric_stats = payload.get("numeric_stats")
     temperature = float(payload.get("temperature") or 1.0)
     if temperature <= 0:
         temperature = 1.0
@@ -67,6 +68,7 @@ def infer_over_probs(
         snapshot_id=snapshot_id,
         history_len=history_len,
         cat_maps=cat_maps,
+        numeric_stats=numeric_stats,
     )
     if frame.empty:
         return InferenceResult(

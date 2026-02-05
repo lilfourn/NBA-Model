@@ -20,7 +20,7 @@ from scripts.ops.log_decisions import PRED_LOG_DEFAULT  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
-EXPERT_COLS_DEFAULT = ["p_forecast_cal", "p_nn", "p_lr"]
+EXPERT_COLS_DEFAULT = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb"]
 
 
 def _parse_timestamp(series: pd.Series) -> pd.Series:
@@ -191,7 +191,11 @@ def main() -> None:
     experts = args.experts or EXPERT_COLS_DEFAULT
     missing = [col for col in experts if col not in df.columns]
     if missing:
-        raise SystemExit(f"Missing expert columns in log: {missing}")
+        # New experts may not yet appear in historical logs. Train with available ones.
+        print(f"Note: expert columns not yet in log (will be added on next scoring run): {missing}")
+        experts = [col for col in experts if col in df.columns]
+        if not experts:
+            raise SystemExit("No expert columns found in prediction log.")
 
     required = {"player_id", "game_id", "stat_type", "line_score"}
     req_missing = required - set(df.columns)

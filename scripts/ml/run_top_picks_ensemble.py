@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from app.db.engine import get_engine  # noqa: E402
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs  # noqa: E402
 from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs  # noqa: E402
+from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs  # noqa: E402
 from app.modeling.db_logs import load_db_game_logs  # noqa: E402
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler  # noqa: E402
@@ -265,6 +266,7 @@ def main() -> None:
     models_dir = Path(args.models_dir)
     nn_path = _latest_model_path(models_dir, "nn_gru_attention_*.pt")
     lr_path = _latest_model_path(models_dir, "baseline_logreg_*.joblib")
+    xgb_path = _latest_model_path(models_dir, "xgb_*.joblib")
 
     calibrator = None
     if args.calibration:
@@ -352,7 +354,31 @@ def main() -> None:
                     continue
                 p_lr[str(proj_id)] = prob
 
-    experts = ["p_forecast_cal", "p_nn", "p_lr"]
+    # XGBoost expert (optional)
+    p_xgb: dict[str, float] = {}
+    if xgb_path:
+        try:
+            xgb_inf = infer_xgb_over_probs(
+                engine=engine,
+                model_path=str(xgb_path),
+                snapshot_id=str(snapshot_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"Warning: XGB expert failed ({xgb_path.name}): {exc.__class__.__name__}: {exc}. "
+                "Continuing without XGB."
+            )
+        else:
+            for idx, r in enumerate(xgb_inf.frame.itertuples(index=False)):
+                proj_id = getattr(r, "projection_id", None)
+                if proj_id is None:
+                    continue
+                prob = float(xgb_inf.probs[idx])
+                if not math.isfinite(prob):
+                    continue
+                p_xgb[str(proj_id)] = prob
+
+    experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb"]
     if Path(args.ensemble_weights).exists():
         ens = ContextualHedgeEnsembler.load(args.ensemble_weights)
     else:
@@ -371,6 +397,7 @@ def main() -> None:
             "p_forecast_cal": _safe_prob(f.get("p_forecast_cal")),
             "p_nn": _safe_prob(p_nn.get(proj_id)),
             "p_lr": _safe_prob(p_lr.get(proj_id)),
+            "p_xgb": _safe_prob(p_xgb.get(proj_id)),
         }
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
@@ -418,6 +445,7 @@ def main() -> None:
                 "p_forecast_cal": expert_probs["p_forecast_cal"],
                 "p_nn": expert_probs["p_nn"],
                 "p_lr": expert_probs["p_lr"],
+                "p_xgb": expert_probs["p_xgb"],
                 "mu_hat": float(f.get("mu_hat") or 0.0) if f else None,
                 "sigma_hat": float(f.get("sigma_hat") or 0.0) if f else None,
                 "calibration_status": status,
@@ -472,6 +500,7 @@ def main() -> None:
                     "p_forecast_cal": item.get("p_forecast_cal"),
                     "p_nn": item.get("p_nn"),
                     "p_lr": item.get("p_lr"),
+                    "p_xgb": item.get("p_xgb"),
                     "p_final": item.get("prob_over"),
                     "model_version": item.get("model_version"),
                     "calibration_version": calibration_version,

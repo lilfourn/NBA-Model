@@ -130,12 +130,16 @@ docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -
 nn_status=${PIPESTATUS[0]}
 
 docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
+  python -m scripts.ml.train_xgb_model 2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"
+xgb_status=${PIPESTATUS[0]}
+
+docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
   python -m scripts.ml.train_online_ensemble --log-path data/monitoring/prediction_log.csv --out models/ensemble_weights.json \
   2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"
 ensemble_status=${PIPESTATUS[0]}
 set -e
 
-if [ "$fetch_status" -ne 0 ] || [ "$train_status" -ne 0 ] || [ "$nn_status" -ne 0 ] || [ "$ensemble_status" -ne 0 ]; then
+if [ "$fetch_status" -ne 0 ] || [ "$train_status" -ne 0 ] || [ "$nn_status" -ne 0 ] || [ "$xgb_status" -ne 0 ] || [ "$ensemble_status" -ne 0 ]; then
   echo "cron_train failed: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$LOG_DIR/cron_train_error.log"
   if [ -f "$EMAIL_SCRIPT" ]; then
     "$PROJECT_ROOT/.venv/bin/python" "$EMAIL_SCRIPT" --subject "$EMAIL_SUBJECT" --body-file "$tmp_log" || true

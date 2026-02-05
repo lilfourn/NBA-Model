@@ -20,6 +20,11 @@ from app.ml.feature_engineering import (
     prepare_gamelogs,
     slice_player_logs_before_cutoff,
 )
+from app.ml.opponent_features import (
+    build_opponent_defensive_averages,
+    compute_opponent_features,
+    _load_team_game_stats,
+)
 from app.ml.stat_mappings import STAT_COLUMNS, normalize_stat_type, stat_value_from_row
 
 COMBO_SPLIT = re.compile(r"\s*\+\s*")
@@ -287,17 +292,122 @@ def _load_gamelogs(engine: Engine) -> pd.DataFrame:
     return load_gamelogs_frame(engine)
 
 
+OPPONENT_FEATURE_COLS = [
+    "is_home",
+    "opp_def_stat_avg",
+    "opp_def_points_avg",
+    "opp_def_rebounds_avg",
+    "opp_def_assists_avg",
+]
+
+
+def _resolve_nba_game_ids(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
+    """Resolve PrizePicks game_id -> nba_game_id when not already on the frame."""
+    if "nba_game_id" in frame.columns and frame["nba_game_id"].notna().any():
+        return frame
+    if "game_id" not in frame.columns:
+        frame["nba_game_id"] = None
+        return frame
+    game_ids = sorted({str(v) for v in frame["game_id"].dropna().unique()})
+    if not game_ids:
+        frame["nba_game_id"] = None
+        return frame
+    overrides = _load_team_abbrev_overrides()
+    cte, params = _build_team_abbrev_cte(overrides)
+    params["game_ids"] = game_ids
+    mapping = pd.read_sql(
+        text(
+            f"""
+            with {cte}
+            select
+                g.id as game_id,
+                ng.id as nba_game_id
+            from games g
+            left join teams ht on ht.id = g.home_team_id
+            left join teams at on at.id = g.away_team_id
+            left join team_abbrev_map htm on htm.source_abbr = upper(ht.abbreviation)
+            left join team_abbrev_map atm on atm.source_abbr = upper(at.abbreviation)
+            join nba_games ng
+                on ng.game_date = (g.start_time at time zone 'America/New_York')::date
+                and ng.home_team_abbreviation = upper(coalesce(htm.normalized_abbr, ht.abbreviation))
+                and ng.away_team_abbreviation = upper(coalesce(atm.normalized_abbr, at.abbreviation))
+            where g.id = any(:game_ids)
+            """
+        ),
+        engine,
+        params=params,
+    )
+    if mapping.empty:
+        frame["nba_game_id"] = None
+        return frame
+    frame = frame.merge(mapping, on="game_id", how="left")
+    return frame
+
+
 def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     if frame.empty:
         return frame
 
     frame = frame.copy()
     frame = _map_nba_player_ids(frame, engine)
+    frame = _resolve_nba_game_ids(frame, engine)
     gamelogs = prepare_gamelogs(_load_gamelogs(engine))
     league_means = compute_league_means(gamelogs)
     logs_by_player, log_dates_by_player = build_logs_by_player(gamelogs)
     empty_logs = gamelogs.iloc[0:0]
     empty_dates = np.array([], dtype="datetime64[ns]")
+
+    # Opponent defensive context
+    team_game_stats = _load_team_game_stats(engine)
+    opp_def_avgs = build_opponent_defensive_averages(team_game_stats)
+
+    # Build player -> team abbreviation lookup from nba_players
+    nba_player_teams = pd.read_sql(
+        text("select id as nba_player_id, team_abbreviation from nba_players"),
+        engine,
+    )
+    player_team_map: dict[str, str] = {}
+    for row in nba_player_teams.itertuples(index=False):
+        if row.team_abbreviation:
+            player_team_map[str(row.nba_player_id)] = str(row.team_abbreviation).upper()
+
+    # Build nba_game_id -> (home_abbr, away_abbr) lookup
+    game_teams: dict[str, tuple[str, str]] = {}
+    for row in team_game_stats.drop_duplicates("game_id").itertuples(index=False):
+        game_teams[str(row.game_id)] = (
+            str(row.home_team_abbreviation).upper(),
+            str(row.away_team_abbreviation).upper(),
+        )
+
+    # Fallback: PrizePicks game_id -> (home_abbr, away_abbr) for upcoming games
+    # where nba_game_id is null.
+    pp_game_teams: dict[str, tuple[str, str]] = {}
+    pp_game_ids = sorted({
+        str(v) for v in frame["game_id"].dropna().unique()
+        if "nba_game_id" not in frame.columns
+        or frame.loc[frame["game_id"] == v, "nba_game_id"].isna().all()
+    })
+    if pp_game_ids:
+        overrides = _load_team_abbrev_overrides()
+        override_map = {k.upper(): v.upper() for k, v in overrides.items()}
+        pp_games = pd.read_sql(
+            text(
+                """
+                select g.id as game_id, ht.abbreviation as home_abbr, at.abbreviation as away_abbr
+                from games g
+                left join teams ht on ht.id = g.home_team_id
+                left join teams at on at.id = g.away_team_id
+                where g.id = any(:game_ids)
+                """
+            ),
+            engine,
+            params={"game_ids": pp_game_ids},
+        )
+        for r in pp_games.itertuples(index=False):
+            h = override_map.get(str(r.home_abbr or "").upper(), str(r.home_abbr or "").upper())
+            a = override_map.get(str(r.away_abbr or "").upper(), str(r.away_abbr or "").upper())
+            if h and a:
+                pp_game_teams[str(r.game_id)] = (h, a)
 
     fetched_at = pd.to_datetime(frame["fetched_at"], errors="coerce")
     start_time = None
@@ -327,16 +437,53 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         logs = logs_by_player.get(player_key, empty_logs)
         log_dates = log_dates_by_player.get(player_key, empty_dates)
         logs = slice_player_logs_before_cutoff(logs, log_dates, cutoff)
-        extras_rows.append(
-            compute_history_features(
-                stat_type=str(stat_type) if stat_type is not None else "",
-                line_score=float(line_score) if line_score is not None else 0.0,
-                cutoff=cutoff,
-                player_logs=logs,
-                league_mean=float(league_means.get(str(stat_key or ""), 0.0)),
-                logs_prefiltered=True,
-            )
+        hist_feats = compute_history_features(
+            stat_type=str(stat_type) if stat_type is not None else "",
+            line_score=float(line_score) if line_score is not None else 0.0,
+            cutoff=cutoff,
+            player_logs=logs,
+            league_mean=float(league_means.get(str(stat_key or ""), 0.0)),
+            logs_prefiltered=True,
         )
+
+        # Opponent features
+        nba_game_id = getattr(row, "nba_game_id", None)
+        pp_game_id = getattr(row, "game_id", None)
+        player_team = player_team_map.get(player_key)
+        opp_team = None
+        is_home = None
+        # Try nba_game_id first, fall back to PrizePicks game_id for upcoming games
+        resolved = False
+        if nba_game_id and str(nba_game_id) in game_teams:
+            home_abbr, away_abbr = game_teams[str(nba_game_id)]
+            if player_team:
+                if player_team == home_abbr:
+                    opp_team = away_abbr
+                    is_home = 1
+                    resolved = True
+                elif player_team == away_abbr:
+                    opp_team = home_abbr
+                    is_home = 0
+                    resolved = True
+        if not resolved and pp_game_id and str(pp_game_id) in pp_game_teams:
+            home_abbr, away_abbr = pp_game_teams[str(pp_game_id)]
+            if player_team:
+                if player_team == home_abbr:
+                    opp_team = away_abbr
+                    is_home = 1
+                elif player_team == away_abbr:
+                    opp_team = home_abbr
+                    is_home = 0
+        opp_feats = compute_opponent_features(
+            player_team_abbr=player_team,
+            opp_team_abbr=opp_team,
+            game_date=cutoff,
+            stat_type=str(stat_type) if stat_type is not None else "",
+            opp_def_avgs=opp_def_avgs,
+            is_home=is_home,
+        )
+
+        extras_rows.append({**hist_feats, **opp_feats})
 
     extras_df = pd.DataFrame(extras_rows)
     for key in extras_df.columns:
@@ -360,6 +507,12 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         "minutes_mean_3",
         "minutes_mean_5",
         "minutes_mean_10",
+        "trend_slope",
+        "stat_cv",
+        "recent_vs_season",
+        "minutes_trend",
+        "stat_std_5",
+        *OPPONENT_FEATURE_COLS,
     ]:
         if col not in frame.columns:
             frame[col] = pd.NA

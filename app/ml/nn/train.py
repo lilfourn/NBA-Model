@@ -210,6 +210,7 @@ def train_nn(
             "state_dict": model.state_dict(),
             "cat_maps": data.cat_maps,
             "numeric_cols": data.numeric_cols,
+            "numeric_stats": data.numeric_stats,
             "history_len": history_len,
             "cat_emb_dims": cat_emb_dims,
             "temperature": float(temperature),

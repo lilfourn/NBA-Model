@@ -168,6 +168,31 @@ def _rolling_mean(values: np.ndarray, window: int) -> float:
     return float(values[-take:].mean()) if take else 0.0
 
 
+def _empty_history(league_mean: float) -> dict[str, float]:
+    return {
+        "hist_n": 0.0,
+        "hist_mean": 0.0,
+        "hist_std": 1.0,
+        "league_mean": float(league_mean),
+        "mu_stab": float(league_mean),
+        "p_hist_over": 0.5,
+        "z_line": 0.0,
+        "rest_days": 0.0,
+        "is_back_to_back": 0.0,
+        "stat_mean_3": 0.0,
+        "stat_mean_5": 0.0,
+        "stat_mean_10": 0.0,
+        "minutes_mean_3": 0.0,
+        "minutes_mean_5": 0.0,
+        "minutes_mean_10": 0.0,
+        "trend_slope": 0.0,
+        "stat_cv": 0.0,
+        "recent_vs_season": 1.0,
+        "minutes_trend": 1.0,
+        "stat_std_5": 0.0,
+    }
+
+
 def compute_history_features(
     *,
     stat_type: str,
@@ -183,23 +208,7 @@ def compute_history_features(
     components = stat_components(stat_type)
     weights = stat_weighted_components(stat_type)
     if diff is None and not components and not weights:
-        return {
-            "hist_n": 0.0,
-            "hist_mean": 0.0,
-            "hist_std": 1.0,
-            "league_mean": float(league_mean),
-            "mu_stab": float(league_mean),
-            "p_hist_over": 0.5,
-            "z_line": 0.0,
-            "rest_days": 0.0,
-            "is_back_to_back": 0.0,
-            "stat_mean_3": 0.0,
-            "stat_mean_5": 0.0,
-            "stat_mean_10": 0.0,
-            "minutes_mean_3": 0.0,
-            "minutes_mean_5": 0.0,
-            "minutes_mean_10": 0.0,
-        }
+        return _empty_history(league_mean)
 
     cutoff_ts = _cutoff_date(cutoff)
     hist = player_logs
@@ -219,44 +228,12 @@ def compute_history_features(
         if diff is not None:
             base_col, sub_col = diff
             if base_col not in hist.columns or sub_col not in hist.columns:
-                return {
-                    "hist_n": 0.0,
-                    "hist_mean": 0.0,
-                    "hist_std": 1.0,
-                    "league_mean": float(league_mean),
-                    "mu_stab": float(league_mean),
-                    "p_hist_over": 0.5,
-                    "z_line": 0.0,
-                    "rest_days": 0.0,
-                    "is_back_to_back": 0.0,
-                    "stat_mean_3": 0.0,
-                    "stat_mean_5": 0.0,
-                    "stat_mean_10": 0.0,
-                    "minutes_mean_3": 0.0,
-                    "minutes_mean_5": 0.0,
-                    "minutes_mean_10": 0.0,
-                }
+                return _empty_history(league_mean)
             vals = (hist[base_col].fillna(0) - hist[sub_col].fillna(0)).to_numpy(dtype=np.float32)
         elif weights:
             missing = [col for col in weights.keys() if col not in hist.columns]
             if missing:
-                return {
-                    "hist_n": 0.0,
-                    "hist_mean": 0.0,
-                    "hist_std": 1.0,
-                    "league_mean": float(league_mean),
-                    "mu_stab": float(league_mean),
-                    "p_hist_over": 0.5,
-                    "z_line": 0.0,
-                    "rest_days": 0.0,
-                    "is_back_to_back": 0.0,
-                    "stat_mean_3": 0.0,
-                    "stat_mean_5": 0.0,
-                    "stat_mean_10": 0.0,
-                    "minutes_mean_3": 0.0,
-                    "minutes_mean_5": 0.0,
-                    "minutes_mean_10": 0.0,
-                }
+                return _empty_history(league_mean)
             series = 0.0
             for col, weight in weights.items():
                 series = series + (hist[col].fillna(0) * float(weight))
@@ -265,23 +242,7 @@ def compute_history_features(
             assert components is not None
             missing = [col for col in components if col not in hist.columns]
             if missing:
-                return {
-                    "hist_n": 0.0,
-                    "hist_mean": 0.0,
-                    "hist_std": 1.0,
-                    "league_mean": float(league_mean),
-                    "mu_stab": float(league_mean),
-                    "p_hist_over": 0.5,
-                    "z_line": 0.0,
-                    "rest_days": 0.0,
-                    "is_back_to_back": 0.0,
-                    "stat_mean_3": 0.0,
-                    "stat_mean_5": 0.0,
-                    "stat_mean_10": 0.0,
-                    "minutes_mean_3": 0.0,
-                    "minutes_mean_5": 0.0,
-                    "minutes_mean_10": 0.0,
-                }
+                return _empty_history(league_mean)
             vals = hist[components].fillna(0).sum(axis=1).to_numpy(dtype=np.float32)
 
         mins = hist["minutes"].fillna(0).to_numpy(dtype=np.float32)
@@ -304,6 +265,7 @@ def compute_history_features(
     )
     p_hist_over = (wins + 1.0) / (n + 2.0)
     z_line = (line_score - mu_stab) / (hist_std + min_std)
+    z_line = max(-10.0, min(10.0, z_line))
 
     stat_mean_3 = _rolling_mean(vals, windows[0])
     stat_mean_5 = _rolling_mean(vals, windows[1])
@@ -311,6 +273,39 @@ def compute_history_features(
     minutes_mean_3 = _rolling_mean(mins, windows[0])
     minutes_mean_5 = _rolling_mean(mins, windows[1])
     minutes_mean_10 = _rolling_mean(mins, windows[2])
+
+    # --- Phase 2: Advanced temporal features ---
+
+    # Trend slope: linear regression slope over last 10 games (positive = improving).
+    trend_slope = 0.0
+    if vals.size >= 3:
+        recent = vals[-min(10, vals.size):]
+        x = np.arange(len(recent), dtype=np.float32)
+        x_mean = x.mean()
+        denom = ((x - x_mean) ** 2).sum()
+        if denom > 0:
+            trend_slope = float(((x - x_mean) * (recent - recent.mean())).sum() / denom)
+
+    # Coefficient of variation (consistency): lower = more consistent player.
+    stat_cv = 0.0
+    if vals.size >= 3 and hist_mean > 0:
+        stat_cv = float(hist_std / abs(hist_mean))
+
+    # Recent vs season ratio: stat_mean_3 / hist_mean. >1 = hot streak, <1 = cold.
+    recent_vs_season = 1.0
+    if hist_mean > 0 and stat_mean_3 > 0:
+        recent_vs_season = float(stat_mean_3 / hist_mean)
+
+    # Minutes trend: recent 3-game avg vs 10-game avg ratio.
+    minutes_trend = 1.0
+    if minutes_mean_10 > 0 and minutes_mean_3 > 0:
+        minutes_trend = float(minutes_mean_3 / minutes_mean_10)
+
+    # Stat variance in last 5 games (raw, not normalized).
+    stat_std_5 = 0.0
+    if vals.size >= 2:
+        recent5 = vals[-min(5, vals.size):]
+        stat_std_5 = float(recent5.std(ddof=0))
 
     return {
         "hist_n": float(n),
@@ -328,4 +323,9 @@ def compute_history_features(
         "minutes_mean_3": float(minutes_mean_3),
         "minutes_mean_5": float(minutes_mean_5),
         "minutes_mean_10": float(minutes_mean_10),
+        "trend_slope": float(trend_slope),
+        "stat_cv": float(stat_cv),
+        "recent_vs_season": float(recent_vs_season),
+        "minutes_trend": float(minutes_trend),
+        "stat_std_5": float(stat_std_5),
     }

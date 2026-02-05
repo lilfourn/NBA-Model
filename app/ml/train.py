@@ -51,6 +51,16 @@ NUMERIC_COLS = [
     "minutes_mean_3",
     "minutes_mean_5",
     "minutes_mean_10",
+    "is_home",
+    "opp_def_stat_avg",
+    "opp_def_points_avg",
+    "opp_def_rebounds_avg",
+    "opp_def_assists_avg",
+    "trend_slope",
+    "stat_cv",
+    "recent_vs_season",
+    "minutes_trend",
+    "stat_std_5",
 ]
 
 

@@ -22,6 +22,11 @@ from app.ml.feature_engineering import (
     prepare_gamelogs,
     slice_player_logs_before_cutoff,
 )
+from app.ml.opponent_features import (
+    build_opponent_defensive_averages,
+    compute_opponent_features,
+    _load_team_game_stats,
+)
 from app.ml.stat_mappings import (
     normalize_stat_type,
     stat_components,
@@ -38,6 +43,35 @@ class TrainingData:
     sequences: np.ndarray
     cat_maps: dict[str, dict[str, int]]
     numeric_cols: list[str]
+    numeric_stats: dict[str, tuple[float, float]] | None = None
+
+
+# Columns that are binary/categorical flags and should NOT be standardized.
+_SKIP_STANDARDIZE = {
+    "is_promo", "is_live", "in_game", "today", "odds_type",
+    "is_back_to_back", "is_home",
+}
+
+
+def _compute_numeric_stats(numeric: pd.DataFrame) -> dict[str, tuple[float, float]]:
+    stats: dict[str, tuple[float, float]] = {}
+    for col in numeric.columns:
+        if col in _SKIP_STANDARDIZE:
+            continue
+        mean = float(numeric[col].mean())
+        std = float(numeric[col].std())
+        if std < 1e-8:
+            std = 1.0
+        stats[col] = (mean, std)
+    return stats
+
+
+def _apply_numeric_stats(numeric: pd.DataFrame, stats: dict[str, tuple[float, float]]) -> pd.DataFrame:
+    numeric = numeric.copy()
+    for col, (mean, std) in stats.items():
+        if col in numeric.columns:
+            numeric[col] = (numeric[col] - mean) / std
+    return numeric
 
 
 def _safe_numeric(value: Any, default: float = 0.0) -> float:
@@ -303,6 +337,26 @@ def build_training_data(
     empty_logs = gamelogs.iloc[0:0]
     empty_dates = np.array([], dtype="datetime64[ns]")
 
+    # Opponent defensive context
+    team_game_stats = _load_team_game_stats(engine)
+    opp_def_avgs = build_opponent_defensive_averages(team_game_stats)
+
+    nba_player_teams = pd.read_sql(
+        text("select id as nba_player_id, team_abbreviation from nba_players"),
+        engine,
+    )
+    player_team_map: dict[str, str] = {}
+    for _r in nba_player_teams.itertuples(index=False):
+        if _r.team_abbreviation:
+            player_team_map[str(_r.nba_player_id)] = str(_r.team_abbreviation).upper()
+
+    game_teams: dict[str, tuple[str, str]] = {}
+    for _r in team_game_stats.drop_duplicates("game_id").itertuples(index=False):
+        game_teams[str(_r.game_id)] = (
+            str(_r.home_team_abbreviation).upper(),
+            str(_r.away_team_abbreviation).upper(),
+        )
+
     extras_rows: list[dict[str, float]] = []
     sequences: list[np.ndarray] = []
     for row in frame.itertuples(index=False):
@@ -318,6 +372,32 @@ def build_training_data(
             L=history_len,
             logs_prefiltered=True,
         )
+
+        # Opponent features
+        nba_game_id = getattr(row, "nba_game_id", None)
+        player_team = player_team_map.get(player_key)
+        opp_team = None
+        is_home = None
+        if nba_game_id and str(nba_game_id) in game_teams:
+            home_abbr, away_abbr = game_teams[str(nba_game_id)]
+            if player_team:
+                if player_team == home_abbr:
+                    opp_team = away_abbr
+                    is_home = 1
+                elif player_team == away_abbr:
+                    opp_team = home_abbr
+                    is_home = 0
+        stat_type = str(getattr(row, "stat_type", "") or "")
+        opp_feats = compute_opponent_features(
+            player_team_abbr=player_team,
+            opp_team_abbr=opp_team,
+            game_date=cutoff,
+            stat_type=stat_type,
+            opp_def_avgs=opp_def_avgs,
+            is_home=is_home,
+        )
+        extras.update(opp_feats)
+
         extras_rows.append(extras)
         sequences.append(seq)
 
@@ -346,6 +426,10 @@ def build_training_data(
             numeric["trending_count"].clip(lower=0.0)
         )
 
+    # Standardize continuous numeric features for NN stability.
+    numeric_stats = _compute_numeric_stats(numeric)
+    numeric = _apply_numeric_stats(numeric, numeric_stats)
+
     cat_maps = {
         "stat_type": _build_cat_map(frame["stat_type"]),
         "projection_type": _build_cat_map(frame["projection_type"]),
@@ -358,6 +442,7 @@ def build_training_data(
         sequences=sequences_arr,
         cat_maps=cat_maps,
         numeric_cols=list(numeric.columns),
+        numeric_stats=numeric_stats,
     )
 
 
@@ -410,6 +495,7 @@ def build_inference_data(
     snapshot_id: str,
     history_len: int,
     cat_maps: dict[str, dict[str, int]],
+    numeric_stats: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
     frame = build_inference_frame(engine, snapshot_id)
     if frame.empty:
@@ -433,6 +519,52 @@ def build_inference_data(
     empty_logs = gamelogs.iloc[0:0]
     empty_dates = np.array([], dtype="datetime64[ns]")
 
+    # Opponent defensive context for inference
+    team_game_stats = _load_team_game_stats(engine)
+    opp_def_avgs = build_opponent_defensive_averages(team_game_stats)
+
+    nba_player_teams_inf = pd.read_sql(
+        text("select id as nba_player_id, team_abbreviation from nba_players"),
+        engine,
+    )
+    player_team_map_inf: dict[str, str] = {}
+    for _ri in nba_player_teams_inf.itertuples(index=False):
+        if _ri.team_abbreviation:
+            player_team_map_inf[str(_ri.nba_player_id)] = str(_ri.team_abbreviation).upper()
+
+    game_teams_inf: dict[str, tuple[str, str]] = {}
+    for _ri in team_game_stats.drop_duplicates("game_id").itertuples(index=False):
+        game_teams_inf[str(_ri.game_id)] = (
+            str(_ri.home_team_abbreviation).upper(),
+            str(_ri.away_team_abbreviation).upper(),
+        )
+
+    # Fallback: PrizePicks game_id -> (home_abbr, away_abbr) for upcoming games
+    pp_game_teams_inf: dict[str, tuple[str, str]] = {}
+    if "game_id" in frame.columns:
+        pp_gids = sorted({str(v) for v in frame["game_id"].dropna().unique()})
+        if pp_gids:
+            overrides_inf = _load_team_abbrev_overrides()
+            override_map_inf = {k.upper(): v.upper() for k, v in overrides_inf.items()}
+            pp_games_inf = pd.read_sql(
+                text(
+                    """
+                    select g.id as game_id, ht.abbreviation as home_abbr, at.abbreviation as away_abbr
+                    from games g
+                    left join teams ht on ht.id = g.home_team_id
+                    left join teams at on at.id = g.away_team_id
+                    where g.id = any(:game_ids)
+                    """
+                ),
+                engine,
+                params={"game_ids": pp_gids},
+            )
+            for _ri in pp_games_inf.itertuples(index=False):
+                h = override_map_inf.get(str(_ri.home_abbr or "").upper(), str(_ri.home_abbr or "").upper())
+                a = override_map_inf.get(str(_ri.away_abbr or "").upper(), str(_ri.away_abbr or "").upper())
+                if h and a:
+                    pp_game_teams_inf[str(_ri.game_id)] = (h, a)
+
     extras_rows: list[dict[str, float]] = []
     sequences: list[np.ndarray] = []
     for row in frame.itertuples(index=False):
@@ -448,6 +580,45 @@ def build_inference_data(
             L=history_len,
             logs_prefiltered=True,
         )
+
+        # Opponent features for inference
+        nba_game_id_inf = getattr(row, "nba_game_id", None)
+        pp_game_id_inf = getattr(row, "game_id", None)
+        player_team_inf = player_team_map_inf.get(player_key)
+        opp_team_inf = None
+        is_home_inf = None
+        resolved_inf = False
+        if nba_game_id_inf and str(nba_game_id_inf) in game_teams_inf:
+            home_a, away_a = game_teams_inf[str(nba_game_id_inf)]
+            if player_team_inf:
+                if player_team_inf == home_a:
+                    opp_team_inf = away_a
+                    is_home_inf = 1
+                    resolved_inf = True
+                elif player_team_inf == away_a:
+                    opp_team_inf = home_a
+                    is_home_inf = 0
+                    resolved_inf = True
+        if not resolved_inf and pp_game_id_inf and str(pp_game_id_inf) in pp_game_teams_inf:
+            home_a, away_a = pp_game_teams_inf[str(pp_game_id_inf)]
+            if player_team_inf:
+                if player_team_inf == home_a:
+                    opp_team_inf = away_a
+                    is_home_inf = 1
+                elif player_team_inf == away_a:
+                    opp_team_inf = home_a
+                    is_home_inf = 0
+        stat_type_inf = str(getattr(row, "stat_type", "") or "")
+        opp_feats_inf = compute_opponent_features(
+            player_team_abbr=player_team_inf,
+            opp_team_abbr=opp_team_inf,
+            game_date=cutoff,
+            stat_type=stat_type_inf,
+            opp_def_avgs=opp_def_avgs,
+            is_home=is_home_inf,
+        )
+        extras.update(opp_feats_inf)
+
         extras_rows.append(extras)
         sequences.append(seq)
 
@@ -475,6 +646,10 @@ def build_inference_data(
         numeric["trending_count"] = np.log1p(
             numeric["trending_count"].clip(lower=0.0)
         )
+
+    # Apply same standardization as training.
+    if numeric_stats:
+        numeric = _apply_numeric_stats(numeric, numeric_stats)
 
     for cat_key, mapping in cat_maps.items():
         if cat_key not in frame.columns:
