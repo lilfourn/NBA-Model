@@ -236,6 +236,7 @@ nba_players = Table(
     Column("name_key", Text, nullable=True),
     Column("team_id", Text, nullable=True),
     Column("team_abbreviation", Text, nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
 )
 
 nba_games = Table(
@@ -248,6 +249,7 @@ nba_games = Table(
     Column("away_team_id", Text, nullable=True),
     Column("home_team_abbreviation", Text, nullable=True),
     Column("away_team_abbreviation", Text, nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
 )
 
 nba_player_game_stats = Table(
@@ -275,6 +277,7 @@ nba_player_game_stats = Table(
     Column("ft_pct", Numeric, nullable=True),
     Column("plus_minus", Numeric, nullable=True),
     Column("stats_json", JSONB, nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
 )
 
 model_runs = Table(

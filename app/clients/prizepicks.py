@@ -4,14 +4,33 @@ from typing import Any
 
 from curl_cffi import requests as curl_requests
 
+from app.clients.base import CrawlerClient
 from app.core.config import settings
 
 DEFAULT_HEADERS: dict[str, str] = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Origin": "https://app.prizepicks.com",
     "Referer": "https://app.prizepicks.com/",
 }
+
+_client: CrawlerClient | None = None
+
+
+def _get_client() -> CrawlerClient:
+    global _client  # noqa: PLW0603
+    if _client is None:
+        _client = CrawlerClient(
+            source_name="prizepicks",
+            max_retries=2,
+            backoff_seconds=1.5,
+            read_timeout=float(settings.prizepicks_timeout_seconds),
+            impersonate=settings.prizepicks_impersonate,
+            default_headers=DEFAULT_HEADERS,
+            min_request_interval=0.0,
+        )
+    return _client
 
 
 def build_projections_url(base_url: str | None = None) -> str:
@@ -44,12 +63,14 @@ def fetch_projections(
         "per_page": effective_per_page,
     }
     url = build_projections_url()
-    response = curl_requests.get(
+    client = _get_client()
+    result = client.get(
         url,
         params=params,
         headers=_build_headers(extra_headers),
-        timeout=effective_timeout,
-        impersonate=settings.prizepicks_impersonate,
+        timeout=float(effective_timeout),
     )
-    response.raise_for_status()
-    return response.json()
+    if result.json_data is not None:
+        return result.json_data
+    import json
+    return json.loads(result.body)

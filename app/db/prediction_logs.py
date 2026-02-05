@@ -15,63 +15,14 @@ from sqlalchemy.engine import Engine
 
 from app.core.config import settings
 from app.db import schema
+from app.db.coerce import (
+    json_safe as _json_safe,
+    normalize_id as _normalize_id,
+    parse_datetime as _parse_datetime,
+    parse_decimal as _parse_decimal,
+)
 from app.ml.stat_mappings import stat_value_from_row
 from app.utils.names import normalize_name
-
-
-def _parse_decimal(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    if isinstance(value, Decimal):
-        return value if value.is_finite() else None
-    if isinstance(value, bool):
-        return None
-    try:
-        parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return parsed if parsed.is_finite() else None
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, tuple):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, Decimal):
-        if not value.is_finite():
-            return None
-        return float(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return None
-        return value
-    return value
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, str):
-        text_value = value.strip()
-        if not text_value:
-            return None
-        try:
-            parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    return None
 
 
 def _parse_uuid(value: Any) -> UUID | None:
@@ -86,29 +37,6 @@ def _parse_uuid(value: Any) -> UUID | None:
         return UUID(text_value)
     except ValueError:
         return None
-
-
-def _normalize_id(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        if pd.isna(value):
-            return None
-        if float(value).is_integer():
-            return str(int(value))
-        return str(value)
-    text_value = str(value).strip()
-    if not text_value:
-        return None
-    if text_value.endswith(".0"):
-        head = text_value[:-2]
-        if head.isdigit():
-            return head
-    return text_value
 
 
 def _normalize_pick(value: Any, *, prob_over: Decimal | None = None) -> str:
@@ -324,19 +252,14 @@ def resolve_prediction_outcomes(
             "pushes": 0,
         }
 
-    name_overrides = _load_name_overrides()
-
-    def to_name_key(row: pd.Series) -> str | None:
-        raw = row.get("display_name") or row.get("name_key")
-        key = normalize_name(raw)
-        if not key:
-            return None
-        return name_overrides.get(key, key)
-
+    # Use unified normalize_name which now includes NFKD + suffix stripping + overrides.
     players = players.copy()
-    players["normalized_name_key"] = [to_name_key(row) for row in players.to_dict(orient="records")]
+    players["normalized_name_key"] = players.apply(
+        lambda r: normalize_name(r.get("display_name") or r.get("name_key")), axis=1
+    )
     keys = sorted({str(v) for v in players["normalized_name_key"].dropna().unique().tolist()})
     if not keys:
+        print(f"[resolve] 0/{len(candidates)} candidates: no player name_keys resolved")
         return {
             "candidates": int(len(candidates)),
             "matched_boxscores": 0,
@@ -344,6 +267,7 @@ def resolve_prediction_outcomes(
             "wins": 0,
             "losses": 0,
             "pushes": 0,
+            "no_name_key": int(len(candidates)),
         }
 
     nba_players = pd.read_sql(
@@ -351,6 +275,9 @@ def resolve_prediction_outcomes(
         engine,
         params={"keys": keys},
     )
+    unmatched_names = set(keys) - set(nba_players["name_key"].tolist()) if not nba_players.empty else set(keys)
+    if unmatched_names:
+        print(f"[resolve] {len(unmatched_names)} player name_keys not found in nba_players: {sorted(unmatched_names)[:10]}")
     if nba_players.empty:
         return {
             "candidates": int(len(candidates)),
@@ -359,6 +286,7 @@ def resolve_prediction_outcomes(
             "wins": 0,
             "losses": 0,
             "pushes": 0,
+            "no_nba_player_match": int(len(candidates)),
         }
 
     mapped = players.merge(
@@ -369,8 +297,11 @@ def resolve_prediction_outcomes(
     )[["player_id", "nba_player_id"]]
 
     merged = candidates.merge(mapped, on="player_id", how="left").merge(games, on="game_id", how="left")
+    no_nba_id = int(merged["nba_player_id"].isna().sum())
+    no_game_date = int(merged["game_date"].isna().sum())
     merged = merged.dropna(subset=["nba_player_id", "game_date"])
     if merged.empty:
+        print(f"[resolve] 0/{len(candidates)} matched: {no_nba_id} missing nba_player_id, {no_game_date} missing game_date")
         return {
             "candidates": int(len(candidates)),
             "matched_boxscores": 0,
@@ -378,6 +309,8 @@ def resolve_prediction_outcomes(
             "wins": 0,
             "losses": 0,
             "pushes": 0,
+            "no_nba_player_match": no_nba_id,
+            "no_game_date": no_game_date,
         }
 
     date_from = merged["game_date"].min()
