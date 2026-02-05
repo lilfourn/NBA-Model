@@ -131,7 +131,7 @@ class RateLimiter:
 # CrawlerClient
 # ---------------------------------------------------------------------------
 class CrawlerClient:
-    """Unified HTTP client with retry, circuit breaker, rate limiter, and session reuse."""
+    """Unified HTTP client with retry, circuit breaker, rate limiter, cache, logging, and session reuse."""
 
     def __init__(
         self,
@@ -150,6 +150,7 @@ class CrawlerClient:
         should_retry: Callable[[int], bool] | None = None,
         rotate_ua: bool = True,
         rotate_impersonate: bool = False,
+        cache: "ResponseCache | None" = None,
     ) -> None:
         self.source_name = source_name
         self.max_retries = max_retries
@@ -162,6 +163,7 @@ class CrawlerClient:
         self.should_retry = should_retry
         self.rotate_ua = rotate_ua
         self.rotate_impersonate = rotate_impersonate
+        self.cache = cache
 
         self.circuit_breaker = CircuitBreaker(
             failure_threshold=failure_threshold,
@@ -204,13 +206,34 @@ class CrawlerClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        use_cache: bool = True,
     ) -> CrawlResult:
         """
-        Make a GET request with retry, circuit breaker, and rate limiting.
+        Make a GET request with retry, circuit breaker, rate limiting, caching, and logging.
 
         Raises the last exception if all retries are exhausted or circuit is open.
         """
+        from app.clients import logging as clog
+
+        # --- Cache check ---
+        if use_cache and self.cache is not None:
+            cached = self.cache.get(self.source_name, url, params)
+            if cached is not None:
+                clog.log_cache_hit(self.source_name, url)
+                return CrawlResult(
+                    status_code=cached.status_code,
+                    headers=cached.headers,
+                    body=cached.body,
+                    json_data=cached.json_data,
+                    source=self.source_name,
+                    elapsed_ms=0.0,
+                    attempt_count=0,
+                    cached=True,
+                )
+            clog.log_cache_miss(self.source_name, url)
+
         if self.circuit_breaker.is_open:
+            clog.log_circuit_open(self.source_name, self.circuit_breaker.cooldown_seconds)
             raise CircuitOpenError(
                 f"Circuit breaker open for {self.source_name}; "
                 f"cooldown {self.circuit_breaker.cooldown_seconds}s"
@@ -218,10 +241,18 @@ class CrawlerClient:
 
         effective_timeout = timeout or self.read_timeout
         merged_headers = self._build_headers(headers)
+
+        # Add conditional request headers if cache has stale entry.
+        if self.cache is not None:
+            cond_headers = self.cache.get_conditional_headers(self.source_name, url, params)
+            for k, v in cond_headers.items():
+                merged_headers.setdefault(k, v)
+
         last_error: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
             self.rate_limiter.wait()
+            clog.log_request_start(self.source_name, url, attempt=attempt + 1)
 
             start_time = time.monotonic()
             try:
@@ -252,7 +283,7 @@ class CrawlerClient:
                     except Exception:  # noqa: BLE001
                         pass
 
-                return CrawlResult(
+                result = CrawlResult(
                     status_code=response.status_code,
                     headers=dict(response.headers),
                     body=response.text,
@@ -262,9 +293,31 @@ class CrawlerClient:
                     attempt_count=attempt + 1,
                 )
 
+                clog.log_request_end(
+                    self.source_name, url,
+                    status_code=result.status_code,
+                    elapsed_ms=elapsed_ms,
+                    attempt=attempt + 1,
+                )
+
+                # --- Cache store ---
+                if use_cache and self.cache is not None:
+                    self.cache.put(
+                        self.source_name, url, params,
+                        status_code=result.status_code,
+                        headers=result.headers,
+                        body=result.body,
+                        json_data=result.json_data,
+                    )
+
+                return result
+
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 self.circuit_breaker.record_failure()
+                clog.log_request_error(
+                    self.source_name, url, error=str(exc), attempt=attempt + 1,
+                )
 
                 if attempt >= self.max_retries:
                     break
@@ -275,6 +328,22 @@ class CrawlerClient:
                 # Rotate UA on retry for variety.
                 if self.rotate_ua:
                     merged_headers["User-Agent"] = _pick_ua()
+
+        # On total failure, try returning stale cache entry if available.
+        if use_cache and self.cache is not None:
+            stale = self.cache.get_stale(self.source_name, url, params)
+            if stale is not None:
+                clog.log_cache_stale(self.source_name, url)
+                return CrawlResult(
+                    status_code=stale.status_code,
+                    headers=stale.headers,
+                    body=stale.body,
+                    json_data=stale.json_data,
+                    source=self.source_name,
+                    elapsed_ms=0.0,
+                    attempt_count=self.max_retries + 1,
+                    cached=True,
+                )
 
         # Reset session after exhausting retries (start fresh next time).
         self._reset_session()
