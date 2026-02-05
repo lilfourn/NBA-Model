@@ -96,6 +96,7 @@ class ContextualHedgeEnsembler:
         *,
         eta: float = 0.2,
         shrink_to_uniform: float = 0.01,
+        max_weight: dict[str, float] | None = None,
     ) -> None:
         if not experts:
             raise ValueError("experts must be non-empty")
@@ -107,6 +108,7 @@ class ContextualHedgeEnsembler:
         self.experts = list(experts)
         self.eta = float(eta)
         self.shrink = float(shrink_to_uniform)
+        self.max_weight: dict[str, float] = dict(max_weight) if max_weight else {}
         self.weights: dict[tuple[str, str, str], dict[str, float]] = {}
 
     def _init_weights(self) -> dict[str, float]:
@@ -144,6 +146,9 @@ class ContextualHedgeEnsembler:
             w_val = float(w.get(expert, 0.0))
             if not math.isfinite(w_val) or w_val < 0:
                 w_val = 0.0
+            cap = self.max_weight.get(expert)
+            if cap is not None and w_val > cap:
+                w_val = cap
             weights.append(w_val)
 
         wsum = sum(weights)
@@ -203,7 +208,7 @@ class ContextualHedgeEnsembler:
                 expert: float(weights.get(expert, 0.0)) for expert in self.experts
             }
 
-        return {
+        state: dict[str, Any] = {
             "version": STATE_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "experts": list(self.experts),
@@ -211,6 +216,9 @@ class ContextualHedgeEnsembler:
             "shrink_to_uniform": float(self.shrink),
             "weights": weights_out,
         }
+        if self.max_weight:
+            state["max_weight"] = {str(k): float(v) for k, v in self.max_weight.items()}
+        return state
 
     @classmethod
     def from_state_dict(cls, state: dict[str, Any]) -> ContextualHedgeEnsembler:
@@ -224,7 +232,11 @@ class ContextualHedgeEnsembler:
         experts = [str(e) for e in experts_raw]
         eta = float(state.get("eta") or 0.2)
         shrink = float(state.get("shrink_to_uniform") or 0.0)
-        inst = cls(experts, eta=eta, shrink_to_uniform=shrink)
+        max_weight_raw = state.get("max_weight")
+        max_weight: dict[str, float] | None = None
+        if isinstance(max_weight_raw, dict):
+            max_weight = {str(k): float(v) for k, v in max_weight_raw.items()}
+        inst = cls(experts, eta=eta, shrink_to_uniform=shrink, max_weight=max_weight)
 
         weights_in = state.get("weights") or {}
         if not isinstance(weights_in, dict):

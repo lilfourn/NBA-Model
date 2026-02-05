@@ -8,10 +8,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from app.modeling.probability import confidence_from_probability
+from app.ml.calibration import CalibratedExpert
 from app.ml.nn.dataset import NNDataset
 from app.ml.nn.features import build_inference_data
 from app.ml.nn.model import GRUAttentionTabularClassifier
+from app.modeling.probability import confidence_from_probability
 
 
 @dataclass
@@ -145,14 +146,25 @@ def infer_over_probs(
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    probs = []
+    probs_list = []
     for cat_ids, x_num, x_seq, _ in loader:
         cat_ids = cat_ids.to(device)
         x_num = x_num.to(device)
         x_seq = x_seq.to(device)
         logits = model(cat_ids, x_num, x_seq)
-        probs.append(torch.sigmoid(logits / temperature).cpu().numpy().reshape(-1))
-    return InferenceResult(frame=frame, numeric=numeric, probs=np.concatenate(probs))
+        probs_list.append(torch.sigmoid(logits / temperature).cpu().numpy().reshape(-1))
+    probs = np.concatenate(probs_list)
+
+    # Apply isotonic calibration if available
+    isotonic_data = payload.get("isotonic")
+    if isotonic_data is not None:
+        try:
+            isotonic = CalibratedExpert.from_dict(isotonic_data)
+            probs = isotonic.transform(probs)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return InferenceResult(frame=frame, numeric=numeric, probs=probs)
 
 
 def format_predictions(frame, probs: np.ndarray) -> list[dict[str, Any]]:

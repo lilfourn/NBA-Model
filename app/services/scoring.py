@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import threading
+import time as _time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +31,21 @@ from app.ml.stat_mappings import (
     stat_diff_components,
     stat_weighted_components,
 )
+
+# --- Scoring cache ---
+_CACHE_TTL_SECONDS = 300  # 5 min
+_scoring_cache: dict[str, tuple[float, dict]] = {}
+_scoring_cache_lock = threading.Lock()
+
+
+def _cache_key(snapshot_id: str, top: int, rank: str, include_non_today: bool) -> str:
+    return f"{snapshot_id}:{top}:{rank}:{include_non_today}"
+
+
+def invalidate_scoring_cache() -> None:
+    """Clear all cached scoring results."""
+    with _scoring_cache_lock:
+        _scoring_cache.clear()
 
 
 @dataclass
@@ -86,8 +103,8 @@ class ScoringResult:
 # shrunk = (1 - k) * raw + k * 0.5   where k depends on n_eff.
 # With n_eff >= 30 games of history, k = SHRINK_MIN (modest pull).
 # With little data, k = SHRINK_MAX (heavy pull toward 50/50).
-SHRINK_MIN = 0.35   # even best-data picks get 35% pull toward 0.5
-SHRINK_MAX = 0.70   # low-data picks get 70% pull
+SHRINK_MIN = 0.10   # even best-data picks get 10% pull toward 0.5
+SHRINK_MAX = 0.35   # low-data picks get 35% pull
 
 
 def shrink_probability(p: float, n_eff: float | None = None) -> float:
@@ -370,6 +387,7 @@ def score_ensemble(
     top: int = 50,
     rank: str = "risk_adj",
     include_non_today: bool = False,
+    force: bool = False,
 ) -> ScoringResult:
     resolved_snapshot = snapshot_id
     if not resolved_snapshot and game_date:
@@ -382,6 +400,20 @@ def score_ensemble(
             total_scored=0,
             picks=[],
         )
+
+    ck = _cache_key(str(resolved_snapshot), top, rank, include_non_today)
+    if not force:
+        with _scoring_cache_lock:
+            cached = _scoring_cache.get(ck)
+        if cached is not None:
+            ts, cached_dict = cached
+            if (_time.monotonic() - ts) < _CACHE_TTL_SECONDS:
+                return ScoringResult(
+                    snapshot_id=cached_dict["snapshot_id"],
+                    scored_at=cached_dict["scored_at"],
+                    total_scored=cached_dict["total_scored"],
+                    picks=[ScoredPick(**p) for p in cached_dict["picks"]],
+                )
 
     frame = _load_projection_frame(
         engine,
@@ -556,10 +588,14 @@ def score_ensemble(
                 p_lgbm[str(proj_id)] = prob
 
     experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
+    nn_cap = {"p_nn": 0.10}  # Cap NN at 10% until AUC improves
     if Path(ensemble_weights_path).exists():
         ens = ContextualHedgeEnsembler.load(ensemble_weights_path)
+        # Ensure loaded ensemble respects NN cap even if saved without it
+        if not ens.max_weight:
+            ens.max_weight = nn_cap
     else:
-        ens = ContextualHedgeEnsembler(experts=experts, eta=0.2, shrink_to_uniform=0.01)
+        ens = ContextualHedgeEnsembler(experts=experts, eta=0.2, shrink_to_uniform=0.01, max_weight=nn_cap)
 
     scored: list[dict[str, Any]] = []
     for row in frame.itertuples(index=False):
@@ -576,24 +612,30 @@ def score_ensemble(
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
-        # Meta-learner: blends LR/XGB/LGBM base experts
-        p_meta_val: float | None = None
-        if meta_path:
-            try:
-                p_meta_val = infer_meta_learner(
-                    model_path=str(meta_path),
-                    expert_probs=expert_probs,
-                )
-            except Exception:  # noqa: BLE001
-                pass
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
         try:
             n_eff_val = float(n_eff) if n_eff is not None else None
         except (TypeError, ValueError):
             n_eff_val = None
+        # Meta-learner: blends base experts with context
+        p_meta_val: float | None = None
+        if meta_path:
+            try:
+                p_meta_val = infer_meta_learner(
+                    model_path=str(meta_path),
+                    expert_probs=expert_probs,
+                    n_eff=n_eff_val,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         ctx = Context(stat_type=stat_type, is_live=is_live, n_eff=n_eff_val)
-        p_raw = float(ens.predict(expert_probs, ctx))
+        # Primary: use meta-learner when all 5 experts available
+        p_raw = None
+        if p_meta_val is not None and math.isfinite(p_meta_val):
+            p_raw = p_meta_val
+        if p_raw is None:
+            p_raw = float(ens.predict(expert_probs, ctx))
         if not math.isfinite(p_raw):
             continue
         # Shrink toward 0.5 — real sports edges are small.
@@ -672,12 +714,15 @@ def score_ensemble(
         for item in top_picks
     ]
 
-    return ScoringResult(
+    result = ScoringResult(
         snapshot_id=str(resolved_snapshot),
         scored_at=datetime.now(timezone.utc).isoformat(),
         total_scored=len(scored),
         picks=picks,
     )
+    with _scoring_cache_lock:
+        _scoring_cache[ck] = (_time.monotonic(), result.to_dict())
+    return result
 
 
 def list_snapshots(engine: Engine, *, limit: int = 20) -> list[dict[str, Any]]:

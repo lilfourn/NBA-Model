@@ -2,7 +2,8 @@
 
 Uses time-ordered K-fold splits. For each fold, trains LR/XGB/LGBM on the
 training portion and predicts on the held-out portion. The result is a CSV
-where every row has the true label + each base expert's OOF probability.
+where every row has the true label + each base expert's OOF probability,
+plus context columns for the upgraded meta-learner.
 """
 from __future__ import annotations
 
@@ -155,15 +156,30 @@ def main() -> None:
         except Exception as e:
             print(f"    LGBM failed: {e}")
 
+    # Compute a simple forecast-like OOF: use p_hist_over from features
+    # This proxies the stat forecast expert without needing full StatForecastPredictor
+    oof_forecast = np.full(n, np.nan)
+    if "p_hist_over" in df_used.columns:
+        oof_forecast = df_used["p_hist_over"].fillna(0.5).values.astype(np.float64)
+    else:
+        oof_forecast[:] = 0.5
+
+    # Context columns for meta-learner
+    n_eff_vals = df_used["hist_n"].values if "hist_n" in df_used.columns else np.zeros(n)
+    line_vs_mean = df_used["line_vs_mean_ratio"].values if "line_vs_mean_ratio" in df_used.columns else np.ones(n)
+
     result = pd.DataFrame({
         "over": y.values,
         "stat_type": df_used["stat_type"].values if "stat_type" in df_used.columns else "",
+        "n_eff": n_eff_vals,
+        "line_vs_mean_ratio": line_vs_mean,
+        "oof_forecast": oof_forecast,
         "oof_lr": oof_lr,
         "oof_xgb": oof_xgb,
         "oof_lgbm": oof_lgbm,
     })
 
-    # Drop rows where any OOF is NaN (shouldn't happen for well-formed folds)
+    # Drop rows where LR/XGB/LGBM OOF is NaN
     valid = result.dropna(subset=["oof_lr", "oof_xgb", "oof_lgbm"])
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

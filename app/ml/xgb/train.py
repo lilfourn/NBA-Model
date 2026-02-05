@@ -13,6 +13,7 @@ from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from xgboost import XGBClassifier
 
 from app.db import schema
+from app.ml.calibration import CalibratedExpert
 from app.ml.dataset import load_training_data
 from app.ml.stat_mappings import stat_value_from_row
 from app.ml.train import CATEGORICAL_COLS, MIN_TRAIN_ROWS, NUMERIC_COLS, _time_split
@@ -140,6 +141,13 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
 
     conformal = ConformalCalibrator.calibrate(y_proba, y_test.to_numpy(), alpha=0.10)
 
+    isotonic_data = None
+    try:
+        isotonic = CalibratedExpert.fit(y_proba, y_test.to_numpy())
+        isotonic_data = isotonic.to_dict()
+    except ValueError:
+        pass
+
     metrics = {
         "accuracy": float(accuracy_score(y_test, y_pred)),
         "roc_auc": float(roc_auc_score(y_test, y_proba)) if len(np.unique(y_test)) > 1 else None,
@@ -151,16 +159,16 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
     model_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
     model_path = model_dir / f"xgb_{timestamp}.joblib"
-    joblib.dump(
-        {
-            "model": model,
-            "feature_cols": list(X.columns),
-            "categorical_cols": CATEGORICAL_COLS,
-            "numeric_cols": NUMERIC_COLS,
-            "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
-        },
-        model_path,
-    )
+    artifact = {
+        "model": model,
+        "feature_cols": list(X.columns),
+        "categorical_cols": CATEGORICAL_COLS,
+        "numeric_cols": NUMERIC_COLS,
+        "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
+    }
+    if isotonic_data:
+        artifact["isotonic"] = isotonic_data
+    joblib.dump(artifact, model_path)
 
     run_id = uuid4()
     with engine.begin() as conn:

@@ -13,6 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from app.db import schema
+from app.ml.calibration import CalibratedExpert
 from app.ml.nn.dataset import NNDataset
 from app.ml.nn.features import TrainingData, build_training_data
 from app.ml.nn.model import GRUAttentionTabularClassifier
@@ -200,6 +201,13 @@ def train_nn(
 
     conformal = ConformalCalibrator.calibrate(probs_cal, labels.astype(int), alpha=0.10)
 
+    isotonic_data = None
+    try:
+        isotonic = CalibratedExpert.fit(probs_cal, labels.astype(int))
+        isotonic_data = isotonic.to_dict()
+    except ValueError:
+        pass
+
     metrics = {
         "accuracy": float(accuracy_score(labels, preds)),
         "roc_auc": float(roc_auc_score(labels, probs)) if len(np.unique(labels)) > 1 else None,
@@ -214,19 +222,19 @@ def train_nn(
     model_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
     model_path = model_dir / f"nn_gru_attention_{timestamp}.pt"
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "cat_maps": data.cat_maps,
-            "numeric_cols": data.numeric_cols,
-            "numeric_stats": data.numeric_stats,
-            "history_len": history_len,
-            "cat_emb_dims": cat_emb_dims,
-            "temperature": float(temperature),
-            "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
-        },
-        model_path,
-    )
+    payload = {
+        "state_dict": model.state_dict(),
+        "cat_maps": data.cat_maps,
+        "numeric_cols": data.numeric_cols,
+        "numeric_stats": data.numeric_stats,
+        "history_len": history_len,
+        "cat_emb_dims": cat_emb_dims,
+        "temperature": float(temperature),
+        "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
+    }
+    if isotonic_data:
+        payload["isotonic"] = isotonic_data
+    torch.save(payload, model_path)
 
     run_id = uuid4()
     with engine.begin() as conn:

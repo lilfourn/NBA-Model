@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.ml.artifacts import load_joblib_artifact
+from app.ml.calibration import CalibratedExpert
 from app.ml.dataset import _add_history_features
 from app.ml.train import CATEGORICAL_COLS, NUMERIC_COLS
 
@@ -20,14 +21,20 @@ class InferenceResult:
     model_path: str
 
 
-def _load_model(path: str) -> tuple[Any, list[str], list[str], list[str]]:
+def _load_model(path: str) -> tuple[Any, list[str], list[str], list[str], CalibratedExpert | None]:
     payload = load_joblib_artifact(path)
     if not isinstance(payload, dict) or "model" not in payload:
         raise ValueError(f"Unexpected model artifact format: {path}")
     feature_cols = list(payload.get("feature_cols") or [])
     cat_cols = list(payload.get("categorical_cols") or CATEGORICAL_COLS)
     num_cols = list(payload.get("numeric_cols") or NUMERIC_COLS)
-    return payload["model"], feature_cols, cat_cols, num_cols
+    isotonic = None
+    if "isotonic" in payload:
+        try:
+            isotonic = CalibratedExpert.from_dict(payload["isotonic"])
+        except Exception:  # noqa: BLE001
+            pass
+    return payload["model"], feature_cols, cat_cols, num_cols, isotonic
 
 
 def _load_inference_frame(engine: Engine, snapshot_id: str) -> pd.DataFrame:
@@ -78,7 +85,7 @@ def infer_over_probs(*, engine: Engine, model_path: str, snapshot_id: str) -> In
     if frame.empty:
         return InferenceResult(frame=frame, probs=np.zeros((0,), dtype=np.float32), model_path=model_path)
 
-    model, train_feature_cols, cat_cols, num_cols = _load_model(model_path)
+    model, train_feature_cols, cat_cols, num_cols, isotonic = _load_model(model_path)
 
     frame = frame.copy()
     frame = _add_history_features(frame, engine)
@@ -108,4 +115,6 @@ def infer_over_probs(*, engine: Engine, model_path: str, snapshot_id: str) -> In
     X = X.replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
     probs = model.predict_proba(X)[:, 1].astype(np.float32)
+    if isotonic is not None:
+        probs = isotonic.transform(probs)
     return InferenceResult(frame=frame, probs=probs, model_path=model_path)

@@ -342,7 +342,10 @@ class StatForecastPredictor:
             return None
 
         # Always compute the raw normal-based probability for monitoring/debugging.
-        z_raw = ((line + 0.5) - mean_raw) / std_raw
+        # NOTE: No +0.5 continuity correction — PrizePicks lines are already
+        # half-point adjusted (e.g. 24.5), so adding 0.5 would double-count
+        # and systematically bias toward UNDER.
+        z_raw = (line - mean_raw) / std_raw
         prob_over_raw = 1.0 - 0.5 * (1.0 + math.erf(z_raw / math.sqrt(2.0)))
 
         mean = mean_raw
@@ -357,13 +360,11 @@ class StatForecastPredictor:
                 prob_over = cal.p_over(mu=mean_raw, sigma=std_raw, line=line, n_eff=n_eff)
                 calibration_status = status
             else:
-                # Safe fallback to reduce extreme probabilities when uncalibrated.
-                lam = 0.5
-                prob_over = 0.5 + lam * (prob_over_raw - 0.5)
+                # No per-stat calibrator available; pass through raw probability.
+                # Post-ensemble shrinkage in scoring.py handles central calibration.
                 calibration_status = "raw"
         else:
-            lam = 0.5
-            prob_over = 0.5 + lam * (prob_over_raw - 0.5)
+            # No calibrator loaded at all; pass through raw probability.
             calibration_status = "raw"
 
         confidence = confidence_from_probability(prob_over)
