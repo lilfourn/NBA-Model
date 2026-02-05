@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
@@ -9,8 +9,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 
 from app.db import schema
+from app.db.coerce import parse_date as _parse_date, parse_decimal as _parse_decimal, parse_int as _parse_int
 from app.ml.feature_engineering import clear_gamelog_frame_cache
 from app.utils.names import normalize_name
+from app.utils.teams import normalize_team_abbrev
 
 MAX_QUERY_PARAMS = 60000
 
@@ -25,37 +27,23 @@ def _chunk_rows(rows: list[dict[str, Any]], batch_size: int) -> Iterable[list[di
         yield rows[start : start + batch_size]
 
 
-def _parse_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+# Canonical keys expected in stats_json (uppercase). Used by feature_engineering.py queries.
+STATS_JSON_EXPECTED_KEYS = {
+    "PTS", "REB", "AST", "STL", "BLK", "TOV", "MIN",
+    "FGM", "FGA", "FG_PCT", "FG3M", "FG3A", "FG3_PCT",
+    "FTM", "FTA", "FT_PCT", "PLUS_MINUS",
+    "OREB", "DREB", "PF", "DUNKS",
+}
 
 
-def _parse_decimal(value: Any) -> Decimal | None:
-    if value is None:
+def _normalize_stats_json(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize stats_json keys to uppercase and validate structure."""
+    if not isinstance(row, dict):
         return None
-    if isinstance(value, Decimal):
-        return value
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _parse_date(value: Any) -> datetime.date | None:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, str):
-        try:
-            return datetime.strptime(value, "%Y-%m-%d").date()
-        except ValueError:
-            return None
-    return None
+    normalized: dict[str, Any] = {}
+    for key, value in row.items():
+        normalized[str(key).upper()] = value
+    return normalized
 
 
 def _merge_row(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -81,6 +69,10 @@ def _dedupe_rows_by_conflict(
     return list(deduped.values())
 
 
+# Identity columns where NULL means "not provided this time" — keep old value.
+_COALESCE_COLS = {"full_name", "name_key", "team_id", "team_abbreviation", "status_text"}
+
+
 def _upsert_rows(conn: Connection, table, rows: list[dict[str, Any]], conflict_cols: list[str]) -> int:
     if not rows:
         return 0
@@ -95,7 +87,12 @@ def _upsert_rows(conn: Connection, table, rows: list[dict[str, Any]], conflict_c
         for col in table.c:
             if col.name in conflict_cols:
                 continue
-            update_cols[col.name] = func.coalesce(stmt.excluded[col.name], col)
+            if col.name in _COALESCE_COLS:
+                # Keep old value if new is NULL (identity/descriptive fields).
+                update_cols[col.name] = func.coalesce(stmt.excluded[col.name], col)
+            else:
+                # New data always wins (stat fields, percentages, etc.).
+                update_cols[col.name] = stmt.excluded[col.name]
         stmt = stmt.on_conflict_do_update(index_elements=conflict_cols, set_=update_cols)
         result = conn.execute(stmt)
         batch_count = result.rowcount
@@ -114,7 +111,7 @@ def load_league_game_logs(rows: list[dict[str, Any]], *, engine: Engine) -> dict
         player_id = str(row.get("PLAYER_ID")) if row.get("PLAYER_ID") is not None else None
         player_name = row.get("PLAYER_NAME")
         team_id = str(row.get("TEAM_ID")) if row.get("TEAM_ID") is not None else None
-        team_abbrev = row.get("TEAM_ABBREVIATION")
+        team_abbrev = normalize_team_abbrev(row.get("TEAM_ABBREVIATION"))
         game_id = str(row.get("GAME_ID")) if row.get("GAME_ID") is not None else None
         matchup = row.get("MATCHUP") or ""
 
@@ -123,13 +120,15 @@ def load_league_game_logs(rows: list[dict[str, Any]], *, engine: Engine) -> dict
         if " vs. " in matchup:
             parts = matchup.split(" vs. ")
             if len(parts) == 2:
-                home_abbrev = parts[0].strip()
-                away_abbrev = parts[1].strip()
+                home_abbrev = normalize_team_abbrev(parts[0].strip())
+                away_abbrev = normalize_team_abbrev(parts[1].strip())
         elif " @ " in matchup:
             parts = matchup.split(" @ ")
             if len(parts) == 2:
-                away_abbrev = parts[0].strip()
-                home_abbrev = parts[1].strip()
+                away_abbrev = normalize_team_abbrev(parts[0].strip())
+                home_abbrev = normalize_team_abbrev(parts[1].strip())
+
+        now = datetime.now(timezone.utc)
 
         if player_id:
             incoming_player = {
@@ -138,6 +137,7 @@ def load_league_game_logs(rows: list[dict[str, Any]], *, engine: Engine) -> dict
                 "name_key": normalize_name(player_name),
                 "team_id": team_id,
                 "team_abbreviation": team_abbrev,
+                "updated_at": now,
             }
             existing_player = players_by_id.get(player_id)
             if existing_player:
@@ -154,6 +154,7 @@ def load_league_game_logs(rows: list[dict[str, Any]], *, engine: Engine) -> dict
                 "away_team_id": None,
                 "home_team_abbreviation": home_abbrev,
                 "away_team_abbreviation": away_abbrev,
+                "updated_at": now,
             }
             existing_game = games_by_id.get(game_id)
             if existing_game:
@@ -185,7 +186,8 @@ def load_league_game_logs(rows: list[dict[str, Any]], *, engine: Engine) -> dict
                 "fta": _parse_int(row.get("FTA")),
                 "ft_pct": _parse_decimal(row.get("FT_PCT")),
                 "plus_minus": _parse_decimal(row.get("PLUS_MINUS")),
-                "stats_json": row,
+                "stats_json": _normalize_stats_json(row),
+                "updated_at": now,
             }
             existing_stats = stats_by_key.get(stats_key)
             if existing_stats:

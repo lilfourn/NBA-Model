@@ -144,7 +144,7 @@ export function PicksTable({
     <div className="rounded-lg border overflow-hidden">
       <Table>
         <TableHeader>
-          <TableRow className="bg-muted/40">
+          <TableRow className="border-b border-border">
             <TableHead className="w-8">#</TableHead>
             <TableHead className="w-8" />
             <HeaderCell
@@ -198,8 +198,8 @@ export function PicksTable({
               <Fragment key={pick.projection_id}>
                 <TableRow
                   className={cn(
-                    "cursor-pointer transition-colors hover:bg-muted/30",
-                    isExpanded && "bg-muted/20"
+                    "cursor-pointer transition-colors hover:bg-white/[0.03]",
+                    isExpanded && "bg-white/[0.02]"
                   )}
                   onClick={() =>
                     setExpandedId(isExpanded ? null : pick.projection_id)
@@ -210,9 +210,9 @@ export function PicksTable({
                   </TableCell>
                   <TableCell className="px-0">
                     {isExpanded ? (
-                      <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                      <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/50" />
                     ) : (
-                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                      <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
                     )}
                   </TableCell>
                   <TableCell className="font-medium">
@@ -226,7 +226,7 @@ export function PicksTable({
                           loading="lazy"
                         />
                       ) : (
-                        <div className="flex h-8 w-8 items-center justify-center rounded-full border bg-muted text-xs font-semibold text-muted-foreground">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-white/[0.04] text-xs font-semibold text-muted-foreground">
                           {playerInitials(pick.player_name)}
                         </div>
                       )}
@@ -245,10 +245,10 @@ export function PicksTable({
                     <div className="flex items-center gap-2">
                       <Badge
                         className={cn(
-                          "font-semibold text-xs w-14 justify-center",
+                          "font-semibold text-xs w-14 justify-center border-0",
                           pick.pick === "OVER"
-                            ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-900 dark:text-emerald-200"
-                            : "bg-red-100 text-red-800 hover:bg-red-200 dark:bg-red-900 dark:text-red-200"
+                            ? "bg-emerald-500/15 text-emerald-400"
+                            : "bg-red-500/15 text-red-400"
                         )}
                       >
                         {pick.pick}
@@ -264,7 +264,7 @@ export function PicksTable({
                 </TableRow>
                 {isExpanded && (
                   <TableRow>
-                    <TableCell colSpan={7} className="bg-muted/10 p-0">
+                    <TableCell colSpan={7} className="bg-white/[0.01] p-0">
                       <ExpertBreakdown pick={pick} />
                     </TableCell>
                   </TableRow>

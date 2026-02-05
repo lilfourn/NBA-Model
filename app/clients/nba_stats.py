@@ -6,41 +6,47 @@ from typing import Any
 
 from curl_cffi import requests as curl_requests
 
+from app.clients.base import CrawlerClient
+from app.clients.shared import get_shared_cache
 from app.core.config import settings
 
 DEFAULT_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Origin": settings.nba_stats_origin,
     "Referer": settings.nba_stats_referer,
-    "User-Agent": settings.nba_stats_user_agent,
 }
+
+_client: CrawlerClient | None = None
+
+
+def _get_client() -> CrawlerClient:
+    global _client  # noqa: PLW0603
+    if _client is None:
+        _client = CrawlerClient(
+            source_name="nba_stats",
+            max_retries=settings.nba_stats_max_retries,
+            backoff_seconds=settings.nba_stats_backoff_seconds,
+            read_timeout=float(settings.nba_stats_timeout_seconds),
+            impersonate=settings.nba_stats_impersonate,
+            proxy=settings.nba_stats_proxy or None,
+            default_headers=DEFAULT_HEADERS,
+            min_request_interval=1.0,
+            cache=get_shared_cache(),
+        )
+    return _client
 
 
 def _request(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     url = f"{settings.nba_stats_api_url.rstrip('/')}/{endpoint}"
-    last_error: Exception | None = None
-
-    for attempt in range(settings.nba_stats_max_retries):
-        try:
-            response = curl_requests.get(
-                url,
-                params=params,
-                headers=DEFAULT_HEADERS,
-                timeout=settings.nba_stats_timeout_seconds,
-                impersonate=settings.nba_stats_impersonate,
-                proxy=settings.nba_stats_proxy or None,
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            sleep_for = settings.nba_stats_backoff_seconds * (attempt + 1)
-            time.sleep(sleep_for)
-
-    if last_error:
-        raise last_error
-    raise RuntimeError("NBA stats request failed")
+    client = _get_client()
+    result = client.get(url, params=params)
+    if result.json_data is not None:
+        return result.json_data
+    # Fallback: parse body manually if content-type wasn't application/json.
+    import json
+    return json.loads(result.body)
 
 
 def _extract_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:

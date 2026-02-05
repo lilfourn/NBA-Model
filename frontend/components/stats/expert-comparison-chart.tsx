@@ -13,11 +13,11 @@ import {
 import { fetchExpertComparison } from "@/lib/api";
 
 const MODEL_META: Record<string, { label: string; color: string }> = {
-  baseline_logreg: { label: "LR", color: "hsl(var(--chart-1))" },
-  nn_gru_attention: { label: "NN", color: "hsl(var(--chart-2))" },
-  xgboost: { label: "XGB", color: "hsl(var(--chart-3))" },
-  lightgbm: { label: "LGBM", color: "hsl(var(--chart-4))" },
-  meta_learner: { label: "Meta", color: "hsl(var(--chart-5))" },
+  baseline_logreg: { label: "LR", color: "oklch(0.75 0.12 75)" },
+  nn_gru_attention: { label: "NN", color: "oklch(0.6 0.04 250)" },
+  xgboost: { label: "XGB", color: "oklch(0.55 0.03 180)" },
+  lightgbm: { label: "LGBM", color: "oklch(0.65 0.06 60)" },
+  meta_learner: { label: "Meta", color: "oklch(0.5 0 0)" },
 };
 
 const chartConfig: ChartConfig = {
@@ -80,11 +80,10 @@ export function ExpertComparisonChart() {
             return (
               <div
                 key={e.model_name}
-                className="rounded-lg border p-3 text-center"
-                style={{ borderLeftWidth: 3, borderLeftColor: meta?.color }}
+                className="rounded-lg border border-border bg-white/[0.02] p-3 text-center"
               >
                 <p className="text-[11px] font-medium text-muted-foreground">{meta?.label ?? e.model_name}</p>
-                <p className="text-2xl font-bold tabular-nums tracking-tight">
+                <p className="text-2xl font-bold tabular-nums tracking-tight text-primary">
                   {e.accuracy ? `${(e.accuracy * 100).toFixed(1)}%` : "—"}
                 </p>
                 <p className="text-[11px] text-muted-foreground tabular-nums">
@@ -100,11 +99,11 @@ export function ExpertComparisonChart() {
             <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Accuracy %</p>
             <ChartContainer config={chartConfig} className="min-h-[180px] w-full">
               <BarChart data={accData} accessibilityLayer margin={{ top: 5, right: 5, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} />
+                <CartesianGrid vertical={false} strokeOpacity={0.06} />
                 <XAxis dataKey="name" tickLine={false} axisLine={false} tickMargin={8} />
                 <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tickMargin={4} tickFormatter={(v: number) => `${v}%`} />
                 <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
-                <Bar dataKey="value" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="value" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ChartContainer>
           </div>
@@ -113,11 +112,11 @@ export function ExpertComparisonChart() {
             <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">ROC AUC</p>
             <ChartContainer config={chartConfig} className="min-h-[180px] w-full">
               <BarChart data={aucData} accessibilityLayer margin={{ top: 5, right: 5, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} />
+                <CartesianGrid vertical={false} strokeOpacity={0.06} />
                 <XAxis dataKey="name" tickLine={false} axisLine={false} tickMargin={8} />
                 <YAxis domain={[0.5, 1]} tickLine={false} axisLine={false} tickMargin={4} />
                 <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
-                <Bar dataKey="value" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="value" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ChartContainer>
           </div>
@@ -126,11 +125,11 @@ export function ExpertComparisonChart() {
             <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Conformal q̂</p>
             <ChartContainer config={chartConfig} className="min-h-[180px] w-full">
               <BarChart data={conformalData} accessibilityLayer margin={{ top: 5, right: 5, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} />
+                <CartesianGrid vertical={false} strokeOpacity={0.06} />
                 <XAxis dataKey="name" tickLine={false} axisLine={false} tickMargin={8} />
                 <YAxis domain={[0, 1]} tickLine={false} axisLine={false} tickMargin={4} />
                 <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
-                <Bar dataKey="value" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="value" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ChartContainer>
           </div>

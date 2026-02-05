@@ -14,9 +14,9 @@ function Bar({ label, value }: { label: string; value: number | null }) {
   return (
     <div className="flex items-center gap-2 text-sm">
       <span className="w-20 text-muted-foreground">{label}</span>
-      <div className="relative h-4 w-40 rounded bg-muted overflow-hidden">
+      <div className="relative h-4 w-40 rounded bg-white/[0.06] overflow-hidden">
         <div
-          className={`absolute left-0 top-0 h-full rounded ${isOver ? "bg-emerald-500" : "bg-red-400"}`}
+          className={`absolute left-0 top-0 h-full rounded ${isOver ? "bg-emerald-500/60" : "bg-red-500/50"}`}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -53,7 +53,7 @@ export function ExpertBreakdown({ pick }: { pick: ScoredPick }) {
             <span className="font-mono">{(pick.prob_over * 100).toFixed(1)}%</span>
             <span className="text-muted-foreground">Conformal</span>
             <span className="font-mono">
-              {pick.conformal_set_size === 1 ? "✓ Confident" : pick.conformal_set_size === 2 ? "— Ambiguous" : "—"}
+              {pick.conformal_set_size === 1 ? "Confident" : pick.conformal_set_size === 2 ? "Ambiguous" : "—"}
             </span>
           </div>
         </div>

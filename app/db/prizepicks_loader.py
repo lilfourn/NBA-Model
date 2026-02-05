@@ -15,6 +15,13 @@ from app.clients.prizepicks import build_projections_url
 from app.collectors.audit import audit_snapshot
 from app.core.config import settings
 from app.db import schema
+from app.db.coerce import (
+    parse_bool as _parse_bool,
+    parse_datetime as _parse_datetime,
+    parse_decimal as _parse_decimal,
+    parse_int as _parse_int,
+    to_str as _to_str,
+)
 from app.utils.names import normalize_name
 
 TIMESTAMP_PATTERN = re.compile(r"(\d{8}_\d{6})Z")
@@ -22,37 +29,6 @@ MAX_QUERY_PARAMS = 60000
 SNAPSHOT_NAMESPACE = UUID("b1d0a6e3-2f1c-4a1b-9c35-9f9f6f0c7c8e")
 
 
-def _parse_bool(value: Any) -> bool | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"true", "1", "yes"}:
-            return True
-        if lowered in {"false", "0", "no"}:
-            return False
-    return None
-
-
-def _parse_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(float(value))
-        except ValueError:
-            return None
-    return None
 
 
 ODDS_TYPE_CODES: dict[str, int] = {
@@ -72,41 +48,6 @@ def _parse_odds_type(value: Any) -> int | None:
     return _parse_int(value)
 
 
-def _parse_decimal(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, (int, float)):
-        return Decimal(str(value))
-    if isinstance(value, str):
-        try:
-            return Decimal(value)
-        except InvalidOperation:
-            return None
-    return None
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        text = value.replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return None
-    return None
-
-
-def _to_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    return str(value)
 
 
 def _relationship_id(relationships: dict[str, Any], key: str) -> str | None:

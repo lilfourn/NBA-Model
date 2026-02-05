@@ -1,0 +1,198 @@
+{
+  "snapshot_id": "581183b2-be2e-5ea8-9739-2ca1a24c99ae",
+  "n_picks": 200,
+  "overall": {
+    "over": 31,
+    "under": 169,
+    "pct_over": 15.5
+  },
+  "prob_over_stats": {
+    "mean": 0.4677,
+    "median": 0.4443
+  },
+  "expert_stats": {
+    "p_forecast_cal": {
+      "n": 200,
+      "mean": 0.3729,
+      "pct_under": 87.0
+    },
+    "p_nn": {
+      "n": 200,
+      "mean": 0.4155,
+      "pct_under": 91.5
+    },
+    "p_lr": {
+      "n": 200,
+      "mean": 0.3386,
+      "pct_under": 99.5
+    },
+    "p_xgb": {
+      "n": 200,
+      "mean": 0.3629,
+      "pct_under": 84.5
+    },
+    "p_lgbm": {
+      "n": 200,
+      "mean": 0.3763,
+      "pct_under": 84.5
+    },
+    "p_meta": {
+      "n": 200,
+      "mean": 0.4591,
+      "pct_under": 84.5
+    }
+  },
+  "by_stat_type": {
+    "Pts+Asts": {
+      "n": 19,
+      "over": 4,
+      "under": 15,
+      "mean_prob_over": 0.453
+    },
+    "Fantasy Score": {
+      "n": 19,
+      "over": 3,
+      "under": 16,
+      "mean_prob_over": 0.4722
+    },
+    "Offensive Rebounds": {
+      "n": 6,
+      "over": 0,
+      "under": 6,
+      "mean_prob_over": 0.4445
+    },
+    "Free Throws Attempted": {
+      "n": 4,
+      "over": 0,
+      "under": 4,
+      "mean_prob_over": 0.462
+    },
+    "Rebs+Asts": {
+      "n": 10,
+      "over": 3,
+      "under": 7,
+      "mean_prob_over": 0.5011
+    },
+    "Free Throws Made": {
+      "n": 8,
+      "over": 0,
+      "under": 8,
+      "mean_prob_over": 0.4506
+    },
+    "Points": {
+      "n": 23,
+      "over": 6,
+      "under": 17,
+      "mean_prob_over": 0.4854
+    },
+    "Blks+Stls": {
+      "n": 9,
+      "over": 0,
+      "under": 9,
+      "mean_prob_over": 0.4407
+    },
+    "Pts+Rebs": {
+      "n": 22,
+      "over": 5,
+      "under": 17,
+      "mean_prob_over": 0.4772
+    },
+    "Rebounds": {
+      "n": 13,
+      "over": 5,
+      "under": 8,
+      "mean_prob_over": 0.5245
+    },
+    "3-PT Attempted": {
+      "n": 2,
+      "over": 0,
+      "under": 2,
+      "mean_prob_over": 0.4443
+    },
+    "3-PT Made": {
+      "n": 9,
+      "over": 0,
+      "under": 9,
+      "mean_prob_over": 0.444
+    },
+    "Pts+Rebs+Asts": {
+      "n": 25,
+      "over": 2,
+      "under": 23,
+      "mean_prob_over": 0.4493
+    },
+    "Assists": {
+      "n": 6,
+      "over": 0,
+      "under": 6,
+      "mean_prob_over": 0.4656
+    },
+    "Turnovers": {
+      "n": 3,
+      "over": 0,
+      "under": 3,
+      "mean_prob_over": 0.4649
+    },
+    "FG Attempted": {
+      "n": 4,
+      "over": 2,
+      "under": 2,
+      "mean_prob_over": 0.5458
+    },
+    "Personal Fouls": {
+      "n": 2,
+      "over": 0,
+      "under": 2,
+      "mean_prob_over": 0.4597
+    },
+    "Blocked Shots": {
+      "n": 5,
+      "over": 0,
+      "under": 5,
+      "mean_prob_over": 0.4227
+    },
+    "Two Pointers Attempted": {
+      "n": 2,
+      "over": 1,
+      "under": 1,
+      "mean_prob_over": 0.5494
+    },
+    "Steals": {
+      "n": 6,
+      "over": 0,
+      "under": 6,
+      "mean_prob_over": 0.4503
+    },
+    "Two Pointers Made": {
+      "n": 1,
+      "over": 0,
+      "under": 1,
+      "mean_prob_over": 0.3083
+    },
+    "FG Made": {
+      "n": 1,
+      "over": 0,
+      "under": 1,
+      "mean_prob_over": 0.3083
+    },
+    "Defensive Rebounds": {
+      "n": 1,
+      "over": 0,
+      "under": 1,
+      "mean_prob_over": 0.4428
+    }
+  },
+  "near_boundary_count": 37,
+  "ensemble_weights": {
+    "experts": [
+      "p_forecast_cal",
+      "p_nn",
+      "p_lr"
+    ],
+    "n_contexts": 40,
+    "missing_experts": [
+      "p_xgb",
+      "p_lgbm"
+    ]
+  }
+}

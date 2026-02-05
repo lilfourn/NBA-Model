@@ -2,20 +2,21 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, Trophy } from "lucide-react";
 
 const NAV_ITEMS = [
-  { href: "/", label: "Picks", icon: Trophy },
-  { href: "/stats", label: "Model Stats", icon: BarChart3 },
+  { href: "/", label: "Picks" },
+  { href: "/stats", label: "Stats" },
 ];
 
 export function NavBar() {
   const pathname = usePathname();
 
   return (
-    <nav className="border-b bg-card">
-      <div className="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4 sm:px-6 lg:px-8">
-        <span className="text-sm font-bold tracking-tight">NBA Picks</span>
+    <nav className="border-b border-border">
+      <div className="mx-auto flex h-12 max-w-7xl items-center gap-8 px-4 sm:px-6 lg:px-8">
+        <span className="text-sm font-semibold tracking-tight text-foreground">
+          NBA Picks
+        </span>
         <div className="flex items-center gap-1">
           {NAV_ITEMS.map((item) => {
             const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
@@ -23,13 +24,12 @@ export function NavBar() {
               <Link
                 key={item.href}
                 href={item.href}
-                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                className={`px-3 py-1.5 text-sm font-medium transition-colors ${
                   active
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                    ? "text-primary"
+                    : "text-muted-foreground hover:text-foreground"
                 }`}
               >
-                <item.icon className="h-4 w-4" />
                 {item.label}
               </Link>
             );

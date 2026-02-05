@@ -46,12 +46,33 @@ export interface SnapshotsResponse {
   snapshots: Snapshot[];
 }
 
+const PICKS_CACHE_KEY = "nba_picks_cache";
+
+export function getCachedPicks(): ScoringResult | null {
+  try {
+    const raw = localStorage.getItem(PICKS_CACHE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as ScoringResult;
+  } catch {
+    return null;
+  }
+}
+
+export function setCachedPicks(result: ScoringResult): void {
+  try {
+    localStorage.setItem(PICKS_CACHE_KEY, JSON.stringify(result));
+  } catch {
+    // Storage full or unavailable — ignore
+  }
+}
+
 export async function fetchPicks(params?: {
   snapshot_id?: string;
   game_date?: string;
   top?: number;
   rank?: string;
   include_non_today?: boolean;
+  force?: boolean;
 }): Promise<ScoringResult> {
   const searchParams = new URLSearchParams();
   if (params?.snapshot_id) searchParams.set("snapshot_id", params.snapshot_id);
@@ -60,11 +81,14 @@ export async function fetchPicks(params?: {
   if (params?.rank) searchParams.set("rank", params.rank);
   if (params?.include_non_today)
     searchParams.set("include_non_today", "true");
+  if (params?.force) searchParams.set("force", "true");
 
   const url = `${API_URL}/api/picks?${searchParams.toString()}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
+  const result: ScoringResult = await res.json();
+  setCachedPicks(result);
+  return result;
 }
 
 export async function fetchSnapshots(

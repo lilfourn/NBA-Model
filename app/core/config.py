@@ -102,6 +102,17 @@ class Settings(BaseSettings):
         default="data/team_abbrev_overrides.json",
         validation_alias="TEAM_ABBREV_OVERRIDES_PATH",
     )
+    # Cache settings
+    cache_dir: str = Field(default="data/cache", validation_alias="CACHE_DIR")
+    cache_default_ttl_seconds: float = Field(default=3600.0, validation_alias="CACHE_DEFAULT_TTL_SECONDS")
+    cache_nba_stats_ttl_seconds: float = Field(default=7200.0, validation_alias="CACHE_NBA_STATS_TTL_SECONDS")
+    cache_prizepicks_ttl_seconds: float = Field(default=300.0, validation_alias="CACHE_PRIZEPICKS_TTL_SECONDS")
+    cache_bref_ttl_seconds: float = Field(default=86400.0, validation_alias="CACHE_BREF_TTL_SECONDS")
+    cache_statmuse_ttl_seconds: float = Field(default=86400.0, validation_alias="CACHE_STATMUSE_TTL_SECONDS")
+
+    # Collection logging
+    collection_log_path: str = Field(default="logs/collection.jsonl", validation_alias="COLLECTION_LOG_PATH")
+
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
 
     model_config = SettingsConfigDict(

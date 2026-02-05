@@ -2,12 +2,12 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 const GRADE_COLORS: Record<string, string> = {
-  "A+": "bg-emerald-200 text-emerald-900 dark:bg-emerald-800 dark:text-emerald-100",
-  A: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200",
-  B: "bg-sky-100 text-sky-800 dark:bg-sky-900 dark:text-sky-200",
-  C: "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200",
-  D: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
-  F: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
+  "A+": "bg-amber-500/15 text-amber-400 border-amber-500/20",
+  A: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
+  B: "bg-sky-500/15 text-sky-400 border-sky-500/20",
+  C: "bg-zinc-500/15 text-zinc-400 border-zinc-500/20",
+  D: "bg-orange-500/15 text-orange-400 border-orange-500/20",
+  F: "bg-red-500/15 text-red-400 border-red-500/20",
 };
 
 export function EdgeBadge({ edge, grade }: { edge: number; grade: string }) {

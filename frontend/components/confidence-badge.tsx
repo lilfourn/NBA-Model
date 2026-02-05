@@ -5,10 +5,10 @@ export function ConfidenceBadge({ value }: { value: number }) {
   const pct = (value * 100).toFixed(1);
   const color =
     value >= 0.6
-      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200"
+      ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/20"
       : value >= 0.55
-        ? "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200"
-        : "bg-muted text-muted-foreground";
+        ? "bg-amber-500/15 text-amber-400 border-amber-500/20"
+        : "bg-white/[0.04] text-muted-foreground border-border";
 
   return (
     <Badge variant="outline" className={cn("font-mono text-xs", color)}>

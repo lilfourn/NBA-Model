@@ -15,11 +15,11 @@ import {
 import { fetchTrainingHistory } from "@/lib/api";
 
 const MODEL_KEYS: Record<string, { label: string; color: string }> = {
-  baseline_logreg: { label: "Logistic Regression", color: "hsl(var(--chart-1))" },
-  nn_gru_attention: { label: "Neural Network", color: "hsl(var(--chart-2))" },
-  xgboost: { label: "XGBoost", color: "hsl(var(--chart-3))" },
-  lightgbm: { label: "LightGBM", color: "hsl(var(--chart-4))" },
-  meta_learner: { label: "Meta Learner", color: "hsl(var(--chart-5))" },
+  baseline_logreg: { label: "Logistic Regression", color: "oklch(0.75 0.12 75)" },
+  nn_gru_attention: { label: "Neural Network", color: "oklch(0.6 0.04 250)" },
+  xgboost: { label: "XGBoost", color: "oklch(0.55 0.03 180)" },
+  lightgbm: { label: "LightGBM", color: "oklch(0.65 0.06 60)" },
+  meta_learner: { label: "Meta Learner", color: "oklch(0.5 0 0)" },
 };
 
 function formatDate(iso: string | null): string {
@@ -89,7 +89,7 @@ export function TrainingHistoryChart() {
             <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Accuracy (%)</p>
             <ChartContainer config={accConfig} className="min-h-[240px] w-full">
               <LineChart data={data} accessibilityLayer margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} />
+                <CartesianGrid vertical={false} strokeOpacity={0.06} />
                 <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} />
                 <YAxis domain={[40, 100]} tickLine={false} axisLine={false} tickMargin={8} tickFormatter={(v: number) => `${v}%`} />
                 <ChartTooltip content={<ChartTooltipContent />} />
@@ -100,9 +100,9 @@ export function TrainingHistoryChart() {
                     type="natural"
                     dataKey={`${name}_accuracy`}
                     stroke={`var(--color-${name}_accuracy)`}
-                    strokeWidth={2}
-                    dot={{ fill: `var(--color-${name}_accuracy)`, r: 4 }}
-                    activeDot={{ r: 6 }}
+                    strokeWidth={1.5}
+                    dot={false}
+                    activeDot={{ r: 4 }}
                     connectNulls
                   />
                 ))}
@@ -113,7 +113,7 @@ export function TrainingHistoryChart() {
             <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">ROC AUC</p>
             <ChartContainer config={aucConfig} className="min-h-[240px] w-full">
               <LineChart data={data} accessibilityLayer margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} />
+                <CartesianGrid vertical={false} strokeOpacity={0.06} />
                 <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} />
                 <YAxis domain={[0.5, 1]} tickLine={false} axisLine={false} tickMargin={8} tickFormatter={(v: number) => v.toFixed(2)} />
                 <ChartTooltip content={<ChartTooltipContent />} />
@@ -124,9 +124,9 @@ export function TrainingHistoryChart() {
                     type="natural"
                     dataKey={`${name}_auc`}
                     stroke={`var(--color-${name}_auc)`}
-                    strokeWidth={2}
-                    dot={{ fill: `var(--color-${name}_auc)`, r: 4 }}
-                    activeDot={{ r: 6 }}
+                    strokeWidth={1.5}
+                    dot={false}
+                    activeDot={{ r: 4 }}
                     connectNulls
                   />
                 ))}

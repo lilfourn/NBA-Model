@@ -16,12 +16,37 @@ import {
 import { fetchEnsembleWeights } from "@/lib/api";
 import type { EnsembleContext } from "@/lib/api";
 
+const STAT_ABBREV: Record<string, string> = {
+  "3-PT Made": "3PM",
+  "Assists": "AST",
+  "Blks+Stls": "BLK+STL",
+  "Blocked Shots": "BLK",
+  "FG Attempted": "FGA",
+  "FG Made": "FGM",
+  "Fantasy Score": "FPTS",
+  "Free Throws Attempted": "FTA",
+  "Free Throws Made": "FTM",
+  "Points": "PTS",
+  "Pts+Asts": "PTS+AST",
+  "Pts+Rebs+Asts": "PRA",
+  "Rebounds": "REB",
+  "Rebs+Asts": "REB+AST",
+  "Steals": "STL",
+  "Turnovers": "TO",
+  "Two Pointers Attempted": "2PA",
+  "Two Pointers Made": "2PM",
+};
+
+function abbrevStat(s: string): string {
+  return STAT_ABBREV[s] ?? s;
+}
+
 const EXPERT_META: Record<string, { label: string; color: string }> = {
-  p_forecast_cal: { label: "Forecast", color: "hsl(var(--chart-1))" },
-  p_nn: { label: "NN", color: "hsl(var(--chart-2))" },
-  p_lr: { label: "LR", color: "hsl(var(--chart-3))" },
-  p_xgb: { label: "XGB", color: "hsl(var(--chart-4))" },
-  p_lgbm: { label: "LGBM", color: "hsl(var(--chart-5))" },
+  p_forecast_cal: { label: "Forecast", color: "oklch(0.75 0.12 75)" },
+  p_nn: { label: "NN", color: "oklch(0.6 0.04 250)" },
+  p_lr: { label: "LR", color: "oklch(0.55 0.03 180)" },
+  p_xgb: { label: "XGB", color: "oklch(0.65 0.06 60)" },
+  p_lgbm: { label: "LGBM", color: "oklch(0.5 0 0)" },
 };
 
 export function EnsembleWeightsChart() {
@@ -71,10 +96,12 @@ export function EnsembleWeightsChart() {
       rawAvg[expert] = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
     }
     const total = Object.values(rawAvg).reduce((a, b) => a + b, 0) || 1;
-    const entry: Record<string, unknown> = { stat_type: st };
-    for (const expert of data.experts) {
-      entry[expert] = +((rawAvg[expert] / total) * 100).toFixed(1);
-    }
+    const entry: Record<string, unknown> = { stat_type: abbrevStat(st) };
+    const pcts = data.experts.map((e) => Math.round((rawAvg[e] / total) * 1000) / 10);
+    const pctTotal = pcts.reduce((a, b) => a + b, 0);
+    const diff = +(100 - pctTotal).toFixed(1);
+    if (diff !== 0 && pcts.length > 0) pcts[0] = +(pcts[0] + diff).toFixed(1);
+    data.experts.forEach((e, i) => { entry[e] = pcts[i]; });
     return entry;
   });
 
@@ -108,8 +135,8 @@ export function EnsembleWeightsChart() {
             </p>
             <ChartContainer config={barConfig} className="min-h-[320px] w-full">
               <BarChart data={barData} accessibilityLayer margin={{ top: 5, right: 12, bottom: 10, left: 0 }}>
-                <CartesianGrid vertical={false} />
-                <XAxis dataKey="stat_type" tickLine={false} axisLine={false} tickMargin={8} angle={-45} textAnchor="end" height={90} interval={0} />
+                <CartesianGrid vertical={false} strokeOpacity={0.06} />
+                <XAxis dataKey="stat_type" tickLine={false} axisLine={false} tickMargin={6} angle={-35} textAnchor="end" height={60} interval={0} fontSize={10} />
                 <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tickMargin={4} tickFormatter={(v: number) => `${v}%`} />
                 <ChartTooltip content={<ChartTooltipContent />} />
                 <ChartLegend content={<ChartLegendContent />} />
@@ -132,7 +159,7 @@ export function EnsembleWeightsChart() {
               Context detail
             </p>
             <select
-              className="mb-4 w-full rounded-md border bg-background px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+              className="mb-4 w-full rounded-md border border-border bg-white/[0.04] px-2.5 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
               value={selected?.context_key ?? ""}
               onChange={(e) => {
                 const ctx = data.contexts.find((c) => c.context_key === e.target.value);
@@ -141,7 +168,7 @@ export function EnsembleWeightsChart() {
             >
               {data.contexts.map((ctx) => (
                 <option key={ctx.context_key} value={ctx.context_key}>
-                  {ctx.stat_type} · {ctx.regime} · {ctx.neff_bucket}
+                  {abbrevStat(ctx.stat_type)} · {ctx.regime} · {ctx.neff_bucket}
                 </option>
               ))}
             </select>

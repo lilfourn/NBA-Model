@@ -5,6 +5,36 @@ from typing import Any, Callable
 
 from curl_cffi import requests as curl_requests
 
+from app.clients.base import CrawlerClient
+
+# Per-source client singletons keyed by (source_name).
+_CLIENTS: dict[str, CrawlerClient] = {}
+
+
+def _get_or_create_client(
+    *,
+    source_name: str,
+    max_retries: int,
+    backoff_seconds: float,
+    timeout: int | float | None,
+    impersonate: str | None,
+    proxy: str | None,
+    should_retry: Callable[[int], bool] | None,
+    headers: dict[str, str] | None,
+) -> CrawlerClient:
+    if source_name not in _CLIENTS:
+        _CLIENTS[source_name] = CrawlerClient(
+            source_name=source_name,
+            max_retries=max_retries,
+            backoff_seconds=backoff_seconds,
+            read_timeout=float(timeout or 20),
+            impersonate=impersonate,
+            proxy=proxy,
+            default_headers=headers or {},
+            should_retry=should_retry,
+        )
+    return _CLIENTS[source_name]
+
 
 def get_with_retries(
     *,
@@ -18,33 +48,21 @@ def get_with_retries(
     backoff_seconds: float = 1.5,
     should_retry: Callable[[int], bool] | None = None,
 ) -> dict[str, Any]:
-    last_error: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            response = curl_requests.get(
-                url,
-                params=params or {},
-                headers=headers or {},
-                timeout=timeout,
-                impersonate=impersonate,
-                proxy=proxy,
-            )
-            if should_retry and should_retry(response.status_code):
-                raise RuntimeError(f"Retryable status {response.status_code}")
-            response.raise_for_status()
-            return {
-                "status_code": response.status_code,
-                "headers": dict(response.headers),
-                "text": response.text,
-                "json": (response.json() if "application/json" in response.headers.get("Content-Type", "") else None),
-            }
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            if attempt >= max_retries:
-                break
-            sleep_for = backoff_seconds * (2**attempt)
-            time.sleep(sleep_for)
-
-    if last_error:
-        raise last_error
-    raise RuntimeError("Request failed without exception")
+    """Backward-compatible wrapper that delegates to CrawlerClient."""
+    client = _get_or_create_client(
+        source_name="http_utils",
+        max_retries=max_retries,
+        backoff_seconds=backoff_seconds,
+        timeout=timeout,
+        impersonate=impersonate,
+        proxy=proxy,
+        should_retry=should_retry,
+        headers=headers,
+    )
+    result = client.get(url, params=params, headers=headers, timeout=float(timeout or 20))
+    return {
+        "status_code": result.status_code,
+        "headers": result.headers,
+        "text": result.body,
+        "json": result.json_data,
+    }
