@@ -110,6 +110,18 @@ Generate top picks from the latest PrizePicks snapshot:
 python -m scripts.ml.run_top_picks
 ```
 
+Log scored ensemble predictions to Postgres (`projection_predictions`) for later outcome tracking:
+
+```bash
+python -m scripts.ml.run_top_picks_ensemble --log-decisions --log-top-only
+```
+
+Resolve logged predictions against official NBA box scores after games complete:
+
+```bash
+python -m scripts.ops.resolve_projection_outcomes --days-back 21
+```
+
 ### Player Source Index
 
 Cache per-player URLs for fallback sources (only players in projections):
@@ -179,8 +191,12 @@ Add a cron entry on the host to run the collector in Docker:
 Daily training run (includes NBA stats refresh):
 
 ```bash
-0 5 * * * /Users/lukesmac/nba-stats-project/scripts/cron_train.sh
+0 14 * * * /Users/lukesmac/nba-stats-project/scripts/cron_train.sh
 ```
+
+`cron_collect.sh` records ensemble predictions into Postgres (`projection_predictions`) every collection run.
+
+`cron_train.sh` resolves stored prediction outcomes into Postgres after NBA stats ingestion, then retrains ensemble weights from resolved DB outcomes (`--source db`).
 
 Create the log directory once:
 

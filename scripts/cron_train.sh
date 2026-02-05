@@ -149,7 +149,7 @@ docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -
   python -m scripts.ml.train_meta_learner 2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log" || true
 
 docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
-  python -m scripts.ml.train_online_ensemble --log-path data/monitoring/prediction_log.csv --out models/ensemble_weights.json \
+  python -m scripts.ml.train_online_ensemble --source db --days-back 90 --log-path data/monitoring/prediction_log.csv --out models/ensemble_weights.json \
   2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"
 ensemble_status=${PIPESTATUS[0]}
 
@@ -159,7 +159,7 @@ docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -
 # Health monitoring is advisory; don't fail the pipeline on it.
 set -e
 
-if [ "$fetch_status" -ne 0 ] || [ "$train_status" -ne 0 ] || [ "$nn_status" -ne 0 ] || [ "$xgb_status" -ne 0 ] || [ "$lgbm_status" -ne 0 ] || [ "$ensemble_status" -ne 0 ]; then
+if [ "$fetch_status" -ne 0 ] || [ "$resolve_status" -ne 0 ] || [ "$train_status" -ne 0 ] || [ "$nn_status" -ne 0 ] || [ "$xgb_status" -ne 0 ] || [ "$lgbm_status" -ne 0 ] || [ "$ensemble_status" -ne 0 ]; then
   echo "cron_train failed: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$LOG_DIR/cron_train_error.log"
   if [ -f "$EMAIL_SCRIPT" ]; then
     "$PROJECT_ROOT/.venv/bin/python" "$EMAIL_SCRIPT" --subject "$EMAIL_SUBJECT" --body-file "$tmp_log" || true

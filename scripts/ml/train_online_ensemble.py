@@ -203,11 +203,76 @@ def _write_back_outcomes(
     return updated_rows
 
 
+def _load_training_frame_from_db(engine, *, days_back: int) -> pd.DataFrame:
+    frame = pd.read_sql(
+        text(
+            """
+            select
+                projection_id,
+                player_id,
+                game_id,
+                stat_type,
+                line_score,
+                over_label,
+                actual_value,
+                n_eff,
+                p_forecast_cal,
+                p_nn,
+                p_lr,
+                p_xgb,
+                p_lgbm,
+                prob_over as p_final,
+                coalesce(decision_time, created_at) as decision_time_parsed,
+                details->>'is_live' as is_live
+            from projection_predictions
+            where over_label is not null
+              and actual_value is not null
+              and coalesce(decision_time, created_at) >= now() - (:days_back * interval '1 day')
+            order by coalesce(decision_time, created_at) asc
+            """
+        ),
+        engine,
+        params={"days_back": int(max(1, days_back))},
+    )
+    if frame.empty:
+        return frame
+
+    frame["player_id"] = frame.get("player_id").apply(_normalize_id)
+    frame["game_id"] = frame.get("game_id").apply(_normalize_id)
+    frame["decision_time_parsed"] = _parse_timestamp(frame.get("decision_time_parsed"))
+    frame["is_live"] = (
+        frame.get("is_live")
+        .fillna("false")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin({"true", "1", "yes", "t"})
+    )
+    frame["n_eff"] = pd.to_numeric(frame.get("n_eff"), errors="coerce")
+    frame["line_score"] = pd.to_numeric(frame.get("line_score"), errors="coerce")
+    frame["over_label"] = pd.to_numeric(frame.get("over_label"), errors="coerce")
+    frame = frame.dropna(subset=["stat_type", "line_score", "over_label", "decision_time_parsed"])
+    frame["over_label"] = frame["over_label"].astype(int)
+    return frame
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Train an online contextual Hedge ensemble from logged predictions.")
     ap.add_argument("--database-url", default=None)
     ap.add_argument("--log-path", default=PRED_LOG_DEFAULT)
     ap.add_argument("--out", default="models/ensemble_weights.json")
+    ap.add_argument(
+        "--source",
+        choices=["db", "csv", "auto"],
+        default="db",
+        help="Training data source. 'db' uses projection_predictions outcomes, 'csv' uses prediction_log.csv.",
+    )
+    ap.add_argument(
+        "--days-back",
+        type=int,
+        default=90,
+        help="When source includes db, only use resolved rows from the last N days.",
+    )
     ap.add_argument("--eta", type=float, default=0.2)
     ap.add_argument("--shrink", type=float, default=0.01)
     ap.add_argument("--experts", nargs="*", default=None, help="Expert probability columns.")
@@ -226,73 +291,114 @@ def main() -> None:
 
     load_env()
     engine = get_engine(args.database_url)
+    joined: pd.DataFrame | None = None
 
-    log_path = Path(args.log_path)
-    if not log_path.exists():
-        print(f"Prediction log not found: {log_path}")
+    if args.source in {"db", "auto"}:
+        db_frame = _load_training_frame_from_db(engine, days_back=int(args.days_back))
+        if not db_frame.empty:
+            joined = db_frame
+            print(
+                f"Loaded {len(joined)} resolved rows from projection_predictions "
+                f"(days_back={int(args.days_back)})."
+            )
+        elif args.source == "db":
+            print("No resolved projection outcomes found in projection_predictions.")
+            return
+
+    if joined is None and args.source in {"csv", "auto"}:
+        log_path = Path(args.log_path)
+        if not log_path.exists():
+            print(f"Prediction log not found: {log_path}")
+            return
+
+        raw_df = pd.read_csv(log_path)
+        if raw_df.empty:
+            print("Prediction log is empty.")
+            return
+
+        required = {"player_id", "game_id", "stat_type", "line_score"}
+        req_missing = required - set(raw_df.columns)
+        if req_missing:
+            raise SystemExit(f"Prediction log missing required columns: {sorted(req_missing)}")
+
+        raw_df = raw_df.reset_index(drop=True)
+        raw_df["__row_id"] = raw_df.index.astype(int)
+        raw_df["player_id"] = raw_df["player_id"].apply(_normalize_id)
+        raw_df["game_id"] = raw_df["game_id"].apply(_normalize_id)
+        raw_df["decision_time_parsed"] = _parse_timestamp(raw_df.get("decision_time"))
+        if raw_df["decision_time_parsed"].isna().all():
+            raw_df["decision_time_parsed"] = _parse_timestamp(raw_df.get("created_at"))
+
+        resolved_all = _load_outcomes(engine, raw_df)
+        if args.no_write_outcomes:
+            print("Outcome write-back disabled (--no-write-outcomes).")
+        else:
+            updated_rows = _write_back_outcomes(raw_df, resolved_all, path=log_path, only_missing=True)
+            print(f"Outcome write-back: updated {updated_rows} row(s) in {log_path}.")
+
+        df = raw_df.copy()
+
+        experts = args.experts or EXPERT_COLS_DEFAULT
+        missing = [col for col in experts if col not in df.columns]
+        if missing:
+            # New experts may not yet appear in historical logs. Train with available ones.
+            print(f"Note: expert columns not yet in log (will be added on next scoring run): {missing}")
+            experts = [col for col in experts if col in df.columns]
+            if not experts:
+                raise SystemExit("No expert columns found in prediction log.")
+
+        for col in experts:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Keep only rows with enough expert probs.
+        expert_non_null = df[experts].notna().sum(axis=1)
+        df = df[expert_non_null >= int(args.min_experts)].copy()
+        if df.empty:
+            print("No rows with enough expert probabilities to train.")
+            return
+
+        df = df.dropna(subset=["stat_type", "line_score"])
+        df["is_live"] = df.get("is_live", False).fillna(False).astype(bool)
+        df["n_eff"] = pd.to_numeric(df.get("n_eff"), errors="coerce")
+
+        if resolved_all.empty:
+            print("No outcomes available yet for logged rows.")
+            return
+
+        joined = resolved_all[resolved_all["__row_id"].isin(df["__row_id"])].copy()
+        if joined.empty:
+            print("No outcomes available yet for rows eligible for ensemble training.")
+            return
+        for col in experts:
+            joined[col] = pd.to_numeric(joined.get(col), errors="coerce")
+
+    if joined is None or joined.empty:
+        print("No training rows available after source selection.")
         return
-
-    raw_df = pd.read_csv(log_path)
-    if raw_df.empty:
-        print("Prediction log is empty.")
-        return
-
-    required = {"player_id", "game_id", "stat_type", "line_score"}
-    req_missing = required - set(raw_df.columns)
-    if req_missing:
-        raise SystemExit(f"Prediction log missing required columns: {sorted(req_missing)}")
-
-    raw_df = raw_df.reset_index(drop=True)
-    raw_df["__row_id"] = raw_df.index.astype(int)
-    raw_df["player_id"] = raw_df["player_id"].apply(_normalize_id)
-    raw_df["game_id"] = raw_df["game_id"].apply(_normalize_id)
-    raw_df["decision_time_parsed"] = _parse_timestamp(raw_df.get("decision_time"))
-    if raw_df["decision_time_parsed"].isna().all():
-        raw_df["decision_time_parsed"] = _parse_timestamp(raw_df.get("created_at"))
-
-    resolved_all = _load_outcomes(engine, raw_df)
-    if args.no_write_outcomes:
-        print("Outcome write-back disabled (--no-write-outcomes).")
-    else:
-        updated_rows = _write_back_outcomes(raw_df, resolved_all, path=log_path, only_missing=True)
-        print(f"Outcome write-back: updated {updated_rows} row(s) in {log_path}.")
-
-    df = raw_df.copy()
 
     experts = args.experts or EXPERT_COLS_DEFAULT
-    missing = [col for col in experts if col not in df.columns]
+    missing = [col for col in experts if col not in joined.columns]
     if missing:
-        # New experts may not yet appear in historical logs. Train with available ones.
-        print(f"Note: expert columns not yet in log (will be added on next scoring run): {missing}")
-        experts = [col for col in experts if col in df.columns]
+        print(f"Note: expert columns missing from selected source: {missing}")
+        experts = [col for col in experts if col in joined.columns]
         if not experts:
-            raise SystemExit("No expert columns found in prediction log.")
-
-    for col in experts:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Keep only rows with enough expert probs.
-    expert_non_null = df[experts].notna().sum(axis=1)
-    df = df[expert_non_null >= int(args.min_experts)].copy()
-    if df.empty:
-        print("No rows with enough expert probabilities to train.")
-        return
-
-    df = df.dropna(subset=["stat_type", "line_score"])
-    df["is_live"] = df.get("is_live", False).fillna(False).astype(bool)
-    df["n_eff"] = pd.to_numeric(df.get("n_eff"), errors="coerce")
-
-    if resolved_all.empty:
-        print("No outcomes available yet for logged rows.")
-        return
-
-    joined = resolved_all[resolved_all["__row_id"].isin(df["__row_id"])].copy()
-    if joined.empty:
-        print("No outcomes available yet for rows eligible for ensemble training.")
-        return
+            raise SystemExit("No expert columns available to train ensemble.")
 
     for col in experts:
         joined[col] = pd.to_numeric(joined.get(col), errors="coerce")
+
+    expert_non_null = joined[experts].notna().sum(axis=1)
+    joined = joined[expert_non_null >= int(args.min_experts)].copy()
+    if joined.empty:
+        print("No resolved rows with enough expert probabilities to train.")
+        return
+
+    joined["n_eff"] = pd.to_numeric(joined.get("n_eff"), errors="coerce")
+    joined["is_live"] = joined.get("is_live", False).fillna(False).astype(bool)
+    joined = joined.dropna(subset=["over_label", "stat_type", "line_score", "decision_time_parsed"])
+    if joined.empty:
+        print("No resolved rows available after final validation filters.")
+        return
 
     joined = joined.sort_values("decision_time_parsed")
     ens = ContextualHedgeEnsembler(experts=list(experts), eta=float(args.eta), shrink_to_uniform=float(args.shrink))

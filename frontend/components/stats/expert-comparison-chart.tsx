@@ -1,46 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  Cell,
-} from "recharts";
+import { usePolling } from "@/lib/use-polling";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid } from "recharts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  type ChartConfig,
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "@/components/ui/chart";
 import { fetchExpertComparison } from "@/lib/api";
-import type { ExpertSummary } from "@/lib/api";
 
-const MODEL_COLORS: Record<string, string> = {
-  baseline_logreg: "var(--chart-1)",
-  nn_gru_attention: "var(--chart-2)",
-  xgboost: "var(--chart-3)",
-  lightgbm: "var(--chart-4)",
+const MODEL_META: Record<string, { label: string; color: string }> = {
+  baseline_logreg: { label: "LR", color: "hsl(var(--chart-1))" },
+  nn_gru_attention: { label: "NN", color: "hsl(var(--chart-2))" },
+  xgboost: { label: "XGB", color: "hsl(var(--chart-3))" },
+  lightgbm: { label: "LGBM", color: "hsl(var(--chart-4))" },
+  meta_learner: { label: "Meta", color: "hsl(var(--chart-5))" },
 };
 
-const MODEL_LABELS: Record<string, string> = {
-  baseline_logreg: "LR",
-  nn_gru_attention: "NN",
-  xgboost: "XGB",
-  lightgbm: "LGBM",
+const chartConfig: ChartConfig = {
+  value: { label: "Value" },
 };
 
 export function ExpertComparisonChart() {
-  const [experts, setExperts] = useState<ExpertSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetchExpertComparison()
-      .then((r) => setExperts(r.experts))
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+  const { data: resp, loading } = usePolling(fetchExpertComparison);
+  const experts = resp?.experts ?? [];
 
   if (loading) {
     return (
@@ -63,21 +49,21 @@ export function ExpertComparisonChart() {
   }
 
   const accData = experts.map((e) => ({
-    name: MODEL_LABELS[e.model_name] || e.model_name,
+    name: MODEL_META[e.model_name]?.label ?? e.model_name,
     value: e.accuracy ? +(e.accuracy * 100).toFixed(1) : 0,
-    color: MODEL_COLORS[e.model_name] || "var(--chart-4)",
+    fill: MODEL_META[e.model_name]?.color ?? "hsl(var(--chart-5))",
   }));
 
   const aucData = experts.map((e) => ({
-    name: MODEL_LABELS[e.model_name] || e.model_name,
+    name: MODEL_META[e.model_name]?.label ?? e.model_name,
     value: e.roc_auc ? +e.roc_auc.toFixed(4) : 0,
-    color: MODEL_COLORS[e.model_name] || "var(--chart-4)",
+    fill: MODEL_META[e.model_name]?.color ?? "hsl(var(--chart-5))",
   }));
 
   const conformalData = experts.map((e) => ({
-    name: MODEL_LABELS[e.model_name] || e.model_name,
+    name: MODEL_META[e.model_name]?.label ?? e.model_name,
     value: e.conformal_q_hat ? +e.conformal_q_hat.toFixed(4) : 0,
-    color: MODEL_COLORS[e.model_name] || "var(--chart-4)",
+    fill: MODEL_META[e.model_name]?.color ?? "hsl(var(--chart-5))",
   }));
 
   return (
@@ -88,73 +74,65 @@ export function ExpertComparisonChart() {
       </CardHeader>
       <CardContent>
         {/* Summary stat cards */}
-        <div className="mb-6 grid grid-cols-3 gap-3">
-          {experts.map((e) => (
-            <div
-              key={e.model_name}
-              className="rounded-lg border p-3 text-center"
-            >
-              <p className="text-xs text-muted-foreground">{MODEL_LABELS[e.model_name] || e.model_name}</p>
-              <p className="text-2xl font-bold tabular-nums">
-                {e.accuracy ? `${(e.accuracy * 100).toFixed(1)}%` : "—"}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                AUC {e.roc_auc?.toFixed(3) ?? "—"} · {e.train_rows.toLocaleString()} rows
-              </p>
-            </div>
-          ))}
+        <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          {experts.map((e) => {
+            const meta = MODEL_META[e.model_name];
+            return (
+              <div
+                key={e.model_name}
+                className="rounded-lg border p-3 text-center"
+                style={{ borderLeftWidth: 3, borderLeftColor: meta?.color }}
+              >
+                <p className="text-[11px] font-medium text-muted-foreground">{meta?.label ?? e.model_name}</p>
+                <p className="text-2xl font-bold tabular-nums tracking-tight">
+                  {e.accuracy ? `${(e.accuracy * 100).toFixed(1)}%` : "—"}
+                </p>
+                <p className="text-[11px] text-muted-foreground tabular-nums">
+                  AUC {e.roc_auc?.toFixed(3) ?? "—"} · {e.train_rows.toLocaleString()} rows
+                </p>
+              </div>
+            );
+          })}
         </div>
 
         <div className="grid gap-6 md:grid-cols-3">
           <div>
-            <p className="mb-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">Accuracy %</p>
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={accData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                  {accData.map((entry, i) => (
-                    <Cell key={i} fill={entry.color} />
-                  ))}
-                </Bar>
+            <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Accuracy %</p>
+            <ChartContainer config={chartConfig} className="min-h-[180px] w-full">
+              <BarChart data={accData} accessibilityLayer margin={{ top: 5, right: 5, bottom: 5, left: 0 }}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey="name" tickLine={false} axisLine={false} tickMargin={8} />
+                <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tickMargin={4} tickFormatter={(v: number) => `${v}%`} />
+                <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
+                <Bar dataKey="value" radius={[6, 6, 0, 0]} />
               </BarChart>
-            </ResponsiveContainer>
+            </ChartContainer>
           </div>
 
           <div>
-            <p className="mb-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">ROC AUC</p>
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={aucData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                <YAxis domain={[0.5, 1]} tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                  {aucData.map((entry, i) => (
-                    <Cell key={i} fill={entry.color} />
-                  ))}
-                </Bar>
+            <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">ROC AUC</p>
+            <ChartContainer config={chartConfig} className="min-h-[180px] w-full">
+              <BarChart data={aucData} accessibilityLayer margin={{ top: 5, right: 5, bottom: 5, left: 0 }}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey="name" tickLine={false} axisLine={false} tickMargin={8} />
+                <YAxis domain={[0.5, 1]} tickLine={false} axisLine={false} tickMargin={4} />
+                <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
+                <Bar dataKey="value" radius={[6, 6, 0, 0]} />
               </BarChart>
-            </ResponsiveContainer>
+            </ChartContainer>
           </div>
 
           <div>
-            <p className="mb-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">Conformal q̂</p>
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={conformalData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                  {conformalData.map((entry, i) => (
-                    <Cell key={i} fill={entry.color} />
-                  ))}
-                </Bar>
+            <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Conformal q̂</p>
+            <ChartContainer config={chartConfig} className="min-h-[180px] w-full">
+              <BarChart data={conformalData} accessibilityLayer margin={{ top: 5, right: 5, bottom: 5, left: 0 }}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey="name" tickLine={false} axisLine={false} tickMargin={8} />
+                <YAxis domain={[0, 1]} tickLine={false} axisLine={false} tickMargin={4} />
+                <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
+                <Bar dataKey="value" radius={[6, 6, 0, 0]} />
               </BarChart>
-            </ResponsiveContainer>
+            </ChartContainer>
           </div>
         </div>
       </CardContent>

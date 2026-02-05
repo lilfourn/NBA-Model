@@ -296,11 +296,28 @@ projection_predictions = Table(
     Column("snapshot_id", UUID(as_uuid=True), ForeignKey("snapshots.id", ondelete="CASCADE")),
     Column("projection_id", Text, nullable=False),
     Column("model_version", Text, nullable=False),
+    Column("decision_time", DateTime(timezone=True), nullable=True),
+    Column("player_id", Text, nullable=True),
+    Column("game_id", Text, nullable=True),
+    Column("stat_type", Text, nullable=True),
+    Column("line_score", Numeric, nullable=True),
     Column("pick", Text, nullable=False),
     Column("prob_over", Numeric, nullable=True),
     Column("confidence", Numeric, nullable=True),
+    Column("p_forecast_cal", Numeric, nullable=True),
+    Column("p_nn", Numeric, nullable=True),
+    Column("p_lr", Numeric, nullable=True),
+    Column("p_xgb", Numeric, nullable=True),
+    Column("p_lgbm", Numeric, nullable=True),
+    Column("rank_score", Numeric, nullable=True),
+    Column("n_eff", Numeric, nullable=True),
     Column("mean", Numeric, nullable=True),
     Column("std", Numeric, nullable=True),
+    Column("actual_value", Numeric, nullable=True),
+    Column("over_label", Integer, nullable=True),
+    Column("outcome", Text, nullable=True),
+    Column("is_correct", Boolean, nullable=True),
+    Column("resolved_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=True),
     Column("details", JSONB, nullable=True),
 )
@@ -325,6 +342,9 @@ Index("idx_projections_start_time", projections.c.start_time)
 Index("idx_player_game_logs_player_id", player_game_logs.c.player_id)
 Index("idx_player_game_logs_game_date", player_game_logs.c.game_date)
 Index("idx_prediction_snapshot_id", projection_predictions.c.snapshot_id)
+Index("idx_prediction_decision_time", projection_predictions.c.decision_time)
+Index("idx_prediction_resolved_at", projection_predictions.c.resolved_at)
+Index("idx_prediction_player_game", projection_predictions.c.player_id, projection_predictions.c.game_id)
 Index("idx_players_name_key", players.c.name_key)
 Index("idx_projection_features_snapshot_id", projection_features.c.snapshot_id)
 Index("idx_projection_features_player_id", projection_features.c.player_id)

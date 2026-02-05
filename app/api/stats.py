@@ -82,7 +82,7 @@ def expert_comparison() -> dict:
     return {"experts": experts}
 
 
-def _load_prediction_log() -> pd.DataFrame | None:
+def _load_prediction_log_csv() -> pd.DataFrame | None:
     if not PRED_LOG_PATH.exists():
         return None
     df = pd.read_csv(PRED_LOG_PATH)
@@ -91,9 +91,39 @@ def _load_prediction_log() -> pd.DataFrame | None:
     return df
 
 
+def _load_prediction_records() -> pd.DataFrame | None:
+    # Prefer canonical DB records; fallback to legacy CSV log for local/dev usage.
+    try:
+        engine = get_engine()
+        df = pd.read_sql(
+            text(
+                """
+                select
+                    coalesce(decision_time, created_at) as decision_time,
+                    created_at,
+                    over_label,
+                    prob_over as p_final,
+                    p_forecast_cal,
+                    p_nn,
+                    p_lr,
+                    p_xgb,
+                    p_lgbm
+                from projection_predictions
+                order by coalesce(decision_time, created_at) asc
+                """
+            ),
+            engine,
+        )
+        if not df.empty:
+            return df
+    except Exception:  # noqa: BLE001
+        pass
+    return _load_prediction_log_csv()
+
+
 @router.get("/hit-rate")
 def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
-    df = _load_prediction_log()
+    df = _load_prediction_records()
     if df is None:
         return {"total_predictions": 0, "total_resolved": 0, "overall_hit_rate": None, "rolling": []}
 
@@ -245,7 +275,7 @@ def ensemble_weights() -> dict:
 
 @router.get("/confidence-dist")
 def confidence_dist(bins: int = Query(20, ge=5, le=50)) -> dict:
-    df = _load_prediction_log()
+    df = _load_prediction_records()
     if df is None:
         return {"bins": []}
 

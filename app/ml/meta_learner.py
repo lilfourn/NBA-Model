@@ -21,6 +21,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from app.db import schema
+from app.ml.artifacts import load_joblib_artifact
 
 BASE_EXPERT_COLS = ["oof_lr", "oof_xgb", "oof_lgbm"]
 INFER_EXPERT_COLS = ["p_lr", "p_xgb", "p_lgbm"]
@@ -135,7 +136,7 @@ def infer_meta_learner(
     Returns:
         Meta-learner P(over) or None if any input is missing.
     """
-    payload = joblib.load(model_path)
+    payload = load_joblib_artifact(model_path)
     model = payload["model"]
     infer_cols = payload.get("infer_expert_cols", INFER_EXPERT_COLS)
 
@@ -156,7 +157,7 @@ def batch_infer_meta_learner(
     expert_df: pd.DataFrame,
 ) -> np.ndarray:
     """Batch inference: expert_df columns must include INFER_EXPERT_COLS."""
-    payload = joblib.load(model_path)
+    payload = load_joblib_artifact(model_path)
     model = payload["model"]
     infer_cols = payload.get("infer_expert_cols", INFER_EXPERT_COLS)
 

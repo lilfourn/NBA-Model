@@ -6,7 +6,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import joblib
 import pandas as pd
 from sqlalchemy import text
 
@@ -17,9 +16,10 @@ if str(ROOT) not in sys.path:
 from app.db.engine import get_engine  # noqa: E402
 from app.db.prediction_logs import append_prediction_rows  # noqa: E402
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs  # noqa: E402
-from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs  # noqa: E402
+from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs, latest_compatible_checkpoint  # noqa: E402
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs  # noqa: E402
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs  # noqa: E402
+from app.ml.artifacts import load_joblib_artifact, latest_compatible_joblib_path  # noqa: E402
 from app.ml.meta_learner import infer_meta_learner  # noqa: E402
 from app.modeling.db_logs import load_db_game_logs  # noqa: E402
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator  # noqa: E402
@@ -36,13 +36,6 @@ from app.ml.stat_mappings import (  # noqa: E402
 )
 from scripts.ops.log_decisions import PRED_LOG_DEFAULT, append_prediction_log  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
-
-
-def _latest_model_path(models_dir: Path, pattern: str) -> Path | None:
-    if not models_dir.exists():
-        return None
-    candidates = sorted(models_dir.glob(pattern))
-    return candidates[-1] if candidates else None
 
 
 def _latest_snapshot_id(engine) -> str | None:
@@ -154,6 +147,7 @@ def _load_projection_frame(engine, snapshot_id: str, *, include_non_today: bool)
             pf.fetched_at,
             pf.start_time,
             pl.display_name as player_name,
+            coalesce(nullif(pl.image_url, ''), nullif(p.attributes->>'custom_image', '')) as player_image_url,
             pl.combo as combo
         from projection_features pf
         join projections p
@@ -275,11 +269,11 @@ def main() -> None:
         print(f"Using calibration: {args.calibration}")
 
     models_dir = Path(args.models_dir)
-    nn_path = _latest_model_path(models_dir, "nn_gru_attention_*.pt")
-    lr_path = _latest_model_path(models_dir, "baseline_logreg_*.joblib")
-    xgb_path = _latest_model_path(models_dir, "xgb_*.joblib")
-    lgbm_path = _latest_model_path(models_dir, "lgbm_*.joblib")
-    meta_path = _latest_model_path(models_dir, "meta_learner_*.joblib")
+    nn_path = latest_compatible_checkpoint(models_dir, "nn_gru_attention_*.pt")
+    lr_path = latest_compatible_joblib_path(models_dir, "baseline_logreg_*.joblib")
+    xgb_path = latest_compatible_joblib_path(models_dir, "xgb_*.joblib")
+    lgbm_path = latest_compatible_joblib_path(models_dir, "lgbm_*.joblib")
+    meta_path = latest_compatible_joblib_path(models_dir, "meta_learner_*.joblib")
 
     calibrator = None
     if args.calibration:
@@ -420,7 +414,7 @@ def main() -> None:
     for _mp in [lr_path, xgb_path, lgbm_path]:
         if _mp and _mp.exists():
             try:
-                _pl = joblib.load(str(_mp))
+                _pl = load_joblib_artifact(str(_mp))
                 _cd = _pl.get("conformal")
                 if _cd:
                     conformal_cals.append(ConformalCalibrator(**_cd))
@@ -504,6 +498,7 @@ def main() -> None:
                 "projection_id": proj_id,
                 "player_id": str(getattr(row, "player_id", "") or ""),
                 "player_name": str(getattr(row, "player_name", "") or ""),
+                "player_image_url": str(getattr(row, "player_image_url", "") or "") or None,
                 "game_id": getattr(row, "game_id", None),
                 "stat_type": stat_type,
                 "line_score": float(getattr(row, "line_score", 0.0) or 0.0),
@@ -579,6 +574,7 @@ def main() -> None:
                     "projection_id": item["projection_id"],
                     "game_id": item.get("game_id"),
                     "player_id": item.get("player_id"),
+                    "player_image_url": item.get("player_image_url"),
                     "stat_type": item["stat_type"],
                     "is_live": bool(item.get("is_live") or False),
                     "decision_time": decision_time,

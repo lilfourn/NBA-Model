@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,54 @@ class InferenceResult:
     frame: Any
     numeric: Any
     probs: np.ndarray
+
+
+def _is_compatible_payload(payload: dict[str, Any]) -> bool:
+    try:
+        cat_maps = payload["cat_maps"]
+        state_dict = payload["state_dict"]
+    except KeyError:
+        return False
+    if not isinstance(cat_maps, dict):
+        return False
+    numeric_cols = payload.get("numeric_cols")
+    if isinstance(numeric_cols, list):
+        num_numeric = len(numeric_cols)
+    else:
+        numeric_stats = payload.get("numeric_stats")
+        if isinstance(numeric_stats, dict):
+            num_numeric = len(numeric_stats)
+        else:
+            return False
+    if num_numeric <= 0:
+        return False
+
+    cat_emb_dims = payload.get("cat_emb_dims", [8, 8, 4])
+    cat_cardinalities = [len(mapping) + 1 for mapping in cat_maps.values()]
+    try:
+        model = GRUAttentionTabularClassifier(
+            num_numeric=num_numeric,
+            cat_cardinalities=cat_cardinalities,
+            cat_emb_dims=cat_emb_dims,
+            seq_d_in=2,
+        )
+        model.load_state_dict(state_dict)
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def latest_compatible_checkpoint(models_dir: Path, pattern: str = "nn_gru_attention_*.pt") -> Path | None:
+    if not models_dir.exists():
+        return None
+    for candidate in sorted(models_dir.glob(pattern), reverse=True):
+        try:
+            payload = torch.load(str(candidate), map_location="cpu")
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(payload, dict) and _is_compatible_payload(payload):
+            return candidate
+    return None
 
 
 def load_model(

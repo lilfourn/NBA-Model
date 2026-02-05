@@ -6,17 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import joblib as _joblib
-
 import pandas as pd
 import torch as _torch
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.ml.artifacts import load_joblib_artifact, latest_compatible_joblib_path
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs
 from app.ml.meta_learner import infer_meta_learner
-from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs
+from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs, latest_compatible_checkpoint
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs
 from app.modeling.conformal import ConformalCalibrator
 from app.modeling.db_logs import load_db_game_logs
@@ -235,13 +234,6 @@ def _snapshot_id_for_game_date(engine: Engine, game_date: str) -> str | None:
         ).scalar()
 
 
-def _latest_model_path(models_dir: Path, pattern: str) -> Path | None:
-    if not models_dir.exists():
-        return None
-    candidates = sorted(models_dir.glob(pattern))
-    return candidates[-1] if candidates else None
-
-
 def _auto_calibration_path(calibration_arg: str | None) -> str | None:
     if calibration_arg:
         return calibration_arg
@@ -417,18 +409,18 @@ def score_ensemble(
 
     calibration_path = _auto_calibration_path(calibration_path)
     models_path = Path(models_dir)
-    nn_path = _latest_model_path(models_path, "nn_gru_attention_*.pt")
-    lr_path = _latest_model_path(models_path, "baseline_logreg_*.joblib")
-    xgb_path = _latest_model_path(models_path, "xgb_*.joblib")
-    lgbm_path = _latest_model_path(models_path, "lgbm_*.joblib")
-    meta_path = _latest_model_path(models_path, "meta_learner_*.joblib")
+    nn_path = latest_compatible_checkpoint(models_path, "nn_gru_attention_*.pt")
+    lr_path = latest_compatible_joblib_path(models_path, "baseline_logreg_*.joblib")
+    xgb_path = latest_compatible_joblib_path(models_path, "xgb_*.joblib")
+    lgbm_path = latest_compatible_joblib_path(models_path, "lgbm_*.joblib")
+    meta_path = latest_compatible_joblib_path(models_path, "meta_learner_*.joblib")
 
     # Load conformal calibrators from saved models
     conformal_cals: list[ConformalCalibrator] = []
     for _mp in [lr_path, xgb_path, lgbm_path]:
         if _mp and _mp.exists():
             try:
-                _pl = _joblib.load(str(_mp))
+                _pl = load_joblib_artifact(str(_mp))
                 _cd = _pl.get("conformal")
                 if _cd:
                     conformal_cals.append(ConformalCalibrator(**_cd))

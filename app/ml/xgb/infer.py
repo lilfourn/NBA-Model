@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import joblib
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.ml.artifacts import load_joblib_artifact
 from app.ml.dataset import _add_history_features
 from app.ml.train import CATEGORICAL_COLS, NUMERIC_COLS
 
@@ -21,7 +21,7 @@ class InferenceResult:
 
 
 def _load_model(path: str) -> tuple[Any, list[str], list[str], list[str]]:
-    payload = joblib.load(path)
+    payload = load_joblib_artifact(path)
     if not isinstance(payload, dict) or "model" not in payload:
         raise ValueError(f"Unexpected model artifact format: {path}")
     feature_cols = list(payload.get("feature_cols") or [])

@@ -1,0 +1,766 @@
+{
+  "model_path": "models/xgb_20260205_214609Z.joblib",
+  "holdout_samples": 1709,
+  "feature_importance": [
+    {
+      "feature": "p_hist_over",
+      "mean_abs_shap": 0.376291
+    },
+    {
+      "feature": "opp_def_assists_avg",
+      "mean_abs_shap": 0.308836
+    },
+    {
+      "feature": "minutes_mean_10",
+      "mean_abs_shap": 0.248035
+    },
+    {
+      "feature": "minutes_mean_3",
+      "mean_abs_shap": 0.231055
+    },
+    {
+      "feature": "minutes_trend",
+      "mean_abs_shap": 0.227284
+    },
+    {
+      "feature": "trend_slope",
+      "mean_abs_shap": 0.213556
+    },
+    {
+      "feature": "stat_std_5",
+      "mean_abs_shap": 0.208087
+    },
+    {
+      "feature": "hist_n",
+      "mean_abs_shap": 0.204853
+    },
+    {
+      "feature": "opp_def_rebounds_avg",
+      "mean_abs_shap": 0.192993
+    },
+    {
+      "feature": "recent_vs_season",
+      "mean_abs_shap": 0.163363
+    },
+    {
+      "feature": "stat_cv",
+      "mean_abs_shap": 0.146343
+    },
+    {
+      "feature": "hot_streak_count",
+      "mean_abs_shap": 0.139681
+    },
+    {
+      "feature": "rest_days",
+      "mean_abs_shap": 0.135311
+    },
+    {
+      "feature": "opp_def_points_avg",
+      "mean_abs_shap": 0.132065
+    },
+    {
+      "feature": "opp_def_rank",
+      "mean_abs_shap": 0.130548
+    },
+    {
+      "feature": "z_line",
+      "mean_abs_shap": 0.119626
+    },
+    {
+      "feature": "minutes_mean_5",
+      "mean_abs_shap": 0.113615
+    },
+    {
+      "feature": "opp_def_stat_avg",
+      "mean_abs_shap": 0.108579
+    },
+    {
+      "feature": "line_vs_mean_ratio",
+      "mean_abs_shap": 0.101444
+    },
+    {
+      "feature": "mu_stab",
+      "mean_abs_shap": 0.086988
+    },
+    {
+      "feature": "hist_std",
+      "mean_abs_shap": 0.086216
+    },
+    {
+      "feature": "league_mean",
+      "mean_abs_shap": 0.079894
+    },
+    {
+      "feature": "hist_mean",
+      "mean_abs_shap": 0.079021
+    },
+    {
+      "feature": "stat_mean_3",
+      "mean_abs_shap": 0.064797
+    },
+    {
+      "feature": "stat_mean_10",
+      "mean_abs_shap": 0.057002
+    },
+    {
+      "feature": "stat_rate_per_min",
+      "mean_abs_shap": 0.050334
+    },
+    {
+      "feature": "stat_mean_5",
+      "mean_abs_shap": 0.050123
+    },
+    {
+      "feature": "season_game_number",
+      "mean_abs_shap": 0.045877
+    },
+    {
+      "feature": "line_score",
+      "mean_abs_shap": 0.045662
+    },
+    {
+      "feature": "cold_streak_count",
+      "mean_abs_shap": 0.042155
+    },
+    {
+      "feature": "is_home",
+      "mean_abs_shap": 0.037302
+    },
+    {
+      "feature": "line_score_prev",
+      "mean_abs_shap": 0.028307
+    },
+    {
+      "feature": "minutes_to_start",
+      "mean_abs_shap": 0.022982
+    },
+    {
+      "feature": "stat_type_Assists",
+      "mean_abs_shap": 0.019029
+    },
+    {
+      "feature": "line_move_pct",
+      "mean_abs_shap": 0.018397
+    },
+    {
+      "feature": "line_move_late",
+      "mean_abs_shap": 0.017634
+    },
+    {
+      "feature": "is_back_to_back",
+      "mean_abs_shap": 0.01113
+    },
+    {
+      "feature": "stat_type_Steals",
+      "mean_abs_shap": 0.010367
+    },
+    {
+      "feature": "stat_type_Blks+Stls",
+      "mean_abs_shap": 0.007782
+    },
+    {
+      "feature": "stat_type_Points",
+      "mean_abs_shap": 0.006063
+    },
+    {
+      "feature": "stat_type_FG Attempted",
+      "mean_abs_shap": 0.00575
+    },
+    {
+      "feature": "stat_type_Rebs+Asts",
+      "mean_abs_shap": 0.004867
+    },
+    {
+      "feature": "line_score_delta",
+      "mean_abs_shap": 0.004573
+    },
+    {
+      "feature": "line_movement_new",
+      "mean_abs_shap": 0.004002
+    },
+    {
+      "feature": "stat_type_Pts+Rebs+Asts",
+      "mean_abs_shap": 0.003543
+    },
+    {
+      "feature": "stat_type_Rebounds",
+      "mean_abs_shap": 0.003474
+    },
+    {
+      "feature": "stat_type_Free Throws Attempted",
+      "mean_abs_shap": 0.003087
+    },
+    {
+      "feature": "stat_type_Defensive Rebounds",
+      "mean_abs_shap": 0.001905
+    },
+    {
+      "feature": "stat_type_FG Made",
+      "mean_abs_shap": 0.001873
+    },
+    {
+      "feature": "stat_type_3-PT Attempted",
+      "mean_abs_shap": 0.001129
+    },
+    {
+      "feature": "line_movement_same",
+      "mean_abs_shap": 0.00078
+    },
+    {
+      "feature": "stat_type_Pts+Rebs",
+      "mean_abs_shap": 0.000604
+    },
+    {
+      "feature": "stat_type_Turnovers",
+      "mean_abs_shap": 0.000488
+    },
+    {
+      "feature": "line_movement_up",
+      "mean_abs_shap": 0.000216
+    },
+    {
+      "feature": "stat_type_3-PT Made",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Blocked Shots",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Fantasy Score",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Free Throws Made",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Offensive Rebounds",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Personal Fouls",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Pts+Asts",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Two Pointers Attempted",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Two Pointers Made",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "projection_type_Fantasy Score",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "projection_type_Single Stat",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "line_movement_down",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "line_movement_unknown",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "odds_type",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "trending_count",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "is_promo",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "is_live",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "in_game",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "today",
+      "mean_abs_shap": 0.0
+    }
+  ],
+  "high_correlation_pairs": [
+    {
+      "feature_1": "line_score",
+      "feature_2": "line_score_prev",
+      "correlation": 0.9751,
+      "recommendation": "keep line_score, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "hist_mean",
+      "correlation": 0.9525,
+      "recommendation": "keep hist_mean, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "hist_std",
+      "correlation": 0.9253,
+      "recommendation": "keep hist_std, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "league_mean",
+      "correlation": 0.8708,
+      "recommendation": "keep league_mean, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "mu_stab",
+      "correlation": 0.9561,
+      "recommendation": "keep mu_stab, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "stat_mean_3",
+      "correlation": 0.9558,
+      "recommendation": "keep stat_mean_3, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "stat_mean_5",
+      "correlation": 0.9738,
+      "recommendation": "keep stat_mean_5, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "stat_mean_10",
+      "correlation": 0.9758,
+      "recommendation": "keep stat_mean_10, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.8635,
+      "recommendation": "keep opp_def_stat_avg, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.9498,
+      "recommendation": "keep stat_rate_per_min, consider dropping line_score"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "hist_mean",
+      "correlation": 0.9421,
+      "recommendation": "keep hist_mean, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "hist_std",
+      "correlation": 0.9022,
+      "recommendation": "keep hist_std, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "league_mean",
+      "correlation": 0.8414,
+      "recommendation": "keep league_mean, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "mu_stab",
+      "correlation": 0.9447,
+      "recommendation": "keep mu_stab, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "stat_mean_3",
+      "correlation": 0.9405,
+      "recommendation": "keep stat_mean_3, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "stat_mean_5",
+      "correlation": 0.9592,
+      "recommendation": "keep stat_mean_5, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "stat_mean_10",
+      "correlation": 0.9631,
+      "recommendation": "keep stat_mean_10, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.8351,
+      "recommendation": "keep opp_def_stat_avg, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "line_score_prev",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.9272,
+      "recommendation": "keep stat_rate_per_min, consider dropping line_score_prev"
+    },
+    {
+      "feature_1": "hist_n",
+      "feature_2": "season_game_number",
+      "correlation": 1.0,
+      "recommendation": "keep hist_n, consider dropping season_game_number"
+    },
+    {
+      "feature_1": "hist_mean",
+      "feature_2": "hist_std",
+      "correlation": 0.8769,
+      "recommendation": "keep hist_std, consider dropping hist_mean"
+    },
+    {
+      "feature_1": "hist_mean",
+      "feature_2": "league_mean",
+      "correlation": 0.8136,
+      "recommendation": "keep league_mean, consider dropping hist_mean"
+    },
+    {
+      "feature_1": "hist_mean",
+      "feature_2": "mu_stab",
+      "correlation": 0.9996,
+      "recommendation": "keep mu_stab, consider dropping hist_mean"
+    },
+    {
+      "feature_1": "hist_mean",
+      "feature_2": "stat_mean_3",
+      "correlation": 0.9166,
+      "recommendation": "keep hist_mean, consider dropping stat_mean_3"
+    },
+    {
+      "feature_1": "hist_mean",
+      "feature_2": "stat_mean_5",
+      "correlation": 0.9429,
+      "recommendation": "keep hist_mean, consider dropping stat_mean_5"
+    },
+    {
+      "feature_1": "hist_mean",
+      "feature_2": "stat_mean_10",
+      "correlation": 0.9525,
+      "recommendation": "keep hist_mean, consider dropping stat_mean_10"
+    },
+    {
+      "feature_1": "hist_mean",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.8085,
+      "recommendation": "keep opp_def_stat_avg, consider dropping hist_mean"
+    },
+    {
+      "feature_1": "hist_mean",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.9158,
+      "recommendation": "keep hist_mean, consider dropping stat_rate_per_min"
+    },
+    {
+      "feature_1": "hist_std",
+      "feature_2": "league_mean",
+      "correlation": 0.9366,
+      "recommendation": "keep hist_std, consider dropping league_mean"
+    },
+    {
+      "feature_1": "hist_std",
+      "feature_2": "mu_stab",
+      "correlation": 0.8861,
+      "recommendation": "keep mu_stab, consider dropping hist_std"
+    },
+    {
+      "feature_1": "hist_std",
+      "feature_2": "stat_mean_3",
+      "correlation": 0.9126,
+      "recommendation": "keep hist_std, consider dropping stat_mean_3"
+    },
+    {
+      "feature_1": "hist_std",
+      "feature_2": "stat_mean_5",
+      "correlation": 0.9153,
+      "recommendation": "keep hist_std, consider dropping stat_mean_5"
+    },
+    {
+      "feature_1": "hist_std",
+      "feature_2": "stat_mean_10",
+      "correlation": 0.9172,
+      "recommendation": "keep hist_std, consider dropping stat_mean_10"
+    },
+    {
+      "feature_1": "hist_std",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.9306,
+      "recommendation": "keep opp_def_stat_avg, consider dropping hist_std"
+    },
+    {
+      "feature_1": "hist_std",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.9369,
+      "recommendation": "keep hist_std, consider dropping stat_rate_per_min"
+    },
+    {
+      "feature_1": "league_mean",
+      "feature_2": "mu_stab",
+      "correlation": 0.8273,
+      "recommendation": "keep mu_stab, consider dropping league_mean"
+    },
+    {
+      "feature_1": "league_mean",
+      "feature_2": "stat_mean_3",
+      "correlation": 0.8464,
+      "recommendation": "keep league_mean, consider dropping stat_mean_3"
+    },
+    {
+      "feature_1": "league_mean",
+      "feature_2": "stat_mean_5",
+      "correlation": 0.8471,
+      "recommendation": "keep league_mean, consider dropping stat_mean_5"
+    },
+    {
+      "feature_1": "league_mean",
+      "feature_2": "stat_mean_10",
+      "correlation": 0.8501,
+      "recommendation": "keep league_mean, consider dropping stat_mean_10"
+    },
+    {
+      "feature_1": "league_mean",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.9953,
+      "recommendation": "keep opp_def_stat_avg, consider dropping league_mean"
+    },
+    {
+      "feature_1": "league_mean",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.9001,
+      "recommendation": "keep league_mean, consider dropping stat_rate_per_min"
+    },
+    {
+      "feature_1": "mu_stab",
+      "feature_2": "stat_mean_3",
+      "correlation": 0.9206,
+      "recommendation": "keep mu_stab, consider dropping stat_mean_3"
+    },
+    {
+      "feature_1": "mu_stab",
+      "feature_2": "stat_mean_5",
+      "correlation": 0.9463,
+      "recommendation": "keep mu_stab, consider dropping stat_mean_5"
+    },
+    {
+      "feature_1": "mu_stab",
+      "feature_2": "stat_mean_10",
+      "correlation": 0.9555,
+      "recommendation": "keep mu_stab, consider dropping stat_mean_10"
+    },
+    {
+      "feature_1": "mu_stab",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.8221,
+      "recommendation": "keep opp_def_stat_avg, consider dropping mu_stab"
+    },
+    {
+      "feature_1": "mu_stab",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.9219,
+      "recommendation": "keep mu_stab, consider dropping stat_rate_per_min"
+    },
+    {
+      "feature_1": "p_hist_over",
+      "feature_2": "z_line",
+      "correlation": 0.922,
+      "recommendation": "keep p_hist_over, consider dropping z_line"
+    },
+    {
+      "feature_1": "p_hist_over",
+      "feature_2": "line_vs_mean_ratio",
+      "correlation": 0.8372,
+      "recommendation": "keep p_hist_over, consider dropping line_vs_mean_ratio"
+    },
+    {
+      "feature_1": "z_line",
+      "feature_2": "line_vs_mean_ratio",
+      "correlation": 0.9102,
+      "recommendation": "keep z_line, consider dropping line_vs_mean_ratio"
+    },
+    {
+      "feature_1": "stat_mean_3",
+      "feature_2": "stat_mean_5",
+      "correlation": 0.9814,
+      "recommendation": "keep stat_mean_3, consider dropping stat_mean_5"
+    },
+    {
+      "feature_1": "stat_mean_3",
+      "feature_2": "stat_mean_10",
+      "correlation": 0.9628,
+      "recommendation": "keep stat_mean_3, consider dropping stat_mean_10"
+    },
+    {
+      "feature_1": "stat_mean_3",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.837,
+      "recommendation": "keep opp_def_stat_avg, consider dropping stat_mean_3"
+    },
+    {
+      "feature_1": "stat_mean_3",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.959,
+      "recommendation": "keep stat_mean_3, consider dropping stat_rate_per_min"
+    },
+    {
+      "feature_1": "stat_mean_5",
+      "feature_2": "stat_mean_10",
+      "correlation": 0.9845,
+      "recommendation": "keep stat_mean_10, consider dropping stat_mean_5"
+    },
+    {
+      "feature_1": "stat_mean_5",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.8376,
+      "recommendation": "keep opp_def_stat_avg, consider dropping stat_mean_5"
+    },
+    {
+      "feature_1": "stat_mean_5",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.9674,
+      "recommendation": "keep stat_rate_per_min, consider dropping stat_mean_5"
+    },
+    {
+      "feature_1": "stat_mean_10",
+      "feature_2": "opp_def_stat_avg",
+      "correlation": 0.8399,
+      "recommendation": "keep opp_def_stat_avg, consider dropping stat_mean_10"
+    },
+    {
+      "feature_1": "stat_mean_10",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.9528,
+      "recommendation": "keep stat_mean_10, consider dropping stat_rate_per_min"
+    },
+    {
+      "feature_1": "minutes_mean_3",
+      "feature_2": "minutes_mean_5",
+      "correlation": 0.9479,
+      "recommendation": "keep minutes_mean_3, consider dropping minutes_mean_5"
+    },
+    {
+      "feature_1": "minutes_mean_3",
+      "feature_2": "minutes_mean_10",
+      "correlation": 0.9089,
+      "recommendation": "keep minutes_mean_10, consider dropping minutes_mean_3"
+    },
+    {
+      "feature_1": "minutes_mean_5",
+      "feature_2": "minutes_mean_10",
+      "correlation": 0.9424,
+      "recommendation": "keep minutes_mean_10, consider dropping minutes_mean_5"
+    },
+    {
+      "feature_1": "opp_def_stat_avg",
+      "feature_2": "stat_rate_per_min",
+      "correlation": 0.8928,
+      "recommendation": "keep opp_def_stat_avg, consider dropping stat_rate_per_min"
+    }
+  ],
+  "low_importance_features": [
+    {
+      "feature": "line_movement_same",
+      "mean_abs_shap": 0.00078
+    },
+    {
+      "feature": "stat_type_Pts+Rebs",
+      "mean_abs_shap": 0.000604
+    },
+    {
+      "feature": "stat_type_Turnovers",
+      "mean_abs_shap": 0.000488
+    },
+    {
+      "feature": "line_movement_up",
+      "mean_abs_shap": 0.000216
+    },
+    {
+      "feature": "stat_type_3-PT Made",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Blocked Shots",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Fantasy Score",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Free Throws Made",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Offensive Rebounds",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Personal Fouls",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Pts+Asts",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Two Pointers Attempted",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "stat_type_Two Pointers Made",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "projection_type_Fantasy Score",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "projection_type_Single Stat",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "line_movement_down",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "line_movement_unknown",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "odds_type",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "trending_count",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "is_promo",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "is_live",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "in_game",
+      "mean_abs_shap": 0.0
+    },
+    {
+      "feature": "today",
+      "mean_abs_shap": 0.0
+    }
+  ]
+}
