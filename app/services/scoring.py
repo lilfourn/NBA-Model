@@ -75,62 +75,119 @@ class ScoringResult:
         }
 
 
+# --- Probability shrinkage ---
+# Real sports betting edges are small.  Even the sharpest models rarely
+# exceed 60-65% true probability.  Raw model outputs of 99%+ are almost
+# certainly overfit.  We shrink toward 0.5 using a Beta-prior blend.
+#
+# shrunk = (1 - k) * raw + k * 0.5   where k depends on n_eff.
+# With n_eff >= 30 games of history, k = SHRINK_MIN (modest pull).
+# With little data, k = SHRINK_MAX (heavy pull toward 50/50).
+SHRINK_MIN = 0.35   # even best-data picks get 35% pull toward 0.5
+SHRINK_MAX = 0.70   # low-data picks get 70% pull
+
+
+def shrink_probability(p: float, n_eff: float | None = None) -> float:
+    """Shrink a probability toward 0.5 based on data quality."""
+    if n_eff is not None and n_eff > 0:
+        k = SHRINK_MAX - (SHRINK_MAX - SHRINK_MIN) * min(1.0, n_eff / 30.0)
+    else:
+        k = SHRINK_MAX
+    return (1.0 - k) * p + k * 0.5
+
+
 def _compute_edge(
-    p_over: float,
+    p_shrunk: float,
     expert_probs: dict[str, float | None],
     conformal_set_size: int | None,
     n_eff: float | None = None,
 ) -> float:
-    """Composite prediction score 0-100 combining all signals.
+    """Composite prediction score 0-100 using SHRUNK probability.
 
-    Designed to discriminate between picks — a score of 90+ should be rare.
-
-    Components (weights sum to 100):
-      - Avg expert strength (35%): mean |p - 0.5| across available experts
-      - Expert alignment   (30%): how tightly experts cluster (1 - spread)
-      - Conformal bonus    (15%): full bonus if set_size==1
-      - Data quality       (20%): based on n_eff (effective sample size)
+    Strict: A+ ≈ top 2%, A ≈ top 10%.  Requires multiple conditions
+    to be true simultaneously to score high.
     """
     available = [v for v in expert_probs.values() if v is not None]
+    n_experts = len(available)
+    pick_over = p_shrunk >= 0.5
 
-    # 1. Average expert directional strength: mean of |p - 0.5| * 2 across experts
-    if available:
-        strengths = [abs(v - 0.5) * 2.0 for v in available]
-        avg_strength = sum(strengths) / len(strengths)
+    # 1. Directional edge (max 20pts)
+    #    Based on shrunk probability distance from 50%.
+    #    Power scaling so it's hard to max out.
+    raw_pct = abs(p_shrunk - 0.5)  # 0..~0.25
+    dir_score = min(20.0, (raw_pct / 0.20) ** 0.6 * 20.0)
+
+    # 2. Qualified expert consensus (max 30pts)
+    #    Experts must BOTH agree on direction AND output moderate probs.
+    #    An expert at 0.01 agreeing on UNDER gets zero credit — that's
+    #    overfit noise, not real signal.
+    if n_experts >= 2:
+        # "Qualified" = agrees on direction AND prob is in [0.25, 0.75]
+        qualified = sum(
+            1 for v in available
+            if (v >= 0.5) == pick_over and 0.25 <= v <= 0.75
+        )
+        # Unqualified dissenters are a red flag
+        dissenters = sum(1 for v in available if (v >= 0.5) != pick_over)
+        # Need at least 2 qualified experts; penalize heavily for dissenters
+        q_ratio = max(0.0, qualified - dissenters * 2.0) / n_experts
+        # Require ≥ 3 experts for full marks
+        coverage = min(1.0, n_experts / 3.0)
+        consensus_score = q_ratio * coverage * 30.0
     else:
-        avg_strength = abs(p_over - 0.5) * 2.0
+        consensus_score = 0.0
 
-    # 2. Expert alignment: 1 - spread.  Spread = range of expert probs / 1.0
-    #    All experts at same value → alignment=1.  Max disagreement → alignment=0.
-    if len(available) >= 2:
-        spread = max(available) - min(available)
-        alignment = 1.0 - min(1.0, spread)
+    # 3. Expert tightness (max 15pts)
+    #    How tightly clustered are the qualified experts?
+    #    Uses only experts in the pick direction with moderate outputs.
+    if n_experts >= 2:
+        qualified_probs = [
+            v for v in available
+            if (v >= 0.5) == pick_over and 0.25 <= v <= 0.75
+        ]
+        if len(qualified_probs) >= 2:
+            spread = max(qualified_probs) - min(qualified_probs)
+            tightness = max(0.0, 1.0 - spread / 0.20)  # 0.20 spread → 0
+            tight_score = tightness * 15.0
+        else:
+            tight_score = 0.0
     else:
-        alignment = 0.5
+        tight_score = 0.0
 
-    # 3. Conformal bonus
-    conformal = 1.0 if conformal_set_size == 1 else 0.0
-
-    # 4. Data quality: log-scaled n_eff.  n_eff>=30 → full credit, 0 → no credit.
+    # 4. Data quality (max 15pts) — log scaling on n_eff
     if n_eff is not None and n_eff > 0:
-        data_q = min(1.0, n_eff / 30.0)
+        import math as _math
+        data_q = min(1.0, _math.log1p(n_eff) / _math.log1p(30.0))
     else:
-        data_q = 0.3  # default when n_eff unknown
+        data_q = 0.0
+    data_score = data_q * 15.0
 
-    edge = (avg_strength * 35.0) + (alignment * 30.0) + (conformal * 15.0) + (data_q * 20.0)
+    # 5. Conformal (max 10pts)
+    conf_score = 10.0 if conformal_set_size == 1 else 0.0
+
+    # 6. Anti-overconfidence penalty (max -10pts)
+    #    Penalize when ANY expert outputs extreme prob (>90% or <10%).
+    #    These are almost certainly overfit.
+    if available:
+        extreme = sum(1 for v in available if v > 0.90 or v < 0.10)
+        penalty = min(10.0, extreme * 5.0)
+    else:
+        penalty = 0.0
+
+    edge = dir_score + consensus_score + tight_score + data_score + conf_score - penalty
     return round(min(100.0, max(0.0, edge)), 1)
 
 
 def _grade_from_edge(edge: float) -> str:
-    if edge >= 90:
+    if edge >= 75:
         return "A+"
-    if edge >= 80:
+    if edge >= 60:
         return "A"
-    if edge >= 70:
+    if edge >= 45:
         return "B"
-    if edge >= 55:
+    if edge >= 30:
         return "C"
-    if edge >= 40:
+    if edge >= 18:
         return "D"
     return "F"
 
@@ -506,9 +563,11 @@ def score_ensemble(
         except (TypeError, ValueError):
             n_eff_val = None
         ctx = Context(stat_type=stat_type, is_live=is_live, n_eff=n_eff_val)
-        p_final = float(ens.predict(expert_probs, ctx))
-        if not math.isfinite(p_final):
+        p_raw = float(ens.predict(expert_probs, ctx))
+        if not math.isfinite(p_raw):
             continue
+        # Shrink toward 0.5 — real sports edges are small.
+        p_final = shrink_probability(p_raw, n_eff=n_eff_val)
         pick = "OVER" if p_final >= 0.5 else "UNDER"
         conf = float(confidence_from_probability(p_final))
         status = str(f.get("calibration_status") or "raw") if f else "raw"

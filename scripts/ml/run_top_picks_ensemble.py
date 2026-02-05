@@ -22,7 +22,7 @@ from app.modeling.forecast_calibration import ForecastDistributionCalibrator  # 
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler  # noqa: E402
 from app.modeling.conformal import ConformalCalibrator  # noqa: E402
 from app.modeling.probability import confidence_from_probability  # noqa: E402
-from app.services.scoring import _conformal_set_size  # noqa: E402
+from app.services.scoring import _conformal_set_size, shrink_probability  # noqa: E402
 from app.modeling.stat_forecast import ForecastParams, LeaguePriors, StatForecastPredictor  # noqa: E402
 from app.modeling.types import Projection  # noqa: E402
 from app.ml.stat_mappings import (  # noqa: E402
@@ -429,10 +429,11 @@ def main() -> None:
         except (TypeError, ValueError):
             n_eff_val = None
         ctx = Context(stat_type=stat_type, is_live=is_live, n_eff=n_eff_val)
-        p_final = float(ens.predict(expert_probs, ctx))
-        if not math.isfinite(p_final):
+        p_raw = float(ens.predict(expert_probs, ctx))
+        if not math.isfinite(p_raw):
             skipped_nonfinite += 1
             continue
+        p_final = shrink_probability(p_raw, n_eff=n_eff_val)
         pick = "OVER" if p_final >= 0.5 else "UNDER"
         conf = float(confidence_from_probability(p_final))
         status = str(f.get("calibration_status") or "raw") if f else "raw"
@@ -504,8 +505,9 @@ def main() -> None:
     for rank, item in enumerate(top, start=1):
         grade = item["grade"]
         edge = item["edge"]
+        p = item['prob_over']
         line = f"{item['player_name']} | {item['stat_type']} | line {item['line_score']:.2f}"
-        detail = f"{item['pick']} | edge {edge:.0f} [{grade}]"
+        detail = f"{item['pick']} {p:.1%} | edge {edge:.0f} [{grade}]"
         print(f"{rank:>2}. {line} -> {detail}")
 
     if args.log_decisions:
