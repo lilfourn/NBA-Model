@@ -111,9 +111,25 @@ class ContextualHedgeEnsembler:
         self.max_weight: dict[str, float] = dict(max_weight) if max_weight else {}
         self.weights: dict[tuple[str, str, str], dict[str, float]] = {}
 
+    # OOF AUC-based quality priors — prevents weak experts from dragging
+    # down ensemble during the slow online learning phase.
+    # Updated from OOF analysis on 2145 rows (2026-02-05).
+    QUALITY_PRIOR: dict[str, float] = {
+        "p_lgbm": 0.753,
+        "p_xgb": 0.747,
+        "p_lr": 0.577,
+        "p_nn": 0.554,
+        "p_forecast_cal": 0.511,
+    }
+
     def _init_weights(self) -> dict[str, float]:
-        w0 = 1.0 / float(len(self.experts))
-        return {expert: w0 for expert in self.experts}
+        raw = {}
+        for expert in self.experts:
+            # Use AUC-0.5 as quality signal (0.5 = random)
+            auc = self.QUALITY_PRIOR.get(expert, 0.55)
+            raw[expert] = max(auc - 0.5, 0.01)
+        total = sum(raw.values())
+        return {e: v / total for e, v in raw.items()}
 
     def _get_weights(self, ctx_key: tuple[str, str, str]) -> dict[str, float]:
         if ctx_key not in self.weights:
