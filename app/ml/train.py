@@ -97,6 +97,12 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
 
     df["over"] = (df["actual_value"] > df["line_score"]).astype(int)
 
+    # Deduplicate: keep earliest snapshot per player+game+stat to prevent
+    # the same prediction leaking across train/test via multiple snapshots.
+    dedup_cols = ["player_id", "nba_game_id", "stat_type"]
+    if all(c in df.columns for c in dedup_cols):
+        df = df.sort_values("fetched_at").drop_duplicates(subset=dedup_cols, keep="first")
+
     df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].fillna("unknown").astype(str)
     # Coerce numerics to float to avoid object dtypes (Decimals) breaking sklearn.
     for col in NUMERIC_COLS:

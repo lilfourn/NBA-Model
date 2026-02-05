@@ -43,15 +43,25 @@ class TrainResult:
     rows: int
 
 
-def _load_tuned_params() -> dict[str, Any] | None:
+def _load_tuned_params() -> dict[str, Any]:
+    """Load Optuna-tuned params merged with required static params."""
+    params = dict(XGBOOST_PARAMS)
     path = Path("data/tuning/best_params_xgb.json")
     if not path.exists():
-        return None
+        return params
     import json
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        tuned = json.loads(path.read_text(encoding="utf-8"))
+        params.update(tuned)
     except Exception:  # noqa: BLE001
-        return None
+        pass
+    # Ensure required static params are always present
+    params.setdefault("eval_metric", "logloss")
+    params.setdefault("early_stopping_rounds", 30)
+    params.setdefault("use_label_encoder", False)
+    params.setdefault("verbosity", 0)
+    params.setdefault("random_state", 42)
+    return params
 
 
 def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
@@ -75,6 +85,12 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
         df = df[df["in_game"].fillna(False) == False]  # noqa: E712
 
     df["over"] = (df["actual_value"] > df["line_score"]).astype(int)
+
+    # Deduplicate: keep earliest snapshot per player+game+stat to prevent
+    # the same prediction leaking across train/test via multiple snapshots.
+    dedup_cols = ["player_id", "nba_game_id", "stat_type"]
+    if all(c in df.columns for c in dedup_cols):
+        df = df.sort_values("fetched_at").drop_duplicates(subset=dedup_cols, keep="first")
 
     # One-hot encode categoricals for XGBoost (native categorical support is fragile
     # across joblib serialization, so we stay consistent with the LR pipeline).
@@ -108,7 +124,7 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
 
     X_train, X_test, y_train, y_test = _time_split(df_used, X, y)
 
-    params = _load_tuned_params() or XGBOOST_PARAMS
+    params = _load_tuned_params()
     model = XGBClassifier(**params)
     model.fit(
         X_train,
@@ -116,7 +132,8 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
         eval_set=[(X_test, y_test)],
         verbose=False,
     )
-    print(f"XGB best iteration: {model.best_iteration} / {params.get('n_estimators', 600)}")
+    best_iter = getattr(model, "best_iteration", None)
+    print(f"XGB best iteration: {best_iter} / {params.get('n_estimators', 600)}")
 
     y_proba = model.predict_proba(X_test)[:, 1]
     y_pred = (y_proba >= 0.5).astype(int)

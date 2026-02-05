@@ -62,6 +62,12 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
 
     df["over"] = (df["actual_value"] > df["line_score"]).astype(int)
 
+    # Deduplicate: keep earliest snapshot per player+game+stat to prevent
+    # the same prediction leaking across train/test via multiple snapshots.
+    dedup_cols = ["player_id", "nba_game_id", "stat_type"]
+    if all(c in df.columns for c in dedup_cols):
+        df = df.sort_values("fetched_at").drop_duplicates(subset=dedup_cols, keep="first")
+
     df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].fillna("unknown").astype(str)
     for col in NUMERIC_COLS:
         if col not in df.columns:
@@ -77,15 +83,21 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     return X, y, df
 
 
-def _load_tuned_params() -> dict[str, Any] | None:
+def _load_tuned_params() -> dict[str, Any]:
+    """Load Optuna-tuned params merged with required static params."""
+    params = dict(LGBM_PARAMS)
     path = Path("data/tuning/best_params_lgbm.json")
     if not path.exists():
-        return None
+        return params
     import json
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        tuned = json.loads(path.read_text(encoding="utf-8"))
+        params.update(tuned)
     except Exception:  # noqa: BLE001
-        return None
+        pass
+    params.setdefault("verbosity", -1)
+    params.setdefault("random_state", 42)
+    return params
 
 
 def train_lightgbm(engine, model_dir: Path) -> TrainResult:
@@ -103,7 +115,7 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
 
     X_train, X_test, y_train, y_test = _time_split(df_used, X, y)
 
-    params = _load_tuned_params() or LGBM_PARAMS
+    params = _load_tuned_params()
     model = LGBMClassifier(**params)
     model.fit(
         X_train,
