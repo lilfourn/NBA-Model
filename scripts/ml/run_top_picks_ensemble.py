@@ -20,7 +20,9 @@ from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs  # noqa: E
 from app.modeling.db_logs import load_db_game_logs  # noqa: E402
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler  # noqa: E402
+from app.modeling.conformal import ConformalCalibrator  # noqa: E402
 from app.modeling.probability import confidence_from_probability  # noqa: E402
+from app.services.scoring import _conformal_set_size  # noqa: E402
 from app.modeling.stat_forecast import ForecastParams, LeaguePriors, StatForecastPredictor  # noqa: E402
 from app.modeling.types import Projection  # noqa: E402
 from app.ml.stat_mappings import (  # noqa: E402
@@ -378,6 +380,27 @@ def main() -> None:
                     continue
                 p_xgb[str(proj_id)] = prob
 
+    # Load conformal calibrators from saved models
+    conformal_cals: list[ConformalCalibrator] = []
+    for _mp in [lr_path, xgb_path]:
+        if _mp and _mp.exists():
+            try:
+                _pl = joblib.load(str(_mp))
+                _cd = _pl.get("conformal")
+                if _cd:
+                    conformal_cals.append(ConformalCalibrator(**_cd))
+            except Exception:  # noqa: BLE001
+                pass
+    if nn_path and nn_path.exists():
+        try:
+            import torch as _torch
+            _pl = _torch.load(str(nn_path), map_location="cpu")
+            _cd = _pl.get("conformal")
+            if _cd:
+                conformal_cals.append(ConformalCalibrator(**_cd))
+        except Exception:  # noqa: BLE001
+            pass
+
     experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb"]
     if Path(args.ensemble_weights).exists():
         ens = ContextualHedgeEnsembler.load(args.ensemble_weights)
@@ -451,6 +474,7 @@ def main() -> None:
                 "calibration_status": status,
                 "model_version": str(f.get("model_version") or "forecast") if f else None,
                 "n_eff": n_eff_val,
+                "conformal_set_size": _conformal_set_size(conformal_cals, p_final),
             }
         )
 
@@ -460,14 +484,28 @@ def main() -> None:
     if skipped_nonfinite:
         print(f"Note: skipped {skipped_nonfinite} projections due to non-finite probabilities/scores.")
 
-    scored.sort(key=lambda item: item["rank_score"], reverse=True)
+    # Compute edge score for each pick
+    from app.services.scoring import _compute_edge, _grade_from_edge
+    for item in scored:
+        ep = {
+            "p_forecast_cal": item.get("p_forecast_cal"),
+            "p_nn": item.get("p_nn"),
+            "p_lr": item.get("p_lr"),
+            "p_xgb": item.get("p_xgb"),
+        }
+        item["edge"] = _compute_edge(item["prob_over"], ep, item.get("conformal_set_size"), n_eff=item.get("n_eff"))
+        item["grade"] = _grade_from_edge(item["edge"])
+
+    scored.sort(key=lambda item: item["edge"], reverse=True)
     top = scored[: args.top]
 
-    print(f"Top {len(top)} Ensemble Picks (snapshot {snapshot_id})")
+    print(f"\nTop {len(top)} Ensemble Picks (snapshot {snapshot_id})")
     print("=" * 80)
     for rank, item in enumerate(top, start=1):
+        grade = item["grade"]
+        edge = item["edge"]
         line = f"{item['player_name']} | {item['stat_type']} | line {item['line_score']:.2f}"
-        detail = f"{item['pick']} ({item['confidence']:.2%} conf, P_over={item['prob_over']:.2%})"
+        detail = f"{item['pick']} | edge {edge:.0f} [{grade}]"
         print(f"{rank:>2}. {line} -> {detail}")
 
     if args.log_decisions:

@@ -52,6 +52,8 @@ class ScoredPick:
     calibration_status: str
     n_eff: float | None
     conformal_set_size: int | None
+    edge: float
+    grade: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -71,6 +73,66 @@ class ScoringResult:
             "total_scored": self.total_scored,
             "picks": [p.to_dict() for p in self.picks],
         }
+
+
+def _compute_edge(
+    p_over: float,
+    expert_probs: dict[str, float | None],
+    conformal_set_size: int | None,
+    n_eff: float | None = None,
+) -> float:
+    """Composite prediction score 0-100 combining all signals.
+
+    Designed to discriminate between picks — a score of 90+ should be rare.
+
+    Components (weights sum to 100):
+      - Avg expert strength (35%): mean |p - 0.5| across available experts
+      - Expert alignment   (30%): how tightly experts cluster (1 - spread)
+      - Conformal bonus    (15%): full bonus if set_size==1
+      - Data quality       (20%): based on n_eff (effective sample size)
+    """
+    available = [v for v in expert_probs.values() if v is not None]
+
+    # 1. Average expert directional strength: mean of |p - 0.5| * 2 across experts
+    if available:
+        strengths = [abs(v - 0.5) * 2.0 for v in available]
+        avg_strength = sum(strengths) / len(strengths)
+    else:
+        avg_strength = abs(p_over - 0.5) * 2.0
+
+    # 2. Expert alignment: 1 - spread.  Spread = range of expert probs / 1.0
+    #    All experts at same value → alignment=1.  Max disagreement → alignment=0.
+    if len(available) >= 2:
+        spread = max(available) - min(available)
+        alignment = 1.0 - min(1.0, spread)
+    else:
+        alignment = 0.5
+
+    # 3. Conformal bonus
+    conformal = 1.0 if conformal_set_size == 1 else 0.0
+
+    # 4. Data quality: log-scaled n_eff.  n_eff>=30 → full credit, 0 → no credit.
+    if n_eff is not None and n_eff > 0:
+        data_q = min(1.0, n_eff / 30.0)
+    else:
+        data_q = 0.3  # default when n_eff unknown
+
+    edge = (avg_strength * 35.0) + (alignment * 30.0) + (conformal * 15.0) + (data_q * 20.0)
+    return round(min(100.0, max(0.0, edge)), 1)
+
+
+def _grade_from_edge(edge: float) -> str:
+    if edge >= 90:
+        return "A+"
+    if edge >= 80:
+        return "A"
+    if edge >= 70:
+        return "B"
+    if edge >= 55:
+        return "C"
+    if edge >= 40:
+        return "D"
+    return "F"
 
 
 def _conformal_set_size(calibrators: list[ConformalCalibrator], p_over: float) -> int | None:
@@ -482,8 +544,11 @@ def score_ensemble(
                 "conformal_set_size": _conformal_set_size(conformal_cals, p_final),
             }
         )
+        item = scored[-1]
+        item["edge"] = _compute_edge(p_final, expert_probs, item["conformal_set_size"], n_eff=n_eff_val)
+        item["grade"] = _grade_from_edge(item["edge"])
 
-    scored.sort(key=lambda item: item["rank_score"], reverse=True)
+    scored.sort(key=lambda item: item["edge"], reverse=True)
     top_picks = scored[:top]
 
     picks = [
@@ -508,6 +573,8 @@ def score_ensemble(
             calibration_status=item["calibration_status"],
             n_eff=item["n_eff"],
             conformal_set_size=item.get("conformal_set_size"),
+            edge=item["edge"],
+            grade=item["grade"],
         )
         for item in top_picks
     ]
