@@ -322,17 +322,18 @@ def compute_history_features(
     if hist_mean > 0:
         line_vs_mean_ratio = float(line_score / hist_mean)
 
-    # Hot/cold streak: consecutive recent games over/under the line.
+    # Line-agnostic momentum: consecutive recent games above/below player's own mean.
+    # Uses the player's rolling average instead of the current line to avoid leakage.
     hot_streak_count = 0.0
     cold_streak_count = 0.0
-    if vals.size > 0:
+    if vals.size > 0 and hist_mean > 0:
         for v in reversed(vals):
-            if v > line_score:
+            if v > hist_mean:
                 hot_streak_count += 1.0
             else:
                 break
         for v in reversed(vals):
-            if v <= line_score:
+            if v <= hist_mean:
                 cold_streak_count += 1.0
             else:
                 break
