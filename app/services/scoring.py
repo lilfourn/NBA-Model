@@ -592,7 +592,19 @@ def score_ensemble(
                 p_lgbm[str(proj_id)] = prob
 
     experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
-    nn_cap = {"p_nn": 0.10}  # Cap NN at 10% until AUC improves
+    # Conditional NN cap: uncap if latest NN AUC > 0.55
+    nn_cap = {"p_nn": 0.10}
+    try:
+        with engine.connect() as conn:
+            nn_auc = conn.execute(text(
+                "select (metrics->>'roc_auc')::float from model_runs "
+                "where model_name = 'nn_gru_attention' and metrics->>'roc_auc' is not null "
+                "order by created_at desc limit 1"
+            )).scalar()
+            if nn_auc is not None and nn_auc > 0.55:
+                nn_cap = {}  # Uncap NN
+    except Exception:  # noqa: BLE001
+        pass
     if Path(ensemble_weights_path).exists():
         ens = ContextualHedgeEnsembler.load(ensemble_weights_path)
         # Ensure loaded ensemble respects NN cap even if saved without it

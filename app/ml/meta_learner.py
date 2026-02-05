@@ -24,8 +24,8 @@ from sklearn.preprocessing import StandardScaler
 from app.db import schema
 from app.ml.artifacts import load_joblib_artifact
 
-BASE_EXPERT_COLS = ["oof_forecast", "oof_lr", "oof_xgb", "oof_lgbm"]
-INFER_EXPERT_COLS = ["p_forecast_cal", "p_lr", "p_xgb", "p_lgbm"]
+BASE_EXPERT_COLS = ["oof_forecast", "oof_lr", "oof_xgb", "oof_lgbm", "oof_nn"]
+INFER_EXPERT_COLS = ["p_forecast_cal", "p_lr", "p_xgb", "p_lgbm", "p_nn"]
 CONTEXT_COLS = ["n_eff_log"]
 
 

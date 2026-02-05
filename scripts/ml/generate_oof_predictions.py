@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -107,6 +108,22 @@ def _train_lgbm(X_train, y_train, X_test):
     return model.predict_proba(X_test)[:, 1]
 
 
+def _train_nn_proxy(X_train, y_train, X_test):
+    """Simple MLP as OOF proxy for the full GRU-Attention NN."""
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("mlp", MLPClassifier(
+            hidden_layer_sizes=(128, 64),
+            max_iter=200,
+            early_stopping=True,
+            validation_fraction=0.15,
+            random_state=42,
+        )),
+    ])
+    pipe.fit(X_train, y_train)
+    return pipe.predict_proba(X_test)[:, 1]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate OOF predictions for meta-learner.")
     ap.add_argument("--database-url", default=None)
@@ -132,6 +149,7 @@ def main() -> None:
     oof_lr = np.full(n, np.nan)
     oof_xgb = np.full(n, np.nan)
     oof_lgbm = np.full(n, np.nan)
+    oof_nn = np.full(n, np.nan)
 
     for fold in range(args.n_folds):
         test_start = fold * fold_size
@@ -163,6 +181,11 @@ def main() -> None:
         except Exception as e:
             print(f"    LGBM failed: {e}")
 
+        try:
+            oof_nn[test_idx] = _train_nn_proxy(X_train, y_train, X_test)
+        except Exception as e:
+            print(f"    NN proxy failed: {e}")
+
     # Compute a simple forecast-like OOF: use p_hist_over from features
     # This proxies the stat forecast expert without needing full StatForecastPredictor
     oof_forecast = np.full(n, np.nan)
@@ -184,9 +207,10 @@ def main() -> None:
         "oof_lr": oof_lr,
         "oof_xgb": oof_xgb,
         "oof_lgbm": oof_lgbm,
+        "oof_nn": oof_nn,
     })
 
-    # Drop rows where LR/XGB/LGBM OOF is NaN
+    # Drop rows where LR/XGB/LGBM OOF is NaN (NN is optional)
     valid = result.dropna(subset=["oof_lr", "oof_xgb", "oof_lgbm"])
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
