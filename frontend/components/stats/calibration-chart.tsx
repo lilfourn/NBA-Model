@@ -15,13 +15,13 @@ import {
 import { fetchCalibration } from "@/lib/api";
 
 const nllConfig = {
-  before: { label: "Before", color: "hsl(var(--chart-5))" },
-  after: { label: "After", color: "hsl(var(--chart-2))" },
+  before: { label: "Before", color: "oklch(0.45 0 0)" },
+  after: { label: "After", color: "oklch(0.75 0.12 75)" },
 } satisfies ChartConfig;
 
 const covConfig = {
-  before: { label: "Before", color: "hsl(var(--chart-5))" },
-  after: { label: "After", color: "hsl(var(--chart-2))" },
+  before: { label: "Before", color: "oklch(0.45 0 0)" },
+  after: { label: "After", color: "oklch(0.75 0.12 75)" },
 } satisfies ChartConfig;
 
 export function CalibrationChart() {
@@ -74,12 +74,12 @@ export function CalibrationChart() {
             </p>
             <ChartContainer config={nllConfig} className="min-h-[220px] w-full">
               <BarChart data={nllData} accessibilityLayer margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} />
+                <CartesianGrid vertical={false} strokeOpacity={0.06} />
                 <XAxis dataKey="stat_type" tickLine={false} axisLine={false} tickMargin={8} angle={-35} textAnchor="end" height={70} interval={0} />
                 <YAxis tickLine={false} axisLine={false} tickMargin={4} />
                 <ChartTooltip content={<ChartTooltipContent />} />
                 <ChartLegend content={<ChartLegendContent />} />
-                <Bar dataKey="before" fill="var(--color-before)" radius={[4, 4, 0, 0]} opacity={0.45} />
+                <Bar dataKey="before" fill="var(--color-before)" radius={[4, 4, 0, 0]} opacity={0.4} />
                 <Bar dataKey="after" fill="var(--color-after)" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ChartContainer>
@@ -91,12 +91,12 @@ export function CalibrationChart() {
             </p>
             <ChartContainer config={covConfig} className="min-h-[220px] w-full">
               <BarChart data={coverageData} accessibilityLayer margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} />
+                <CartesianGrid vertical={false} strokeOpacity={0.06} />
                 <XAxis dataKey="stat_type" tickLine={false} axisLine={false} tickMargin={8} angle={-35} textAnchor="end" height={70} interval={0} />
                 <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tickMargin={4} tickFormatter={(v: number) => `${v}%`} />
                 <ChartTooltip content={<ChartTooltipContent />} />
                 <ChartLegend content={<ChartLegendContent />} />
-                <Bar dataKey="before" fill="var(--color-before)" radius={[4, 4, 0, 0]} opacity={0.45} />
+                <Bar dataKey="before" fill="var(--color-before)" radius={[4, 4, 0, 0]} opacity={0.4} />
                 <Bar dataKey="after" fill="var(--color-after)" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ChartContainer>
@@ -106,7 +106,7 @@ export function CalibrationChart() {
           <div className="overflow-x-auto rounded-lg border">
             <table className="w-full text-xs">
               <thead>
-                <tr className="border-b bg-muted/50 text-left text-muted-foreground">
+                <tr className="border-b border-border bg-white/[0.02] text-left text-muted-foreground">
                   <th className="px-3 py-2">Stat Type</th>
                   <th className="px-3 py-2 text-right">Train</th>
                   <th className="px-3 py-2 text-right">Val</th>
@@ -119,7 +119,7 @@ export function CalibrationChart() {
               </thead>
               <tbody>
                 {entries.map((e) => (
-                  <tr key={e.stat_type} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                  <tr key={e.stat_type} className="border-b border-border hover:bg-white/[0.03] transition-colors">
                     <td className="px-3 py-2 font-medium">{e.stat_type === "__global__" ? "Global" : e.stat_type}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{e.train_rows?.toLocaleString() ?? "—"}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{e.val_rows?.toLocaleString() ?? "—"}</td>

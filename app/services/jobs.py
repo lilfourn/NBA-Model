@@ -11,6 +11,8 @@ from typing import Any
 from uuid import uuid4
 
 
+from app.services.scoring import invalidate_scoring_cache
+
 class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -154,6 +156,7 @@ class JobManager:
 
                 if result.returncode == 0:
                     job.status = JobStatus.COMPLETED
+                    invalidate_scoring_cache()
                 else:
                     job.status = JobStatus.FAILED
                     job.error = f"Exit code {result.returncode}"
