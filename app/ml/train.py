@@ -15,7 +15,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, PolynomialFeatures, StandardScaler
 
 from app.db import schema
 from app.ml.calibration import best_calibrator
@@ -148,6 +148,12 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
         raise RuntimeError(f"Not enough training data available yet (rows={len(df_used)}).")
     X_train, X_test, y_train, y_test = _time_split(df_used, X, y)
 
+    # Numeric sub-pipeline: impute → polynomial interactions → scale
+    numeric_pipe = Pipeline([
+        ("impute", SimpleImputer(strategy="constant", fill_value=0.0)),
+        ("poly", PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)),
+        ("scale", StandardScaler()),
+    ])
     preprocess = ColumnTransformer(
         transformers=[
             (
@@ -155,10 +161,10 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
                 OneHotEncoder(handle_unknown="ignore", sparse_output=False),
                 CATEGORICAL_COLS,
             ),
-            ("num", SimpleImputer(strategy="constant", fill_value=0.0), NUMERIC_COLS),
+            ("num", numeric_pipe, NUMERIC_COLS),
         ],
     )
-    model = LogisticRegression(max_iter=5000, solver="liblinear", C=0.1)
+    model = LogisticRegression(max_iter=5000, solver="lbfgs", C=0.05)
     pipeline = Pipeline(steps=[("preprocess", preprocess), ("model", model)])
     with warnings.catch_warnings():
         # Numpy/sklearn can emit noisy RuntimeWarnings during BLAS matmul on some builds

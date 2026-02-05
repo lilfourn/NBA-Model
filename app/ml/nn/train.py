@@ -113,6 +113,18 @@ def _temperature_scale(logits: np.ndarray, labels: np.ndarray) -> tuple[float, f
     return best_T, best_loss
 
 
+def _load_tuned_params() -> dict[str, Any]:
+    """Load Optuna-tuned NN params if available."""
+    path = Path("data/tuning/best_params_nn.json")
+    if not path.exists():
+        return {}
+    import json
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def train_nn(
     *,
     engine,
@@ -125,6 +137,17 @@ def train_nn(
     patience: int = 5,
     device: str | None = None,
 ) -> TrainResult:
+    # Override defaults with tuned params if available
+    tuned = _load_tuned_params()
+    if tuned:
+        learning_rate = tuned.get("learning_rate", learning_rate)
+        weight_decay = tuned.get("weight_decay", weight_decay)
+        batch_size = tuned.get("batch_size", batch_size)
+
+    dropout = tuned.get("dropout", 0.3)
+    mlp_hidden = tuned.get("mlp_hidden", 128)
+    seq_hidden = tuned.get("seq_hidden", 64)
+
     data: TrainingData = build_training_data(engine=engine, history_len=history_len)
     if data.frame.empty:
         raise RuntimeError("No training data available. Did you load NBA stats and build features?")
@@ -155,10 +178,24 @@ def train_nn(
         cat_cardinalities=cat_cardinalities,
         cat_emb_dims=cat_emb_dims,
         seq_d_in=2,
-        dropout=0.3,
+        seq_hidden=seq_hidden,
+        mlp_hidden=mlp_hidden,
+        dropout=dropout,
     )
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Warm-start: try to load weights from previous best checkpoint
+    from app.ml.nn.infer import latest_compatible_checkpoint as _find_prev
+    prev_ckpt = _find_prev(model_dir)
+    if prev_ckpt is not None:
+        try:
+            prev_payload = torch.load(str(prev_ckpt), map_location="cpu")
+            model.load_state_dict(prev_payload["state_dict"], strict=False)
+            print(f"Warm-start: loaded weights from {prev_ckpt.name}")
+        except Exception:  # noqa: BLE001
+            print("Warm-start: previous checkpoint incompatible, training from scratch.")
+
     model = model.to(device)
 
     optimizer = torch.optim.AdamW(

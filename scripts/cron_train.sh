@@ -157,6 +157,12 @@ docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -
   python -m scripts.ops.monitor_model_health --alert-email \
   2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"
 # Health monitoring is advisory; don't fail the pipeline on it.
+
+# Drift detection (advisory — logs report, exit code 1 = drift detected)
+docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
+  python -m scripts.ops.check_drift --recent-days 7 --baseline-days 30 --output data/reports/drift_report.json \
+  2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log" || true
+
 set -e
 
 if [ "$fetch_status" -ne 0 ] || [ "$resolve_status" -ne 0 ] || [ "$train_status" -ne 0 ] || [ "$nn_status" -ne 0 ] || [ "$xgb_status" -ne 0 ] || [ "$lgbm_status" -ne 0 ] || [ "$ensemble_status" -ne 0 ]; then
