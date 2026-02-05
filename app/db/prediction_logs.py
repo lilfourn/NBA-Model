@@ -296,6 +296,12 @@ def resolve_prediction_outcomes(
         how="left",
     )[["player_id", "nba_player_id"]]
 
+    # Ensure consistent str types for join columns to prevent silent dtype mismatches.
+    mapped["player_id"] = mapped["player_id"].astype(str)
+    candidates["player_id"] = candidates["player_id"].astype(str)
+    candidates["game_id"] = candidates["game_id"].astype(str)
+    games["game_id"] = games["game_id"].astype(str)
+
     merged = candidates.merge(mapped, on="player_id", how="left").merge(games, on="game_id", how="left")
     no_nba_id = int(merged["nba_player_id"].isna().sum())
     no_game_date = int(merged["game_date"].isna().sum())
@@ -333,7 +339,12 @@ def resolve_prediction_outcomes(
                 s.fgm,
                 s.fga,
                 s.ftm,
-                s.fta
+                s.fta,
+                s.minutes,
+                s.stats_json->>'OREB' as oreb,
+                s.stats_json->>'DREB' as dreb,
+                s.stats_json->>'PF' as pf,
+                s.stats_json->>'DUNKS' as dunks
             from nba_player_game_stats s
             join nba_games ng on ng.id = s.game_id
             where s.player_id = any(:player_ids)
@@ -344,6 +355,9 @@ def resolve_prediction_outcomes(
         engine,
         params={"player_ids": nba_ids, "date_from": date_from, "date_to": date_to},
     )
+    # Ensure nba_player_id is str for merge consistency.
+    if not stats.empty:
+        stats["nba_player_id"] = stats["nba_player_id"].astype(str)
     if stats.empty:
         return {
             "candidates": int(len(candidates)),
@@ -354,6 +368,8 @@ def resolve_prediction_outcomes(
             "pushes": 0,
         }
 
+    # Ensure consistent str type for merge key.
+    merged["nba_player_id"] = merged["nba_player_id"].astype(str)
     resolved = merged.merge(stats, on=["nba_player_id", "game_date"], how="left")
     resolved["actual_value"] = [
         stat_value_from_row(getattr(row, "stat_type", None), row)
