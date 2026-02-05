@@ -15,6 +15,7 @@ from sqlalchemy.engine import Engine
 
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs
+from app.ml.meta_learner import infer_meta_learner
 from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs
 from app.modeling.conformal import ConformalCalibrator
@@ -49,6 +50,7 @@ class ScoredPick:
     p_lr: float | None
     p_xgb: float | None
     p_lgbm: float | None
+    p_meta: float | None
     mu_hat: float | None
     sigma_hat: float | None
     calibration_status: str
@@ -419,6 +421,7 @@ def score_ensemble(
     lr_path = _latest_model_path(models_path, "baseline_logreg_*.joblib")
     xgb_path = _latest_model_path(models_path, "xgb_*.joblib")
     lgbm_path = _latest_model_path(models_path, "lgbm_*.joblib")
+    meta_path = _latest_model_path(models_path, "meta_learner_*.joblib")
 
     # Load conformal calibrators from saved models
     conformal_cals: list[ConformalCalibrator] = []
@@ -581,6 +584,16 @@ def score_ensemble(
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
+        # Meta-learner: blends LR/XGB/LGBM base experts
+        p_meta_val: float | None = None
+        if meta_path:
+            try:
+                p_meta_val = infer_meta_learner(
+                    model_path=str(meta_path),
+                    expert_probs=expert_probs,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
         try:
@@ -622,6 +635,7 @@ def score_ensemble(
                 "p_lr": expert_probs["p_lr"],
                 "p_xgb": expert_probs["p_xgb"],
                 "p_lgbm": expert_probs["p_lgbm"],
+                "p_meta": _safe_prob(p_meta_val),
                 "mu_hat": float(f.get("mu_hat") or 0.0) if f else None,
                 "sigma_hat": float(f.get("sigma_hat") or 0.0) if f else None,
                 "calibration_status": status,
@@ -654,6 +668,7 @@ def score_ensemble(
             p_lr=item["p_lr"],
             p_xgb=item["p_xgb"],
             p_lgbm=item["p_lgbm"],
+            p_meta=item["p_meta"],
             mu_hat=item["mu_hat"],
             sigma_hat=item["sigma_hat"],
             calibration_status=item["calibration_status"],

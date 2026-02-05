@@ -20,6 +20,7 @@ from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs  # noq
 from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs  # noqa: E402
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs  # noqa: E402
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs  # noqa: E402
+from app.ml.meta_learner import infer_meta_learner  # noqa: E402
 from app.modeling.db_logs import load_db_game_logs  # noqa: E402
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler  # noqa: E402
@@ -278,6 +279,7 @@ def main() -> None:
     lr_path = _latest_model_path(models_dir, "baseline_logreg_*.joblib")
     xgb_path = _latest_model_path(models_dir, "xgb_*.joblib")
     lgbm_path = _latest_model_path(models_dir, "lgbm_*.joblib")
+    meta_path = _latest_model_path(models_dir, "meta_learner_*.joblib")
 
     calibrator = None
     if args.calibration:
@@ -456,6 +458,16 @@ def main() -> None:
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
+        # Meta-learner blends LR/XGB/LGBM
+        p_meta_val = None
+        if meta_path:
+            try:
+                p_meta_val = infer_meta_learner(
+                    model_path=str(meta_path),
+                    expert_probs=expert_probs,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
         try:
@@ -505,6 +517,7 @@ def main() -> None:
                 "p_lr": expert_probs["p_lr"],
                 "p_xgb": expert_probs["p_xgb"],
                 "p_lgbm": expert_probs["p_lgbm"],
+                "p_meta": _safe_prob(p_meta_val),
                 "mu_hat": float(f.get("mu_hat") or 0.0) if f else None,
                 "sigma_hat": float(f.get("sigma_hat") or 0.0) if f else None,
                 "calibration_status": status,
@@ -529,6 +542,7 @@ def main() -> None:
             "p_lr": item.get("p_lr"),
             "p_xgb": item.get("p_xgb"),
             "p_lgbm": item.get("p_lgbm"),
+            "p_meta": item.get("p_meta"),
         }
         item["edge"] = _compute_edge(item["prob_over"], ep, item.get("conformal_set_size"), n_eff=item.get("n_eff"))
         item["grade"] = _grade_from_edge(item["edge"])
@@ -581,6 +595,7 @@ def main() -> None:
                     "p_lr": item.get("p_lr"),
                     "p_xgb": item.get("p_xgb"),
                     "p_lgbm": item.get("p_lgbm"),
+                    "p_meta": item.get("p_meta"),
                     "p_final": item.get("prob_over"),
                     "model_version": item.get("model_version"),
                     "calibration_version": calibration_version,

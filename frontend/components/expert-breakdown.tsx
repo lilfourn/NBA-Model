@@ -38,6 +38,7 @@ export function ExpertBreakdown({ pick }: { pick: ScoredPick }) {
           <Bar label="LogReg" value={pick.p_lr} />
           <Bar label="XGBoost" value={pick.p_xgb} />
           <Bar label="LightGBM" value={pick.p_lgbm} />
+          <Bar label="Meta" value={pick.p_meta} />
         </div>
         <div className="space-y-1.5">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">

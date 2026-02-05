@@ -142,6 +142,12 @@ docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -
   python -m scripts.ml.train_lgbm_model 2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"
 lgbm_status=${PIPESTATUS[0]}
 
+# Generate OOF predictions and train meta-learner (advisory, non-blocking)
+docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
+  python -m scripts.ml.generate_oof_predictions 2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log" || true
+docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
+  python -m scripts.ml.train_meta_learner 2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log" || true
+
 docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
   python -m scripts.ml.train_online_ensemble --log-path data/monitoring/prediction_log.csv --out models/ensemble_weights.json \
   2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"

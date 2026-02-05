@@ -17,6 +17,7 @@ export interface ScoredPick {
   p_lr: number | null;
   p_xgb: number | null;
   p_lgbm: number | null;
+  p_meta: number | null;
   mu_hat: number | null;
   sigma_hat: number | null;
   calibration_status: string;
