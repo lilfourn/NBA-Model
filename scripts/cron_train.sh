@@ -159,8 +159,26 @@ docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -
 # Health monitoring is advisory; don't fail the pipeline on it.
 
 # Drift detection (advisory — logs report, exit code 1 = drift detected)
+set +e
 docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
   python -m scripts.ops.check_drift --recent-days 7 --baseline-days 30 --output data/reports/drift_report.json \
+  2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"
+drift_status=$?
+
+# Conditional retune: if drift detected, re-run Optuna tuning (advisory, non-blocking)
+if [ "$drift_status" -ne 0 ]; then
+  echo "Drift detected — triggering conditional hyperparameter retune..." | tee -a "$LOG_FILE" | tee -a "$tmp_log"
+  docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
+    python -m scripts.ml.tune_hyperparams --model both --n-trials 30 \
+    2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log" || true
+  docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
+    python -m scripts.ml.tune_nn_hyperparams --n-trials 15 \
+    2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log" || true
+fi
+
+# Generate visual reports (advisory, non-blocking)
+docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
+  python -m scripts.ml.generate_reports \
   2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log" || true
 
 set -e

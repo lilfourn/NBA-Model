@@ -279,3 +279,58 @@ export async function fetchConfidenceDist(bins: number = 20): Promise<Confidence
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
+
+// --- Weight History & Drift ---
+
+export interface WeightHistoryEntry {
+  timestamp: string;
+  n_updates: number;
+  hedge_avg?: Record<string, number>;
+  thompson_avg?: Record<string, number>;
+  mixing?: Record<string, number>;
+}
+
+export interface WeightHistoryResponse {
+  entries: WeightHistoryEntry[];
+}
+
+export interface DriftCheck {
+  check_type: string;
+  is_drifted: boolean;
+  metric_value: number;
+  threshold: number;
+  details: Record<string, unknown>;
+}
+
+export interface DriftReportResponse {
+  recent_rows: number;
+  baseline_rows: number;
+  checks: DriftCheck[];
+  any_drift: boolean;
+}
+
+export interface MixingWeightsResponse {
+  mixing: Record<string, number>;
+  hedge_avg?: Record<string, number>;
+  thompson_avg?: Record<string, number>;
+  timestamp?: string;
+  n_updates: number;
+}
+
+export async function fetchWeightHistory(limit: number = 100): Promise<WeightHistoryResponse> {
+  const res = await fetch(`${API_URL}/api/stats/weight-history?limit=${limit}`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDriftReport(): Promise<DriftReportResponse> {
+  const res = await fetch(`${API_URL}/api/stats/drift-report`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchMixingWeights(): Promise<MixingWeightsResponse> {
+  const res = await fetch(`${API_URL}/api/stats/mixing-weights`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}

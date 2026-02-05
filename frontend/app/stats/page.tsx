@@ -6,6 +6,8 @@ import { HitRateChart } from "@/components/stats/hit-rate-chart";
 import { CalibrationChart } from "@/components/stats/calibration-chart";
 import { EnsembleWeightsChart } from "@/components/stats/ensemble-weights-chart";
 import { ConfidenceDistChart } from "@/components/stats/confidence-dist-chart";
+import { WeightHistoryChart } from "@/components/stats/weight-history-chart";
+import { DriftStatusCard } from "@/components/stats/drift-status-card";
 
 export default function StatsPage() {
   return (
@@ -23,10 +25,12 @@ export default function StatsPage() {
           <TrainingHistoryChart />
           <HitRateChart />
           <EnsembleWeightsChart />
+          <WeightHistoryChart />
           <div className="grid gap-6 lg:grid-cols-2">
             <CalibrationChart />
             <ConfidenceDistChart />
           </div>
+          <DriftStatusCard />
         </div>
       </div>
     </div>

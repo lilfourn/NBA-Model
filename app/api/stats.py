@@ -325,3 +325,63 @@ def _safe_float(value) -> float | None:
     if not math.isfinite(f):
         return None
     return round(f, 6)
+
+
+WEIGHT_HISTORY_PATH = Path("data/reports/weight_history.jsonl")
+DRIFT_REPORT_PATH = Path("data/reports/drift_report.json")
+
+
+@router.get("/weight-history")
+async def weight_history(limit: int = Query(100, ge=1, le=1000)) -> dict:
+    """Return ensemble weight evolution over time."""
+    if not WEIGHT_HISTORY_PATH.exists():
+        return {"entries": []}
+
+    entries = []
+    for line in WEIGHT_HISTORY_PATH.read_text(encoding="utf-8").strip().split("\n"):
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    # Return most recent entries
+    return {"entries": entries[-limit:]}
+
+
+@router.get("/drift-report")
+async def drift_report() -> dict:
+    """Return latest drift detection results."""
+    if not DRIFT_REPORT_PATH.exists():
+        return {"checks": [], "any_drift": False}
+
+    try:
+        data = json.loads(DRIFT_REPORT_PATH.read_text(encoding="utf-8"))
+        return data
+    except json.JSONDecodeError:
+        return {"checks": [], "any_drift": False}
+
+
+@router.get("/mixing-weights")
+async def mixing_weights() -> dict:
+    """Return current hybrid ensemble mixing weights."""
+    entries = []
+    if WEIGHT_HISTORY_PATH.exists():
+        for line in WEIGHT_HISTORY_PATH.read_text(encoding="utf-8").strip().split("\n"):
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    if not entries:
+        return {"mixing": {"thompson": 0.34, "gating": 0.33, "meta_learner": 0.33}}
+
+    latest = entries[-1]
+    return {
+        "mixing": latest.get("mixing", {"thompson": 0.34, "gating": 0.33, "meta_learner": 0.33}),
+        "hedge_avg": latest.get("hedge_avg", {}),
+        "thompson_avg": latest.get("thompson_avg", {}),
+        "timestamp": latest.get("timestamp"),
+        "n_updates": latest.get("n_updates", 0),
+    }

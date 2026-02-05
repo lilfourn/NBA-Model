@@ -19,6 +19,7 @@ from app.ml.stat_mappings import stat_value_from_row  # noqa: E402
 from app.modeling.gating_model import GatingModel, build_context_features  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler, logloss  # noqa: E402
 from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler  # noqa: E402
+from app.modeling.weight_history import log_weights  # noqa: E402
 from app.utils.names import normalize_name  # noqa: E402
 from scripts.ops.log_decisions import PRED_LOG_DEFAULT  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
@@ -486,6 +487,39 @@ def main() -> None:
             print(f"Gating model training failed: {e}")
     else:
         print(f"Not enough data for gating model ({len(gating_labels)} < 30 rows).")
+
+    # Log weight history for visualization
+    try:
+        hedge_weights = ens.to_state_dict().get("weights", {})
+        thompson_avg = None
+        if ts.n_updates > 0:
+            # Get average Thompson weights across all contexts
+            ts_state = ts.to_state_dict()
+            all_experts_set: set[str] = set()
+            for ctx_data in ts_state.get("posteriors", {}).values():
+                all_experts_set.update(ctx_data.keys())
+            if all_experts_set:
+                thompson_avg = {}
+                for e in sorted(all_experts_set):
+                    alphas = []
+                    betas = []
+                    for ctx_data in ts_state.get("posteriors", {}).values():
+                        if e in ctx_data:
+                            alphas.append(ctx_data[e]["alpha"])
+                            betas.append(ctx_data[e]["beta"])
+                    if alphas:
+                        mean_alpha = sum(alphas) / len(alphas)
+                        mean_beta = sum(betas) / len(betas)
+                        thompson_avg[e] = mean_alpha / (mean_alpha + mean_beta)
+
+        log_weights(
+            hedge_weights=hedge_weights if isinstance(hedge_weights, dict) else None,
+            thompson_weights=thompson_avg,
+            n_updates=int(counts.get("ensemble", 0)),
+        )
+        print("Logged weight history snapshot.")
+    except Exception as e:  # noqa: BLE001
+        print(f"Weight history logging failed: {e}")
 
 
 
