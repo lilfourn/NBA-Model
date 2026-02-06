@@ -876,13 +876,57 @@ def score_ensemble(
             gating=gating,
             experts=experts,
         )
+        # Load optimized mixing weights if available
+        if _use_db:
+            _mix_path = load_latest_artifact_as_file(
+                engine, "hybrid_mixing", suffix=".json"
+            )
+        else:
+            _mix_candidate = Path(models_dir) / "hybrid_mixing.json"
+            _mix_path = _mix_candidate if _mix_candidate.exists() else None
+        if _mix_path:
+            try:
+                hybrid.load_mixing(str(_mix_path))
+                logger.info(
+                    "Hybrid mixing: alpha=%.2f beta=%.2f gamma=%.2f",
+                    hybrid.alpha,
+                    hybrid.beta,
+                    hybrid.gamma,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to load hybrid mixing weights", exc_info=True)
 
     # Load context-aware priors for shrinkage (daily-refreshed from resolved data)
     from app.ml.context_prior import get_context_prior, load_context_priors
     from app.ml.stat_calibrator import StatTypeCalibrator
 
-    _context_priors = load_context_priors()
-    _stat_calibrator = StatTypeCalibrator.load()
+    if _use_db:
+        _cp_path = load_latest_artifact_as_file(
+            engine, "context_priors", suffix=".json"
+        )
+        _context_priors = (
+            load_context_priors(str(_cp_path)) if _cp_path else load_context_priors()
+        )
+        _sc_path = load_latest_artifact_as_file(
+            engine, "stat_calibrator", suffix=".joblib"
+        )
+        _stat_calibrator = (
+            StatTypeCalibrator.load(str(_sc_path))
+            if _sc_path
+            else StatTypeCalibrator.load()
+        )
+    else:
+        _context_priors = load_context_priors()
+        _stat_calibrator = StatTypeCalibrator.load()
+
+    # Load inversion correction flags from model health report
+    from app.ml.inversion_corrections import load_inversion_flags
+
+    _inversion_flags = load_inversion_flags(engine if _use_db else None)
+    if _inversion_flags:
+        logger.info(
+            "Inversion auto-correction active for: %s", list(_inversion_flags.keys())
+        )
 
     scored: list[dict[str, Any]] = []
     for row in frame.itertuples(index=False):
@@ -904,6 +948,11 @@ def score_ensemble(
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
+        # Auto-correct inverted experts
+        for _inv_expert, _should_flip in _inversion_flags.items():
+            if _should_flip and expert_probs.get(_inv_expert) is not None:
+                expert_probs[_inv_expert] = 1.0 - expert_probs[_inv_expert]
+
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
         try:

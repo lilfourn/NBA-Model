@@ -1,0 +1,145 @@
+{
+  "generated_at": "2026-02-06T20:50:54.649338+00:00",
+  "days_back": 120,
+  "overall": {
+    "n": 5108,
+    "accuracy": 0.5437,
+    "logloss": 0.6941,
+    "logged_accuracy": 0.5307,
+    "accuracy_delta": 0.013
+  },
+  "tiers": {
+    "scored": {
+      "n": 5108,
+      "accuracy": 0.5437,
+      "logloss": 0.6941
+    },
+    "actionable": {
+      "n": 2690,
+      "accuracy": 0.5732,
+      "coverage": 0.5266
+    },
+    "placed": {
+      "n": 2351,
+      "accuracy": 0.5627,
+      "coverage": 0.4603
+    }
+  },
+  "per_stat_type": {
+    "3-PT Attempted": {
+      "n": 91,
+      "accuracy": 0.4835,
+      "logloss": 0.6951
+    },
+    "3-PT Made": {
+      "n": 71,
+      "accuracy": 0.5915,
+      "logloss": 0.6739
+    },
+    "Assists": {
+      "n": 214,
+      "accuracy": 0.6121,
+      "logloss": 0.6694
+    },
+    "Blks+Stls": {
+      "n": 158,
+      "accuracy": 0.6329,
+      "logloss": 0.6562
+    },
+    "Defensive Rebounds": {
+      "n": 90,
+      "accuracy": 0.7333,
+      "logloss": 0.6591
+    },
+    "FG Attempted": {
+      "n": 195,
+      "accuracy": 0.5846,
+      "logloss": 0.693
+    },
+    "FG Made": {
+      "n": 115,
+      "accuracy": 0.713,
+      "logloss": 0.7208
+    },
+    "Fantasy Score": {
+      "n": 634,
+      "accuracy": 0.5174,
+      "logloss": 0.7131
+    },
+    "Free Throws Attempted": {
+      "n": 128,
+      "accuracy": 0.4844,
+      "logloss": 0.8194
+    },
+    "Free Throws Made": {
+      "n": 135,
+      "accuracy": 0.563,
+      "logloss": 0.6862
+    },
+    "Offensive Rebounds": {
+      "n": 64,
+      "accuracy": 0.6406,
+      "logloss": 0.6531
+    },
+    "Personal Fouls": {
+      "n": 60,
+      "accuracy": 0.65,
+      "logloss": 0.6474
+    },
+    "Points": {
+      "n": 532,
+      "accuracy": 0.5113,
+      "logloss": 0.7083
+    },
+    "Pts+Asts": {
+      "n": 498,
+      "accuracy": 0.508,
+      "logloss": 0.6961
+    },
+    "Pts+Rebs": {
+      "n": 572,
+      "accuracy": 0.4895,
+      "logloss": 0.6963
+    },
+    "Pts+Rebs+Asts": {
+      "n": 545,
+      "accuracy": 0.5229,
+      "logloss": 0.6892
+    },
+    "Rebounds": {
+      "n": 332,
+      "accuracy": 0.6325,
+      "logloss": 0.6608
+    },
+    "Rebs+Asts": {
+      "n": 371,
+      "accuracy": 0.566,
+      "logloss": 0.6822
+    },
+    "Steals": {
+      "n": 57,
+      "accuracy": 0.6842,
+      "logloss": 0.6237
+    },
+    "Turnovers": {
+      "n": 67,
+      "accuracy": 0.4328,
+      "logloss": 0.706
+    },
+    "Two Pointers Attempted": {
+      "n": 104,
+      "accuracy": 0.4135,
+      "logloss": 0.7081
+    },
+    "Two Pointers Made": {
+      "n": 75,
+      "accuracy": 0.4133,
+      "logloss": 0.7096
+    }
+  },
+  "inversion_corrections": [
+    "p_nn",
+    "p_xgb",
+    "p_lgbm"
+  ]
+}

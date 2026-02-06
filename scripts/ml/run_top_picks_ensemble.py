@@ -561,6 +561,13 @@ def main() -> None:
     _context_priors = load_context_priors()
     _stat_calibrator = StatTypeCalibrator.load()
 
+    # Load inversion correction flags
+    from app.ml.inversion_corrections import load_inversion_flags
+
+    _inversion_flags = load_inversion_flags()
+    if _inversion_flags:
+        print(f"Inversion auto-correction active for: {list(_inversion_flags.keys())}")
+
     scored = []
     skipped_nonfinite = 0
     for row in frame.itertuples(index=False):
@@ -582,6 +589,11 @@ def main() -> None:
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
+        # Auto-correct inverted experts
+        for _inv_expert, _should_flip in _inversion_flags.items():
+            if _should_flip and expert_probs.get(_inv_expert) is not None:
+                expert_probs[_inv_expert] = 1.0 - expert_probs[_inv_expert]
+
         # Meta-learner blends LR/XGB/LGBM
         p_meta_val = None
         if meta_path:

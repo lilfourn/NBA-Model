@@ -9,6 +9,7 @@ Final output is a convex combination of the three sub-predictions.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,7 @@ class HybridEnsembleCombiner:
     experts: list[str] = field(default_factory=list)
     # Mixing weights: thompson, gating, meta-learner
     alpha: float = 0.34  # thompson weight
-    beta: float = 0.33   # gating weight
+    beta: float = 0.33  # gating weight
     gamma: float = 0.33  # meta-learner weight
 
     def predict(
@@ -76,7 +77,11 @@ class HybridEnsembleCombiner:
             predictions.append((self.alpha, p_ts))
 
         # 2. Gating model
-        if self.gating is not None and self.gating.is_fitted and context_features is not None:
+        if (
+            self.gating is not None
+            and self.gating.is_fitted
+            and context_features is not None
+        ):
             gating_weights = self.gating.predict_weights_single(context_features)
             p_gating = _logit_average(expert_probs, gating_weights)
             predictions.append((self.beta, p_gating))
@@ -142,7 +147,11 @@ class HybridEnsembleCombiner:
             if self.thompson is not None:
                 p_thompson[i] = self.thompson.predict(ep, ctx, deterministic=True)
 
-            if self.gating is not None and self.gating.is_fitted and context_features_list is not None:
+            if (
+                self.gating is not None
+                and self.gating.is_fitted
+                and context_features_list is not None
+            ):
                 gw = self.gating.predict_weights_single(context_features_list[i])
                 p_gating[i] = _logit_average(ep, gw)
 
@@ -202,6 +211,30 @@ class HybridEnsembleCombiner:
             "gating": self.beta,
             "meta_learner": self.gamma,
         }
+
+    def save_mixing(self, path: str | Path) -> None:
+        """Persist mixing weights to JSON."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "alpha": round(self.alpha, 4),
+            "beta": round(self.beta, 4),
+            "gamma": round(self.gamma, 4),
+        }
+        p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def load_mixing(self, path: str | Path) -> None:
+        """Load mixing weights from JSON (in-place update)."""
+        p = Path(path)
+        if not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            self.alpha = float(data.get("alpha", self.alpha))
+            self.beta = float(data.get("beta", self.beta))
+            self.gamma = float(data.get("gamma", self.gamma))
+        except Exception:  # noqa: BLE001
+            pass
 
     def to_state_dict(self) -> dict[str, Any]:
         state: dict[str, Any] = {

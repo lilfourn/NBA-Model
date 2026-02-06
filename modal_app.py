@@ -573,6 +573,20 @@ def _run_train_pipeline() -> None:
         ],
         allow_fail=True,
     )
+    # Train hybrid ensemble mixing weights
+    _run_cmd(
+        [
+            "-m",
+            "scripts.ml.train_hybrid_mixing",
+            "--days-back",
+            "90",
+            "--models-dir",
+            str(REMOTE_MODELS_DIR),
+            "--output",
+            str(REMOTE_MODELS_DIR / "hybrid_mixing.json"),
+        ],
+        allow_fail=True,
+    )
     # Fit per-stat-type isotonic calibrators
     _run_cmd(
         [

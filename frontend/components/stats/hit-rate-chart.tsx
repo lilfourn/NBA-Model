@@ -66,7 +66,7 @@ export function HitRateChart() {
       </CardHeader>
       <CardContent>
         {/* Summary cards */}
-        <div className="mb-6 grid grid-cols-3 gap-3">
+        <div className="mb-4 grid grid-cols-3 gap-3">
           <div className="rounded-lg border border-border bg-white/[0.02] p-3 text-center">
             <p className="text-[11px] font-medium text-muted-foreground">Overall Hit Rate</p>
             <p className="text-2xl font-bold tabular-nums tracking-tight text-primary">
@@ -80,6 +80,30 @@ export function HitRateChart() {
           <div className="rounded-lg border border-border bg-white/[0.02] p-3 text-center">
             <p className="text-[11px] font-medium text-muted-foreground">Resolved</p>
             <p className="text-2xl font-bold tabular-nums tracking-tight">{data.total_resolved.toLocaleString()}</p>
+          </div>
+        </div>
+        {/* Tier cards */}
+        <div className="mb-6 grid grid-cols-3 gap-3">
+          <div className="rounded-lg border border-border bg-white/[0.02] p-3 text-center">
+            <p className="text-[11px] font-medium text-muted-foreground">Published Hit Rate</p>
+            <p className="text-xl font-semibold tabular-nums tracking-tight">
+              {data.published_hit_rate != null ? `${(data.published_hit_rate * 100).toFixed(1)}%` : "—"}
+            </p>
+            <p className="text-[10px] text-muted-foreground">n={data.published_n?.toLocaleString() ?? 0}</p>
+          </div>
+          <div className="rounded-lg border border-border bg-white/[0.02] p-3 text-center">
+            <p className="text-[11px] font-medium text-muted-foreground">Placed Hit Rate</p>
+            <p className="text-xl font-semibold tabular-nums tracking-tight">
+              {data.placed_hit_rate != null ? `${(data.placed_hit_rate * 100).toFixed(1)}%` : "—"}
+            </p>
+            <p className="text-[10px] text-muted-foreground">n={data.placed_n?.toLocaleString() ?? 0}</p>
+          </div>
+          <div className="rounded-lg border border-border bg-white/[0.02] p-3 text-center">
+            <p className="text-[11px] font-medium text-muted-foreground">Coverage</p>
+            <p className="text-xl font-semibold tabular-nums tracking-tight">
+              {data.coverage != null ? `${(data.coverage * 100).toFixed(1)}%` : "—"}
+            </p>
+            <p className="text-[10px] text-muted-foreground">of scored</p>
           </div>
         </div>
 

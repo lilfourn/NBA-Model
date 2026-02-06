@@ -196,7 +196,14 @@ export interface HitRatePoint {
 export interface HitRateResponse {
   total_predictions: number;
   total_resolved: number;
+  total_scored: number;
   overall_hit_rate: number | null;
+  published_hit_rate: number | null;
+  published_n: number;
+  placed_hit_rate: number | null;
+  placed_n: number;
+  coverage: number;
+  actionable_threshold: number;
   rolling: HitRatePoint[];
 }
 
@@ -331,6 +338,71 @@ export async function fetchDriftReport(): Promise<DriftReportResponse> {
 
 export async function fetchMixingWeights(): Promise<MixingWeightsResponse> {
   const res = await fetch(`${API_URL}/api/stats/mixing-weights`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+// --- Model Health ---
+
+export interface InversionTest {
+  accuracy: number;
+  accuracy_inverted: number;
+  logloss: number;
+  logloss_inverted: number;
+  inversion_improves_accuracy: boolean;
+  inversion_improves_logloss: boolean;
+}
+
+export interface ConfusionMatrix {
+  tp: number;
+  fp: number;
+  tn: number;
+  fn: number;
+}
+
+export interface ExpertMetric {
+  rolling_accuracy: number;
+  rolling_logloss: number;
+  n: number;
+  ensemble_weight: number;
+  alert_eligible: boolean;
+  base_rate: number;
+  inversion_test?: InversionTest;
+  confusion_matrix?: ConfusionMatrix;
+}
+
+export interface TierMetric {
+  n: number;
+  accuracy: number | null;
+  threshold?: number;
+}
+
+export interface TierMetrics {
+  scored: TierMetric;
+  actionable: TierMetric;
+  placed: TierMetric;
+  coverage: number;
+  placed_coverage: number;
+}
+
+export interface ModelHealthResponse {
+  metrics_version: string;
+  generated_at: string;
+  days_back: number;
+  base_rate: number | null;
+  tier_metrics: TierMetrics;
+  expert_metrics: Record<string, ExpertMetric>;
+  alert_count: number;
+  suppressed_alert_count: number;
+}
+
+export async function fetchModelHealth(
+  daysBack: number = 90,
+  minAlertWeight: number = 0.03
+): Promise<ModelHealthResponse> {
+  const res = await fetch(
+    `${API_URL}/api/stats/model-health?days_back=${daysBack}&min_alert_weight=${minAlertWeight}`
+  );
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }

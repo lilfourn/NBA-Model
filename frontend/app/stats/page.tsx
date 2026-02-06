@@ -8,6 +8,7 @@ import { EnsembleWeightsChart } from "@/components/stats/ensemble-weights-chart"
 import { ConfidenceDistChart } from "@/components/stats/confidence-dist-chart";
 import { WeightHistoryChart } from "@/components/stats/weight-history-chart";
 import { DriftStatusCard } from "@/components/stats/drift-status-card";
+import { ModelHealthCard } from "@/components/stats/model-health-card";
 
 export default function StatsPage() {
   return (
@@ -21,6 +22,7 @@ export default function StatsPage() {
         </div>
 
         <div className="space-y-6">
+          <ModelHealthCard />
           <ExpertComparisonChart />
           <TrainingHistoryChart />
           <HitRateChart />
