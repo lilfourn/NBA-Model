@@ -1,0 +1,9 @@
+p_forecast_cal rolling logloss 0.752 > 0.75
+p_nn rolling 50-bet accuracy 40.0% < 48%
+p_nn rolling logloss 1.406 > 0.75
+p_lr rolling logloss 0.863 > 0.75
+p_xgb rolling 50-bet accuracy 40.0% < 48%
+p_xgb rolling logloss 0.805 > 0.75
+p_lgbm rolling 50-bet accuracy 44.0% < 48%
+p_lgbm rolling logloss 0.824 > 0.75
+p_final rolling logloss 0.800 > 0.75

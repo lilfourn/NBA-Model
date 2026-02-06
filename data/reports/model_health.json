@@ -1,6 +1,6 @@
 {
   "metrics_version": "2.0.0",
-  "generated_at": "2026-02-06T19:52:32.189983+00:00",
+  "generated_at": "2026-02-06T20:28:43.895701+00:00",
   "data_source": "live_db",
   "days_back": 90,
   "time_column": "coalesce(decision_time, resolved_at, created_at)",
