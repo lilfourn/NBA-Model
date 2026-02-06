@@ -4,6 +4,7 @@ import asyncio
 
 from fastapi import APIRouter, Query
 
+from app.core.config import settings
 from app.db.engine import get_engine
 from app.services.scoring import list_snapshots, score_ensemble
 
@@ -25,6 +26,8 @@ async def get_picks(
         engine,
         snapshot_id=snapshot_id,
         game_date=game_date,
+        models_dir=settings.models_dir,
+        ensemble_weights_path=settings.ensemble_weights_path,
         top=top,
         rank=rank,
         include_non_today=include_non_today,
@@ -36,5 +39,5 @@ async def get_picks(
 @router.get("/snapshots-list", tags=["picks"])
 async def get_snapshots(limit: int = Query(20, ge=1, le=100)) -> dict:
     engine = get_engine()
-    snapshots = await asyncio.to_thread(list_snapshots, engine, limit)
+    snapshots = await asyncio.to_thread(list_snapshots, engine, limit=limit)
     return {"count": len(snapshots), "snapshots": snapshots}
