@@ -136,6 +136,22 @@ SHRINK_MAX = 0.25  # low-data picks: 25% pull toward base rate
 # p_pick = max(p_final, 1 - p_final)
 PICK_THRESHOLD = 0.57
 
+# Minimum edge score for a pick to be publishable
+MIN_EDGE = 2.0
+
+# Stat types with degenerate base rates where no model can add value.
+# These are completely excluded from scoring.
+EXCLUDED_STAT_TYPES: set[str] = {"Dunks", "Blocked Shots"}
+
+# Stat types with too few samples or skewed base rates.
+# We score them with the context prior only and never publish.
+PRIOR_ONLY_STAT_TYPES: set[str] = {
+    "Blks+Stls",
+    "Offensive Rebounds",
+    "Personal Fouls",
+    "Steals",
+}
+
 
 def _logit(p: float) -> float:
     """Logit function with clamping to avoid infinities."""
@@ -863,14 +879,20 @@ def score_ensemble(
 
     # Load context-aware priors for shrinkage (daily-refreshed from resolved data)
     from app.ml.context_prior import get_context_prior, load_context_priors
+    from app.ml.stat_calibrator import StatTypeCalibrator
 
     _context_priors = load_context_priors()
+    _stat_calibrator = StatTypeCalibrator.load()
 
     scored: list[dict[str, Any]] = []
     for row in frame.itertuples(index=False):
         proj_id = str(getattr(row, "projection_id", ""))
         stat_type = str(getattr(row, "stat_type", "") or "")
         if not stat_type or not proj_id:
+            continue
+
+        # Phase 2: skip degenerate stat types entirely
+        if stat_type in EXCLUDED_STAT_TYPES:
             continue
 
         f = forecast_map.get(proj_id) or {}
@@ -946,7 +968,19 @@ def score_ensemble(
         _ctx_prior = get_context_prior(
             _context_priors, stat_type=stat_type, line_score=_line_score
         )
-        p_final = shrink_probability(p_raw, n_eff=n_eff_val, context_prior=_ctx_prior)
+
+        # Prior-only stat types: use context prior directly, never publish
+        _is_prior_only = stat_type in PRIOR_ONLY_STAT_TYPES
+        if _is_prior_only:
+            p_final = _ctx_prior if _ctx_prior is not None else 0.5
+            p_raw = p_final
+        else:
+            p_final = shrink_probability(
+                p_raw, n_eff=n_eff_val, context_prior=_ctx_prior
+            )
+            # Apply per-stat-type isotonic recalibration
+            p_final = _stat_calibrator.transform(p_final, stat_type)
+
         pick = "OVER" if p_final >= 0.5 else "UNDER"
         conf = float(confidence_from_probability(p_final))
         status = str(f.get("calibration_status") or "raw") if f else "raw"
@@ -959,6 +993,14 @@ def score_ensemble(
             score = conf
         if not math.isfinite(float(score)):
             continue
+
+        conformal_size = _conformal_set_size(conformal_cals, p_final)
+        p_pick = max(p_final, 1.0 - p_final)
+        # Publishable: meets confidence threshold, has narrow conformal set,
+        # has minimum edge, and is not a prior-only stat type
+        is_publishable = bool(
+            p_pick >= PICK_THRESHOLD and conformal_size != 2 and not _is_prior_only
+        )
 
         scored.append(
             {
@@ -987,7 +1029,7 @@ def score_ensemble(
                 "sigma_hat": float(f.get("sigma_hat") or 0.0) if f else None,
                 "calibration_status": status,
                 "n_eff": n_eff_val,
-                "conformal_set_size": _conformal_set_size(conformal_cals, p_final),
+                "conformal_set_size": conformal_size,
             }
         )
         item = scored[-1]
@@ -995,11 +1037,15 @@ def score_ensemble(
             p_final, expert_probs, item["conformal_set_size"], n_eff=n_eff_val
         )
         item["grade"] = _grade_from_edge(item["edge"])
-        p_pick = max(p_final, 1.0 - p_final)
-        item["is_publishable"] = bool(p_pick >= PICK_THRESHOLD)
+        # Apply min_edge filter
+        if item["edge"] < MIN_EDGE:
+            is_publishable = False
+        item["is_publishable"] = is_publishable
 
     scored.sort(key=lambda item: item["edge"], reverse=True)
-    top_picks = scored[:top]
+    # Enforce abstain policy: only return publishable picks in the top-N
+    publishable = [item for item in scored if item.get("is_publishable", False)]
+    top_picks = publishable[:top]
 
     picks = [
         ScoredPick(

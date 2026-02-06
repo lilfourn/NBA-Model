@@ -285,6 +285,20 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
             )
         coverage = round(published_n / len(scored), 4)
 
+    # Placed tier: actionable AND conformal_set_size != 2 (tightest filter)
+    placed_hit_rate = None
+    placed_n = 0
+    if p_arr is not None and len(p_arr) > 0:
+        placed_mask = act_mask.copy()
+        if "conformal_set_size" in scored.columns:
+            conf_ok = scored["conformal_set_size"].fillna(1).to_numpy() != 2
+            placed_mask = placed_mask & conf_ok
+        placed_n = int(placed_mask.sum())
+        if placed_n > 0:
+            placed_hit_rate = _safe_float(
+                float(scored.loc[placed_mask, "ensemble_correct"].mean())
+            )
+
     return {
         "total_predictions": total_predictions,
         "total_resolved": total_resolved,
@@ -292,6 +306,8 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
         "overall_hit_rate": _safe_float(overall_hit_rate),
         "published_hit_rate": published_hit_rate,
         "published_n": published_n,
+        "placed_hit_rate": placed_hit_rate,
+        "placed_n": placed_n,
         "coverage": coverage,
         "actionable_threshold": actionable_threshold,
         "rolling": rolling_data,

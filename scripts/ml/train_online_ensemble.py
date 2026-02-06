@@ -18,7 +18,11 @@ from app.db.engine import get_engine  # noqa: E402
 from app.ml.dataset import _load_name_overrides  # noqa: E402
 from app.ml.stat_mappings import stat_value_from_row  # noqa: E402
 from app.modeling.gating_model import GatingModel, build_context_features  # noqa: E402
-from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler, logloss  # noqa: E402
+from app.modeling.online_ensemble import (
+    Context,
+    ContextualHedgeEnsembler,
+    logloss,
+)  # noqa: E402
 from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler  # noqa: E402
 from app.modeling.weight_history import log_weights  # noqa: E402
 from app.utils.names import normalize_name  # noqa: E402
@@ -27,6 +31,16 @@ from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 EXPERT_COLS_DEFAULT = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
+
+# Stat types excluded from ensemble training (degenerate base rates)
+EXCLUDED_STAT_TYPES: set[str] = {
+    "Dunks",
+    "Blocked Shots",
+    "Blks+Stls",
+    "Offensive Rebounds",
+    "Personal Fouls",
+    "Steals",
+}
 
 
 def _parse_timestamp(series: pd.Series) -> pd.Series:
@@ -55,6 +69,7 @@ def _nn_weight_cap_for_latest_auc(engine) -> dict[str, float]:
     except Exception:  # noqa: BLE001
         pass
     return {"p_nn": 0.10}
+
 
 def _normalize_id(value) -> str | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -92,7 +107,9 @@ def _load_outcomes(engine, df: pd.DataFrame) -> pd.DataFrame:
     game_ids = sorted({str(v) for v in need["game_id"].dropna().unique().tolist()})
 
     players = pd.read_sql(
-        text("select id as player_id, name_key, display_name from players where id = any(:ids)"),
+        text(
+            "select id as player_id, name_key, display_name from players where id = any(:ids)"
+        ),
         engine,
         params={"ids": player_ids},
     )
@@ -120,12 +137,23 @@ def _load_outcomes(engine, df: pd.DataFrame) -> pd.DataFrame:
         return name_overrides.get(key, key)
 
     players = players.copy()
-    players["normalized_name_key"] = [to_name_key(row) for row in players.to_dict(orient="records")]
+    players["normalized_name_key"] = [
+        to_name_key(row) for row in players.to_dict(orient="records")
+    ]
 
     nba_players = pd.read_sql(
-        text("select id as nba_player_id, name_key from nba_players where name_key = any(:keys)"),
+        text(
+            "select id as nba_player_id, name_key from nba_players where name_key = any(:keys)"
+        ),
         engine,
-        params={"keys": sorted({str(v) for v in players["normalized_name_key"].dropna().unique().tolist()})},
+        params={
+            "keys": sorted(
+                {
+                    str(v)
+                    for v in players["normalized_name_key"].dropna().unique().tolist()
+                }
+            )
+        },
     )
 
     mapped = players.merge(
@@ -135,7 +163,9 @@ def _load_outcomes(engine, df: pd.DataFrame) -> pd.DataFrame:
         how="left",
     )[["player_id", "nba_player_id"]]
 
-    merged = need.merge(mapped, on="player_id", how="left").merge(games, on="game_id", how="left")
+    merged = need.merge(mapped, on="player_id", how="left").merge(
+        games, on="game_id", how="left"
+    )
     merged = merged.dropna(subset=["nba_player_id", "game_date"])
     if merged.empty:
         return merged
@@ -216,10 +246,14 @@ def _write_back_outcomes(
         return 0
 
     updates["__row_id"] = updates["__row_id"].astype(int)
-    updates = updates.sort_values("__row_id").drop_duplicates(subset=["__row_id"], keep="last")
+    updates = updates.sort_values("__row_id").drop_duplicates(
+        subset=["__row_id"], keep="last"
+    )
 
     updated_rows = 0
-    for row_id_raw, actual_value, over_label in updates[["__row_id", "actual_value", "over_label"]].itertuples(index=False, name=None):
+    for row_id_raw, actual_value, over_label in updates[
+        ["__row_id", "actual_value", "over_label"]
+    ].itertuples(index=False, name=None):
         row_id = int(row_id_raw)
         if row_id < 0 or row_id >= len(log_df):
             continue
@@ -230,7 +264,11 @@ def _write_back_outcomes(
             continue
 
         log_df.at[row_id, "actual_value"] = float(actual_value)
-        log_df.at[row_id, "over_label"] = int(over_label) if over_label is not None and not pd.isna(over_label) else pd.NA
+        log_df.at[row_id, "over_label"] = (
+            int(over_label)
+            if over_label is not None and not pd.isna(over_label)
+            else pd.NA
+        )
         updated_rows += 1
 
     if updated_rows <= 0:
@@ -294,15 +332,21 @@ def _load_training_frame_from_db(engine, *, days_back: int) -> pd.DataFrame:
     frame["n_eff"] = pd.to_numeric(frame.get("n_eff"), errors="coerce")
     frame["line_score"] = pd.to_numeric(frame.get("line_score"), errors="coerce")
     frame["over_label"] = pd.to_numeric(frame.get("over_label"), errors="coerce")
-    frame = frame.dropna(subset=["stat_type", "line_score", "over_label", "decision_time_parsed"])
+    frame = frame.dropna(
+        subset=["stat_type", "line_score", "over_label", "decision_time_parsed"]
+    )
     frame["over_label"] = frame["over_label"].astype(int)
     return frame
 
 
 def main() -> None:
-    warnings.filterwarnings("ignore", message=".*encountered in matmul", category=RuntimeWarning)
+    warnings.filterwarnings(
+        "ignore", message=".*encountered in matmul", category=RuntimeWarning
+    )
 
-    ap = argparse.ArgumentParser(description="Train an online contextual Hedge ensemble from logged predictions.")
+    ap = argparse.ArgumentParser(
+        description="Train an online contextual Hedge ensemble from logged predictions."
+    )
     ap.add_argument("--database-url", default=None)
     ap.add_argument("--log-path", default=PRED_LOG_DEFAULT)
     ap.add_argument("--out", default="models/ensemble_weights.json")
@@ -319,8 +363,10 @@ def main() -> None:
         help="When source includes db, only use resolved rows from the last N days.",
     )
     ap.add_argument("--eta", type=float, default=0.2)
-    ap.add_argument("--shrink", type=float, default=0.01)
-    ap.add_argument("--experts", nargs="*", default=None, help="Expert probability columns.")
+    ap.add_argument("--shrink", type=float, default=0.05)
+    ap.add_argument(
+        "--experts", nargs="*", default=None, help="Expert probability columns."
+    )
     ap.add_argument(
         "--min-experts",
         type=int,
@@ -364,7 +410,9 @@ def main() -> None:
         required = {"player_id", "game_id", "stat_type", "line_score"}
         req_missing = required - set(raw_df.columns)
         if req_missing:
-            raise SystemExit(f"Prediction log missing required columns: {sorted(req_missing)}")
+            raise SystemExit(
+                f"Prediction log missing required columns: {sorted(req_missing)}"
+            )
 
         raw_df = raw_df.reset_index(drop=True)
         raw_df["__row_id"] = raw_df.index.astype(int)
@@ -378,7 +426,9 @@ def main() -> None:
         if args.no_write_outcomes:
             print("Outcome write-back disabled (--no-write-outcomes).")
         else:
-            updated_rows = _write_back_outcomes(raw_df, resolved_all, path=log_path, only_missing=True)
+            updated_rows = _write_back_outcomes(
+                raw_df, resolved_all, path=log_path, only_missing=True
+            )
             print(f"Outcome write-back: updated {updated_rows} row(s) in {log_path}.")
 
         df = raw_df.copy()
@@ -387,7 +437,9 @@ def main() -> None:
         missing = [col for col in experts if col not in df.columns]
         if missing:
             # New experts may not yet appear in historical logs. Train with available ones.
-            print(f"Note: expert columns not yet in log (will be added on next scoring run): {missing}")
+            print(
+                f"Note: expert columns not yet in log (will be added on next scoring run): {missing}"
+            )
             experts = [col for col in experts if col in df.columns]
             if not experts:
                 raise SystemExit("No expert columns found in prediction log.")
@@ -440,9 +492,22 @@ def main() -> None:
 
     joined["n_eff"] = pd.to_numeric(joined.get("n_eff"), errors="coerce")
     joined["is_live"] = joined.get("is_live", False).fillna(False).astype(bool)
-    joined = joined.dropna(subset=["over_label", "stat_type", "line_score", "decision_time_parsed"])
+    joined = joined.dropna(
+        subset=["over_label", "stat_type", "line_score", "decision_time_parsed"]
+    )
     if joined.empty:
         print("No resolved rows available after final validation filters.")
+        return
+
+    # Filter out degenerate stat types from ensemble training
+    before_filter = len(joined)
+    joined = joined[~joined["stat_type"].isin(EXCLUDED_STAT_TYPES)].copy()
+    if len(joined) < before_filter:
+        print(
+            f"Excluded {before_filter - len(joined)} rows with degenerate stat types from training."
+        )
+    if joined.empty:
+        print("No training rows remaining after stat type exclusion.")
         return
 
     joined = joined.sort_values("decision_time_parsed")
@@ -507,7 +572,9 @@ def main() -> None:
         gating_n_effs.append(n_eff_val if n_eff_val is not None else 0.0)
         for col in experts:
             p = expert_probs.get(col)
-            gating_expert_probs[col].append(float(p) if p is not None and not pd.isna(p) else 0.5)
+            gating_expert_probs[col].append(
+                float(p) if p is not None and not pd.isna(p) else 0.5
+            )
 
     def avg(name: str) -> float | None:
         n = counts.get(name, 0)
@@ -546,6 +613,7 @@ def main() -> None:
     # Upload ensemble artifacts to DB for Railway API
     try:
         from app.ml.artifact_store import upload_file
+
         upload_file(engine, model_name="ensemble_weights", file_path=out_path)
         upload_file(engine, model_name="thompson_weights", file_path=ts_path)
         gm_path_check = out_path.parent / "gating_model.joblib"
@@ -577,6 +645,7 @@ def main() -> None:
                         b = beta_dict.get(ctx_key, {}).get(e)
                         if a is not None and b is not None:
                             import math
+
                             if math.isfinite(a) and math.isfinite(b) and (a + b) > 0:
                                 a_vals.append(a)
                                 b_vals.append(b)
@@ -593,7 +662,6 @@ def main() -> None:
         print("Logged weight history snapshot.")
     except Exception as e:  # noqa: BLE001
         print(f"Weight history logging failed: {e}")
-
 
 
 if __name__ == "__main__":

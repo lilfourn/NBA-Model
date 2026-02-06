@@ -573,6 +573,18 @@ def _run_train_pipeline() -> None:
         ],
         allow_fail=True,
     )
+    # Fit per-stat-type isotonic calibrators
+    _run_cmd(
+        [
+            "-m",
+            "scripts.ml.fit_stat_calibrator",
+            "--days-back",
+            "45",
+            "--output",
+            str(REMOTE_MODELS_DIR / "stat_calibrator.joblib"),
+        ],
+        allow_fail=True,
+    )
     # Ablation report — compare ensemble components
     _run_cmd(
         [

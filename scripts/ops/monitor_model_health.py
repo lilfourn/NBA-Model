@@ -453,6 +453,15 @@ def _compute_tier_metrics(joined: pd.DataFrame) -> dict:
 
     coverage = round(actionable_n / scored_n, 4) if scored_n > 0 else 0.0
 
+    # Placed tier: actionable AND conformal_set_size != 2 (if available)
+    placed_mask = actionable_mask.copy()
+    if "conformal_set_size" in valid.columns:
+        conf_ok = valid["conformal_set_size"].fillna(1).to_numpy() != 2
+        placed_mask = placed_mask & conf_ok
+    placed_n = int(placed_mask.sum())
+    placed_acc = float(scored_correct[placed_mask].mean()) if placed_n > 0 else None
+    placed_coverage = round(placed_n / scored_n, 4) if scored_n > 0 else 0.0
+
     return {
         "scored": {"n": scored_n, "accuracy": round(scored_acc, 4)},
         "actionable": {
@@ -462,7 +471,12 @@ def _compute_tier_metrics(joined: pd.DataFrame) -> dict:
             else None,
             "threshold": ACTIONABLE_CONFIDENCE_THRESHOLD,
         },
+        "placed": {
+            "n": placed_n,
+            "accuracy": round(placed_acc, 4) if placed_acc is not None else None,
+        },
         "coverage": coverage,
+        "placed_coverage": placed_coverage,
     }
 
 

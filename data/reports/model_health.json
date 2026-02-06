@@ -1,6 +1,6 @@
 {
   "metrics_version": "2.0.0",
-  "generated_at": "2026-02-06T19:38:59.272957+00:00",
+  "generated_at": "2026-02-06T19:52:32.189983+00:00",
   "data_source": "live_db",
   "days_back": 90,
   "time_column": "coalesce(decision_time, resolved_at, created_at)",
@@ -19,7 +19,12 @@
       "accuracy": 0.5329,
       "threshold": 0.57
     },
-    "coverage": 0.6896
+    "placed": {
+      "n": 3468,
+      "accuracy": 0.5329
+    },
+    "coverage": 0.6896,
+    "placed_coverage": 0.6896
   },
   "calibration_diagnostics": {
     "overall": {
@@ -979,8 +984,8 @@
       "rolling_accuracy": 0.48,
       "rolling_logloss": 0.752,
       "n": 50,
-      "ensemble_weight": 0.01667,
-      "alert_eligible": false,
+      "ensemble_weight": 0.087614,
+      "alert_eligible": true,
       "base_rate": 0.48,
       "inversion_test": {
         "accuracy": 0.48,
@@ -1001,8 +1006,8 @@
       "rolling_accuracy": 0.4,
       "rolling_logloss": 1.4062,
       "n": 50,
-      "ensemble_weight": 0.025784,
-      "alert_eligible": false,
+      "ensemble_weight": 0.092402,
+      "alert_eligible": true,
       "base_rate": 0.48,
       "inversion_test": {
         "accuracy": 0.4,
@@ -1023,7 +1028,7 @@
       "rolling_accuracy": 0.54,
       "rolling_logloss": 0.8629,
       "n": 50,
-      "ensemble_weight": 0.039317,
+      "ensemble_weight": 0.107245,
       "alert_eligible": true,
       "base_rate": 0.48,
       "inversion_test": {
@@ -1045,7 +1050,7 @@
       "rolling_accuracy": 0.4,
       "rolling_logloss": 0.8052,
       "n": 50,
-      "ensemble_weight": 0.224684,
+      "ensemble_weight": 0.23906,
       "alert_eligible": true,
       "base_rate": 0.54,
       "inversion_test": {
@@ -1067,7 +1072,7 @@
       "rolling_accuracy": 0.44,
       "rolling_logloss": 0.8238,
       "n": 50,
-      "ensemble_weight": 0.187547,
+      "ensemble_weight": 0.208403,
       "alert_eligible": true,
       "base_rate": 0.48,
       "inversion_test": {
@@ -1111,6 +1116,27 @@
   "alerts": [
     {
       "type": "high_logloss",
+      "expert": "p_forecast_cal",
+      "value": 0.752,
+      "threshold": 0.75,
+      "message": "p_forecast_cal rolling logloss 0.752 > 0.75"
+    },
+    {
+      "type": "low_accuracy",
+      "expert": "p_nn",
+      "value": 0.4,
+      "threshold": 0.48,
+      "message": "p_nn rolling 50-bet accuracy 40.0% < 48%"
+    },
+    {
+      "type": "high_logloss",
+      "expert": "p_nn",
+      "value": 1.4062,
+      "threshold": 0.75,
+      "message": "p_nn rolling logloss 1.406 > 0.75"
+    },
+    {
+      "type": "high_logloss",
       "expert": "p_lr",
       "value": 0.8629,
       "threshold": 0.75,
@@ -1152,32 +1178,7 @@
       "message": "p_final rolling logloss 0.800 > 0.75"
     }
   ],
-  "suppressed_alerts": [
-    {
-      "type": "high_logloss",
-      "expert": "p_forecast_cal",
-      "value": 0.752,
-      "threshold": 0.75,
-      "message": "p_forecast_cal rolling logloss 0.752 > 0.75",
-      "suppression_reason": "ensemble_weight=0.016670 < min_alert_weight=0.030"
-    },
-    {
-      "type": "low_accuracy",
-      "expert": "p_nn",
-      "value": 0.4,
-      "threshold": 0.48,
-      "message": "p_nn rolling 50-bet accuracy 40.0% < 48%",
-      "suppression_reason": "ensemble_weight=0.025784 < min_alert_weight=0.030"
-    },
-    {
-      "type": "high_logloss",
-      "expert": "p_nn",
-      "value": 1.4062,
-      "threshold": 0.75,
-      "message": "p_nn rolling logloss 1.406 > 0.75",
-      "suppression_reason": "ensemble_weight=0.025784 < min_alert_weight=0.030"
-    }
-  ],
-  "alert_count": 6,
-  "suppressed_alert_count": 3
+  "suppressed_alerts": [],
+  "alert_count": 9,
+  "suppressed_alert_count": 0
 }

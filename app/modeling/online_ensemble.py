@@ -88,14 +88,21 @@ class ContextualHedgeEnsembler:
     - Maintains multiplicative-weights per context bucket
     - Predicts by averaging expert logits (more stable than averaging probabilities)
     - Updates weights from realized outcomes using log loss
+    - Weight floor/cap prevents collapse into a single expert
+    - Adaptive eta decay prevents late-stage exponential divergence
     """
+
+    # Anti-collapse constants
+    MIN_WEIGHT_FLOOR = 0.02  # No expert below 2%
+    MAX_WEIGHT_CAP = 0.45  # No single expert above 45%
+    ETA_DECAY = 0.0005  # eta_t = eta_0 / (1 + decay * t)
 
     def __init__(
         self,
         experts: list[str],
         *,
         eta: float = 0.2,
-        shrink_to_uniform: float = 0.01,
+        shrink_to_uniform: float = 0.05,
         max_weight: dict[str, float] | None = None,
     ) -> None:
         if not experts:
@@ -110,6 +117,7 @@ class ContextualHedgeEnsembler:
         self.shrink = float(shrink_to_uniform)
         self.max_weight: dict[str, float] = dict(max_weight) if max_weight else {}
         self.weights: dict[tuple[str, str, str], dict[str, float]] = {}
+        self._update_count: int = 0  # Tracks total updates for eta decay
 
     # OOF AUC-based quality priors — prevents weak experts from dragging
     # down ensemble during the slow online learning phase.
@@ -136,9 +144,38 @@ class ContextualHedgeEnsembler:
             self.weights[ctx_key] = self._init_weights()
         return self.weights[ctx_key]
 
+    def _clamp_weights(self, w: dict[str, float]) -> None:
+        """Apply floor/cap constraints to prevent weight collapse."""
+        n = len(self.experts)
+        if n == 0:
+            return
+        floor = self.MIN_WEIGHT_FLOOR
+        cap = self.MAX_WEIGHT_CAP
+        # Apply floor
+        for expert in self.experts:
+            val = float(w.get(expert, 0.0))
+            if val < floor:
+                w[expert] = floor
+        # Apply per-expert caps (both global cap and user-specified max_weight)
+        for expert in self.experts:
+            val = float(w.get(expert, 0.0))
+            effective_cap = cap
+            user_cap = self.max_weight.get(expert)
+            if user_cap is not None:
+                effective_cap = min(cap, float(user_cap))
+            if val > effective_cap:
+                w[expert] = effective_cap
+        # Renormalize
+        total = sum(float(w.get(e, 0.0)) for e in self.experts)
+        if total > 0 and math.isfinite(total):
+            for expert in self.experts:
+                w[expert] = float(w.get(expert, 0.0)) / total
+
     def predict(self, expert_probs: dict[str, float | None], ctx: Context) -> float:
         ctx_key = ctx.key()
         w = self._get_weights(ctx_key)
+        # Apply floor/cap at inference to guard against stale collapsed weights
+        self._clamp_weights(w)
 
         avail = []
         for expert in self.experts:
@@ -162,15 +199,14 @@ class ContextualHedgeEnsembler:
             w_val = float(w.get(expert, 0.0))
             if not math.isfinite(w_val) or w_val < 0:
                 w_val = 0.0
-            cap = self.max_weight.get(expert)
-            if cap is not None and w_val > cap:
-                w_val = cap
             weights.append(w_val)
 
         wsum = sum(weights)
         if (not math.isfinite(wsum)) or wsum <= 0:
             # If weights got corrupted, fall back to uniform over available experts.
-            z = sum(logit(float(expert_probs[expert])) for expert in avail) / float(len(avail))
+            z = sum(logit(float(expert_probs[expert])) for expert in avail) / float(
+                len(avail)
+            )
             return sigmoid(z)
 
         z = 0.0
@@ -180,14 +216,22 @@ class ContextualHedgeEnsembler:
             z += (w_val / (wsum + 1e-12)) * logit(float(expert_probs[expert]))
         return sigmoid(z)
 
-    def update(self, expert_probs: dict[str, float | None], y: int, ctx: Context) -> None:
+    def update(
+        self, expert_probs: dict[str, float | None], y: int, ctx: Context
+    ) -> None:
         ctx_key = ctx.key()
         w = self._get_weights(ctx_key)
+        self._update_count += 1
 
         if self.shrink > 0:
             u = 1.0 / float(len(self.experts))
             for expert in self.experts:
-                w[expert] = (1.0 - self.shrink) * float(w.get(expert, 0.0)) + self.shrink * u
+                w[expert] = (1.0 - self.shrink) * float(
+                    w.get(expert, 0.0)
+                ) + self.shrink * u
+
+        # Adaptive eta: decay over time to prevent late-stage collapse
+        eta_t = self.eta / (1.0 + self.ETA_DECAY * self._update_count)
 
         for expert in self.experts:
             p = expert_probs.get(expert)
@@ -200,7 +244,7 @@ class ContextualHedgeEnsembler:
             if not math.isfinite(p_val):
                 continue
             loss = logloss(int(y), p_val)
-            w[expert] = float(w.get(expert, 0.0)) * math.exp(-self.eta * loss)
+            w[expert] = float(w.get(expert, 0.0)) * math.exp(-eta_t * loss)
 
         total = sum(float(w.get(expert, 0.0)) for expert in self.experts)
         if (not math.isfinite(total)) or total <= 0:
@@ -209,13 +253,18 @@ class ContextualHedgeEnsembler:
         for expert in self.experts:
             w[expert] = float(w.get(expert, 0.0)) / total
 
+        # Apply floor/cap to prevent collapse
+        self._clamp_weights(w)
+
     def weights_for_context(self, ctx: Context) -> dict[str, float]:
         w = self._get_weights(ctx.key())
         return {expert: float(w.get(expert, 0.0)) for expert in self.experts}
 
     def iter_contexts(self) -> Iterable[tuple[tuple[str, str, str], dict[str, float]]]:
         for ctx_key, weights in self.weights.items():
-            yield ctx_key, {expert: float(weights.get(expert, 0.0)) for expert in self.experts}
+            yield ctx_key, {
+                expert: float(weights.get(expert, 0.0)) for expert in self.experts
+            }
 
     def to_state_dict(self) -> dict[str, Any]:
         weights_out: dict[str, dict[str, float]] = {}
@@ -230,6 +279,7 @@ class ContextualHedgeEnsembler:
             "experts": list(self.experts),
             "eta": float(self.eta),
             "shrink_to_uniform": float(self.shrink),
+            "update_count": self._update_count,
             "weights": weights_out,
         }
         if self.max_weight:
@@ -253,6 +303,7 @@ class ContextualHedgeEnsembler:
         if isinstance(max_weight_raw, dict):
             max_weight = {str(k): float(v) for k, v in max_weight_raw.items()}
         inst = cls(experts, eta=eta, shrink_to_uniform=shrink, max_weight=max_weight)
+        inst._update_count = int(state.get("update_count", 0))
 
         weights_in = state.get("weights") or {}
         if not isinstance(weights_in, dict):
