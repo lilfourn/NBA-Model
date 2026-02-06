@@ -21,6 +21,10 @@ from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs
 from app.ml.meta_learner import infer_meta_learner
 from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs, latest_compatible_checkpoint
+from app.ml.tabdl.infer import (
+    infer_over_probs as infer_tabdl_over_probs,
+    latest_compatible_checkpoint as latest_compatible_tabdl_checkpoint,
+)
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs
 from app.modeling.conformal import ConformalCalibrator
 from app.modeling.db_logs import load_db_game_logs
@@ -69,6 +73,7 @@ class ScoredPick:
     rank_score: float
     p_forecast_cal: float | None
     p_nn: float | None
+    p_tabdl: float | None
     p_lr: float | None
     p_xgb: float | None
     p_lgbm: float | None
@@ -338,6 +343,38 @@ def _nn_weight_cap_for_latest_auc(engine: Engine) -> dict[str, float]:
     return {"p_nn": 0.10}
 
 
+def _ensure_ensemble_experts(ens: ContextualHedgeEnsembler, experts: list[str]) -> ContextualHedgeEnsembler:
+    if ens.experts == experts:
+        return ens
+    ens.experts = list(experts)
+    seed = ens._init_weights()  # noqa: SLF001
+    for ctx_key, weights in ens.weights.items():
+        for expert in experts:
+            if expert not in weights:
+                weights[expert] = float(seed.get(expert, 0.0))
+        total = sum(max(0.0, float(weights.get(expert, 0.0))) for expert in experts)
+        if not math.isfinite(total) or total <= 0:
+            ens.weights[ctx_key] = dict(seed)
+            continue
+        for expert in experts:
+            weights[expert] = max(0.0, float(weights.get(expert, 0.0))) / total
+    return ens
+
+
+def _ensure_thompson_experts(ts: ThompsonSamplingEnsembler, experts: list[str]) -> ThompsonSamplingEnsembler:
+    if ts.experts == experts:
+        return ts
+    ts.experts = list(experts)
+    ctx_keys = set(ts.alpha.keys()) | set(ts.beta.keys())
+    for ctx_key in ctx_keys:
+        alpha = ts.alpha.setdefault(ctx_key, {})
+        beta = ts.beta.setdefault(ctx_key, {})
+        for expert in experts:
+            alpha.setdefault(expert, float(ts.prior_alpha))
+            beta.setdefault(expert, float(ts.prior_beta))
+    return ts
+
+
 def _is_supported_stat_type(stat_type: str) -> bool:
     if not stat_type:
         return False
@@ -378,7 +415,7 @@ def _load_projection_frame(engine: Engine, snapshot_id: str, *, include_non_toda
           and coalesce(p.odds_type, 0) = 0
           and lower(coalesce(p.event_type, p.attributes->>'event_type', '')) <> 'combo'
           and (pl.combo is null or pl.combo = false)
-          and (:include_non_today = true or coalesce(pf.today, false) = true)
+          and (:include_non_today = true or coalesce(pf.today, true) = true)
           and (pf.is_live is null or pf.is_live = false)
           and (pf.in_game is null or pf.in_game = false)
           and (pf.minutes_to_start is null or pf.minutes_to_start >= 0)
@@ -477,6 +514,7 @@ def score_ensemble(
     _use_db = settings.model_source.lower() == "db"
     if _use_db:
         nn_path = load_latest_artifact_as_file(engine, "nn_gru_attention", suffix=".pt")
+        tabdl_path = load_latest_artifact_as_file(engine, "tabdl_mlp", suffix=".pt")
         lr_path = load_latest_artifact_as_file(engine, "baseline_logreg", suffix=".joblib")
         xgb_path = load_latest_artifact_as_file(engine, "xgb", suffix=".joblib")
         lgbm_path = load_latest_artifact_as_file(engine, "lgbm", suffix=".joblib")
@@ -484,6 +522,7 @@ def score_ensemble(
     else:
         models_path = Path(models_dir)
         nn_path = latest_compatible_checkpoint(models_path, "nn_gru_attention_*.pt")
+        tabdl_path = latest_compatible_tabdl_checkpoint(models_path, "tabdl_*.pt")
         lr_path = latest_compatible_joblib_path(models_path, "baseline_logreg_*.joblib")
         xgb_path = latest_compatible_joblib_path(models_path, "xgb_*.joblib")
         lgbm_path = latest_compatible_joblib_path(models_path, "lgbm_*.joblib")
@@ -503,6 +542,14 @@ def score_ensemble(
     if nn_path and nn_path.exists():
         try:
             _pl = _torch.load(str(nn_path), map_location="cpu")
+            _cd = _pl.get("conformal")
+            if _cd:
+                conformal_cals.append(ConformalCalibrator(**_cd))
+        except Exception:  # noqa: BLE001
+            pass
+    if tabdl_path and tabdl_path.exists():
+        try:
+            _pl = _torch.load(str(tabdl_path), map_location="cpu")
             _cd = _pl.get("conformal")
             if _cd:
                 conformal_cals.append(ConformalCalibrator(**_cd))
@@ -565,6 +612,27 @@ def score_ensemble(
                 if not math.isfinite(prob):
                     continue
                 p_nn[str(proj_id)] = prob
+
+    # Deep tabular expert (optional)
+    p_tabdl: dict[str, float] = {}
+    if tabdl_path:
+        try:
+            tabdl_inf = infer_tabdl_over_probs(
+                engine=engine,
+                model_path=str(tabdl_path),
+                snapshot_id=str(resolved_snapshot),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        else:
+            for idx, r in enumerate(tabdl_inf.frame.itertuples(index=False)):
+                proj_id = getattr(r, "projection_id", None)
+                if proj_id is None:
+                    continue
+                prob = float(tabdl_inf.probs[idx])
+                if not math.isfinite(prob):
+                    continue
+                p_tabdl[str(proj_id)] = prob
 
     # LR expert (optional)
     p_lr: dict[str, float] = {}
@@ -629,7 +697,7 @@ def score_ensemble(
                     continue
                 p_lgbm[str(proj_id)] = prob
 
-    experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
+    experts = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
     nn_cap = _nn_weight_cap_for_latest_auc(engine)
 
     _ens_path: Path | str | None = None
@@ -647,7 +715,7 @@ def score_ensemble(
         _gating_path = _gating_candidate if _gating_candidate.exists() else None
 
     if _ens_path:
-        ens = ContextualHedgeEnsembler.load(str(_ens_path))
+        ens = _ensure_ensemble_experts(ContextualHedgeEnsembler.load(str(_ens_path)), experts)
         if not ens.max_weight:
             ens.max_weight = nn_cap
     else:
@@ -657,7 +725,7 @@ def score_ensemble(
     thompson: ThompsonSamplingEnsembler | None = None
     if _ts_path:
         try:
-            thompson = ThompsonSamplingEnsembler.load(str(_ts_path))
+            thompson = _ensure_thompson_experts(ThompsonSamplingEnsembler.load(str(_ts_path)), experts)
         except Exception:  # noqa: BLE001
             pass
 
@@ -689,6 +757,7 @@ def score_ensemble(
         expert_probs = {
             "p_forecast_cal": _safe_prob(f.get("p_forecast_cal")),
             "p_nn": _safe_prob(p_nn.get(proj_id)),
+            "p_tabdl": _safe_prob(p_tabdl.get(proj_id)),
             "p_lr": _safe_prob(p_lr.get(proj_id)),
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
@@ -770,6 +839,7 @@ def score_ensemble(
                 "rank_score": float(score),
                 "p_forecast_cal": expert_probs["p_forecast_cal"],
                 "p_nn": expert_probs["p_nn"],
+                "p_tabdl": expert_probs["p_tabdl"],
                 "p_lr": expert_probs["p_lr"],
                 "p_xgb": expert_probs["p_xgb"],
                 "p_lgbm": expert_probs["p_lgbm"],
@@ -803,6 +873,7 @@ def score_ensemble(
             rank_score=item["rank_score"],
             p_forecast_cal=item["p_forecast_cal"],
             p_nn=item["p_nn"],
+            p_tabdl=item["p_tabdl"],
             p_lr=item["p_lr"],
             p_xgb=item["p_xgb"],
             p_lgbm=item["p_lgbm"],
