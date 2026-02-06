@@ -30,6 +30,7 @@ REMOTE_LOGS_DIR = REMOTE_STATE_ROOT / "logs"
 REMOTE_MONITORING_LOG = REMOTE_DATA_DIR / "monitoring" / "prediction_log.csv"
 REMOTE_CALIBRATION_DIR = REMOTE_DATA_DIR / "calibration"
 REMOTE_HEALTH_REPORT = REMOTE_DATA_DIR / "reports" / "model_health.json"
+REMOTE_TRAIN_FRESHNESS_REPORT = REMOTE_DATA_DIR / "reports" / "train_data_freshness.json"
 
 app = modal.App(APP_NAME)
 state_volume = modal.Volume.from_name(STATE_VOLUME_NAME, create_if_missing=True)
@@ -142,13 +143,21 @@ def _finish_run() -> None:
     state_volume.commit()
 
 
-def _run_cmd(args: list[str], *, allow_fail: bool = False) -> int:
+def _run_cmd(
+    args: list[str],
+    *,
+    allow_fail: bool = False,
+    env_overrides: dict[str, str] | None = None,
+) -> int:
     cmd = [sys.executable, *args]
     print(f"[modal] running: {' '.join(cmd)}")
+    cmd_env = _runtime_env()
+    if env_overrides:
+        cmd_env.update({k: str(v) for k, v in env_overrides.items()})
     proc = subprocess.run(
         cmd,
         cwd=str(REMOTE_PROJECT_ROOT),
-        env=_runtime_env(),
+        env=cmd_env,
         text=True,
         capture_output=True,
         check=False,
@@ -373,7 +382,15 @@ def _run_train_pipeline() -> None:
             date_from,
             "--date-to",
             date_to,
-        ]
+            "--allow-empty-on-failure",
+            "--fast-fail-consecutive-timeouts",
+            "2",
+        ],
+        env_overrides={
+            "NBA_STATS_TIMEOUT_SECONDS": "15",
+            "NBA_STATS_MAX_RETRIES": "1",
+            "NBA_STATS_BACKOFF_SECONDS": "0.75",
+        },
     )
     _run_cmd(
         [
@@ -385,6 +402,32 @@ def _run_train_pipeline() -> None:
             "3",
         ]
     )
+    freshness_rc = _run_cmd(
+        [
+            "-m",
+            "scripts.ops.check_training_data_freshness",
+            "--date-from",
+            date_from,
+            "--date-to",
+            date_to,
+            "--min-pending-games",
+            "2",
+            "--min-game-coverage-ratio",
+            "0.60",
+            "--min-stats-rows",
+            "20",
+            "--json-out",
+            str(REMOTE_TRAIN_FRESHNESS_REPORT),
+        ],
+        allow_fail=True,
+    )
+    if freshness_rc != 0:
+        print(
+            "[modal] training deferred: NBA boxscore freshness gate failed "
+            f"for window {date_from}..{date_to}. Keeping prior model artifacts."
+        )
+        _finish_run()
+        return
     _run_cmd(
         [
             "-m",
@@ -393,8 +436,10 @@ def _run_train_pipeline() -> None:
             str(REMOTE_MODELS_DIR),
         ]
     )
-    train_nn_gpu.remote()
-    train_tabdl_gpu.remote()
+    # Launch GPU training in parallel (non-blocking) while CPU models train
+    nn_handle = train_nn_gpu.spawn()
+    tabdl_handle = train_tabdl_gpu.spawn()
+    print("[modal] NN and TabDL GPU training spawned in parallel")
     _run_cmd(
         [
             "-m",
@@ -411,26 +456,43 @@ def _run_train_pipeline() -> None:
             str(REMOTE_MODELS_DIR),
         ]
     )
-    _run_cmd(
+    # Await GPU jobs before OOF/Meta (they need all expert models)
+    print("[modal] Waiting for NN GPU training to complete...")
+    try:
+        nn_handle.get()
+        print("[modal] NN GPU training completed successfully")
+    except Exception as exc:
+        print(f"[modal] WARNING: NN GPU training failed: {exc}")
+    print("[modal] Waiting for TabDL GPU training to complete...")
+    try:
+        tabdl_handle.get()
+        print("[modal] TabDL GPU training completed successfully")
+    except Exception as exc:
+        print(f"[modal] WARNING: TabDL GPU training failed: {exc}")
+    oof_path = REMOTE_DATA_DIR / "oof_predictions.csv"
+    oof_rc = _run_cmd(
         [
             "-m",
             "scripts.ml.generate_oof_predictions",
             "--output",
-            str(REMOTE_DATA_DIR / "oof_predictions.csv"),
+            str(oof_path),
         ],
         allow_fail=True,
     )
-    _run_cmd(
-        [
-            "-m",
-            "scripts.ml.train_meta_learner",
-            "--oof-path",
-            str(REMOTE_DATA_DIR / "oof_predictions.csv"),
-            "--models-dir",
-            str(REMOTE_MODELS_DIR),
-        ],
-        allow_fail=True,
-    )
+    if oof_rc != 0:
+        print("[modal] WARNING: OOF generation failed — skipping meta-learner training")
+    else:
+        _run_cmd(
+            [
+                "-m",
+                "scripts.ml.train_meta_learner",
+                "--oof-path",
+                str(oof_path),
+                "--models-dir",
+                str(REMOTE_MODELS_DIR),
+            ],
+            allow_fail=True,
+        )
     _run_cmd(
         [
             "-m",
@@ -448,6 +510,23 @@ def _run_train_pipeline() -> None:
     _run_cmd(
         [
             "-m",
+            "scripts.ml.optimize_expert_weights",
+            "--days-back",
+            "120",
+            "--report-out",
+            str(REMOTE_DATA_DIR / "reports" / "expert_weights_optimized.json"),
+            "--ensemble-out",
+            str(REMOTE_MODELS_DIR / "ensemble_weights_optimized.json"),
+            "--current-ensemble",
+            str(REMOTE_MODELS_DIR / "ensemble_weights.json"),
+            "--apply",
+            "--upload-db",
+        ],
+        allow_fail=True,
+    )
+    _run_cmd(
+        [
+            "-m",
             "scripts.ops.monitor_model_health",
             "--ensemble-weights",
             str(REMOTE_MODELS_DIR / "ensemble_weights.json"),
@@ -456,6 +535,125 @@ def _run_train_pipeline() -> None:
             "--alert-email",
         ],
         allow_fail=True,
+    )
+    # Drift detection — exit code 1 means drift detected
+    drift_report = REMOTE_DATA_DIR / "reports" / "drift_report.json"
+    drift_rc = _run_cmd(
+        [
+            "-m",
+            "scripts.ops.check_drift",
+            "--recent-days",
+            "7",
+            "--baseline-days",
+            "30",
+            "--output",
+            str(drift_report),
+        ],
+        allow_fail=True,
+    )
+    if drift_rc != 0:
+        print("[modal] Drift detected — triggering conditional hyperparameter retune")
+        # CPU tuning for XGB/LGBM
+        _run_cmd(
+            [
+                "-m",
+                "scripts.ml.tune_hyperparams",
+                "--model",
+                "both",
+                "--n-trials",
+                "30",
+                "--output-dir",
+                str(REMOTE_DATA_DIR / "tuning"),
+            ],
+            allow_fail=True,
+        )
+        # GPU tuning for NN (spawn on GPU container)
+        try:
+            print("[modal] Spawning NN hyperparameter tuning on GPU...")
+            tune_handle = tune_nn_on_drift.spawn()
+            tune_handle.get()
+            print("[modal] NN hyperparameter tuning completed")
+        except Exception as exc:
+            print(f"[modal] WARNING: NN hyperparameter tuning failed: {exc}")
+    else:
+        print("[modal] No drift detected — skipping hyperparameter retune")
+    # Generate visual reports (advisory)
+    _run_cmd(
+        [
+            "-m",
+            "scripts.ml.generate_reports",
+            "--output-dir",
+            str(REMOTE_DATA_DIR / "reports"),
+            "--weight-history",
+            str(REMOTE_DATA_DIR / "reports" / "weight_history.jsonl"),
+            "--drift-report",
+            str(drift_report),
+        ],
+        allow_fail=True,
+    )
+    _finish_run()
+
+
+@app.function(
+    gpu=TRAIN_GPU_SPEC,
+    timeout=2 * 60 * 60,
+    retries=modal.Retries(max_retries=1, initial_delay=15.0, backoff_coefficient=2.0),
+    max_containers=1,
+    **shared_kwargs,
+)
+def tune_nn_on_drift(n_trials: int = 15) -> None:
+    """NN hyperparameter tuning triggered by drift detection (needs GPU)."""
+    _begin_run()
+    _verify_gpu_runtime()
+    _run_cmd(
+        [
+            "-m",
+            "scripts.ml.tune_nn_hyperparams",
+            "--n-trials",
+            str(max(5, int(n_trials))),
+            "--output-dir",
+            str(REMOTE_DATA_DIR / "tuning"),
+        ],
+        allow_fail=True,
+    )
+    _finish_run()
+
+
+def _run_weekly_calibration() -> None:
+    """Build backtest dataset and recalibrate the forecast distribution model."""
+    _begin_run()
+    _run_cmd(["-m", "alembic", "upgrade", "head"])
+
+    backtest_csv = REMOTE_DATA_DIR / "calibration" / "forecast_backtest.csv"
+    _run_cmd(
+        [
+            "-m",
+            "scripts.calibration.build_forecast_backtest_dataset",
+            "--output",
+            str(backtest_csv),
+            "--progress-every",
+            "10000",
+        ]
+    )
+
+    today = datetime.now(ZoneInfo("America/Chicago")).date()
+    asof = today.isoformat()
+    timestamp = datetime.now(ZoneInfo("America/Chicago")).strftime("%Y%m%d_%H%M%S")
+    calibration_json = REMOTE_CALIBRATION_DIR / f"forecast_calibration_{timestamp}.json"
+    report_csv = REMOTE_DATA_DIR / "reports" / f"calibration_report_{timestamp}.csv"
+    _run_cmd(
+        [
+            "-m",
+            "scripts.calibration.run_weekly_calibration_report",
+            "--dataset",
+            str(backtest_csv),
+            "--asof",
+            asof,
+            "--out-calibration",
+            str(calibration_json),
+            "--out-report",
+            str(report_csv),
+        ]
     )
     _finish_run()
 
@@ -471,6 +669,18 @@ def train_daily() -> None:
     _run_train_pipeline()
 
 
+@app.function(
+    schedule=modal.Cron("0 10 * * 1", timezone=SCHEDULE_TIMEZONE),
+    timeout=4 * 60 * 60,
+    retries=modal.Retries(max_retries=1, initial_delay=30.0, backoff_coefficient=2.0),
+    max_containers=1,
+    **shared_kwargs,
+)
+def calibrate_weekly() -> None:
+    """Weekly recalibration of the forecast distribution model (Mondays 10am CT)."""
+    _run_weekly_calibration()
+
+
 @app.function(timeout=60 * 60, max_containers=1, **shared_kwargs)
 def run_collect_now() -> None:
     _run_collect_pipeline()
@@ -481,6 +691,11 @@ def run_train_now() -> None:
     _run_train_pipeline()
 
 
+@app.function(timeout=4 * 60 * 60, max_containers=1, **shared_kwargs)
+def run_calibrate_now() -> None:
+    _run_weekly_calibration()
+
+
 @app.local_entrypoint()
 def collect_now() -> None:
     run_collect_now.remote()
@@ -489,6 +704,11 @@ def collect_now() -> None:
 @app.local_entrypoint()
 def train_now() -> None:
     run_train_now.remote()
+
+
+@app.local_entrypoint()
+def calibrate_now() -> None:
+    run_calibrate_now.remote()
 
 
 @app.local_entrypoint()

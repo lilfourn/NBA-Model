@@ -23,7 +23,7 @@ class InferenceResult:
 
 
 def _load_model(path: str) -> tuple[Any, dict[str, list[str]], CalibratedExpert | PlattCalibrator | None]:
-    payload = load_joblib_artifact(path)
+    payload = load_joblib_artifact(path, strict_sklearn_version=False)
     if not isinstance(payload, dict) or "model" not in payload:
         raise ValueError(f"Unexpected model artifact format: {path}")
     feature_cols = payload.get("feature_cols") or {}

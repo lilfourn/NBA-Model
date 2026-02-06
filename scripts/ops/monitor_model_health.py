@@ -24,6 +24,7 @@ ROLLING_WINDOW = 50
 ACCURACY_ALERT_THRESHOLD = 0.48
 LOGLOSS_ALERT_THRESHOLD = 0.75
 WEIGHT_COLLAPSE_THRESHOLD = 0.80
+MIN_ALERT_EXPERT_WEIGHT = 0.03
 
 
 def _logloss(y: int, p: float) -> float:
@@ -66,16 +67,73 @@ def _load_resolved_predictions(engine, *, days_back: int = 90) -> pd.DataFrame:
     return df
 
 
+def _load_ensemble_mean_weights(weights_path: str) -> dict[str, float]:
+    path = Path(weights_path)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+    weights = data.get("weights") or data.get("global_weights") or {}
+    if isinstance(weights, dict) and weights and all(isinstance(v, dict) for v in weights.values()):
+        nested_weights = weights
+        all_w: dict[str, list[float]] = {}
+        for bucket_weights in nested_weights.values():
+            for expert, value in bucket_weights.items():
+                all_w.setdefault(str(expert), []).append(float(value))
+        weights = {expert: float(np.mean(values)) for expert, values in all_w.items()}
+    if not weights:
+        buckets = data.get("context_weights", {})
+        if buckets:
+            all_w: dict[str, list[float]] = {}
+            for bucket_weights in buckets.values():
+                if isinstance(bucket_weights, dict):
+                    for k, v in bucket_weights.items():
+                        all_w.setdefault(k, []).append(float(v))
+            weights = {k: float(np.mean(vs)) for k, vs in all_w.items()}
+
+    out: dict[str, float] = {}
+    for expert, value in (weights or {}).items():
+        try:
+            out[str(expert)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _check_rolling_metrics(
     joined: pd.DataFrame,
+    *,
+    ensemble_weights: dict[str, float] | None = None,
+    min_alert_weight: float = MIN_ALERT_EXPERT_WEIGHT,
 ) -> dict[str, list[dict]]:
     """Check rolling accuracy and logloss for each expert + ensemble."""
     alerts: list[dict] = []
+    suppressed_alerts: list[dict] = []
     metrics: dict[str, dict] = {}
 
     for expert in EXPERT_COLS + ["p_final"]:
         if expert not in joined.columns:
             continue
+        weight_map = ensemble_weights or {}
+        has_weight_map = bool(weight_map)
+        if expert in EXPERT_COLS:
+            default_weight = 0.0 if has_weight_map else 1.0
+            expert_weight = float(weight_map.get(expert, default_weight))
+            alert_eligible = expert_weight >= float(min_alert_weight)
+            if has_weight_map and expert not in weight_map:
+                suppression_reason = "expert not present in active ensemble"
+            else:
+                suppression_reason = (
+                    f"ensemble_weight={expert_weight:.6f} "
+                    f"< min_alert_weight={float(min_alert_weight):.3f}"
+                )
+        else:
+            expert_weight = 1.0
+            alert_eligible = True
+            suppression_reason = ""
         valid = joined.dropna(subset=[expert, "over_label"])
         if len(valid) < ROLLING_WINDOW:
             continue
@@ -100,57 +158,44 @@ def _check_rolling_metrics(
             "rolling_accuracy": round(accuracy, 4),
             "rolling_logloss": round(avg_ll, 4),
             "n": int(len(recent)),
+            "ensemble_weight": round(expert_weight, 6),
+            "alert_eligible": bool(alert_eligible),
         }
 
         if accuracy < ACCURACY_ALERT_THRESHOLD:
-            alerts.append({
+            payload = {
                 "type": "low_accuracy",
                 "expert": expert,
                 "value": round(accuracy, 4),
                 "threshold": ACCURACY_ALERT_THRESHOLD,
                 "message": f"{expert} rolling {ROLLING_WINDOW}-bet accuracy {accuracy:.1%} < {ACCURACY_ALERT_THRESHOLD:.0%}",
-            })
+            }
+            if alert_eligible:
+                alerts.append(payload)
+            else:
+                payload["suppression_reason"] = suppression_reason
+                suppressed_alerts.append(payload)
         if avg_ll > LOGLOSS_ALERT_THRESHOLD:
-            alerts.append({
+            payload = {
                 "type": "high_logloss",
                 "expert": expert,
                 "value": round(avg_ll, 4),
                 "threshold": LOGLOSS_ALERT_THRESHOLD,
                 "message": f"{expert} rolling logloss {avg_ll:.3f} > {LOGLOSS_ALERT_THRESHOLD}",
-            })
+            }
+            if alert_eligible:
+                alerts.append(payload)
+            else:
+                payload["suppression_reason"] = suppression_reason
+                suppressed_alerts.append(payload)
 
-    return {"metrics": metrics, "alerts": alerts}
+    return {"metrics": metrics, "alerts": alerts, "suppressed_alerts": suppressed_alerts}
 
 
 def _check_ensemble_weights(weights_path: str) -> list[dict]:
     """Check if any expert dominates the ensemble weights."""
     alerts = []
-    path = Path(weights_path)
-    if not path.exists():
-        return alerts
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return alerts
-
-    weights = data.get("weights") or data.get("global_weights") or {}
-    if isinstance(weights, dict) and weights and all(isinstance(v, dict) for v in weights.values()):
-        nested_weights = weights
-        all_w: dict[str, list[float]] = {}
-        for bucket_weights in nested_weights.values():
-            for expert, value in bucket_weights.items():
-                all_w.setdefault(str(expert), []).append(float(value))
-        weights = {expert: float(np.mean(values)) for expert, values in all_w.items()}
-    if not weights:
-        # Try extracting from context buckets
-        buckets = data.get("context_weights", {})
-        if buckets:
-            all_w: dict[str, list[float]] = {}
-            for bucket_weights in buckets.values():
-                if isinstance(bucket_weights, dict):
-                    for k, v in bucket_weights.items():
-                        all_w.setdefault(k, []).append(float(v))
-            weights = {k: float(np.mean(vs)) for k, vs in all_w.items()}
+    weights = _load_ensemble_mean_weights(weights_path)
 
     if not weights:
         return alerts
@@ -188,21 +233,36 @@ def main() -> None:
     joined = _load_resolved_predictions(engine, days_back=args.days_back)
 
     all_alerts: list[dict] = []
+    ensemble_weights = _load_ensemble_mean_weights(args.ensemble_weights)
 
     if not joined.empty:
-        result = _check_rolling_metrics(joined)
+        result = _check_rolling_metrics(
+            joined,
+            ensemble_weights=ensemble_weights,
+            min_alert_weight=MIN_ALERT_EXPERT_WEIGHT,
+        )
         all_alerts.extend(result["alerts"])
+        suppressed_alerts = result.get("suppressed_alerts", [])
         expert_metrics = result["metrics"]
         print(f"Rolling {ROLLING_WINDOW}-bet metrics:")
         for expert, m in expert_metrics.items():
             status = "OK"
-            if m["rolling_accuracy"] < ACCURACY_ALERT_THRESHOLD:
+            if not bool(m.get("alert_eligible", True)):
+                status = "INFO"
+            elif m["rolling_accuracy"] < ACCURACY_ALERT_THRESHOLD:
                 status = "ALERT"
             elif m["rolling_logloss"] > LOGLOSS_ALERT_THRESHOLD:
                 status = "WARN"
-            print(f"  {expert:<20} acc={m['rolling_accuracy']:.1%} ll={m['rolling_logloss']:.3f} [{status}]")
+            weight_text = ""
+            if expert in EXPERT_COLS:
+                weight_text = f" w={float(m.get('ensemble_weight', 0.0)):.3f}"
+            print(
+                f"  {expert:<20} acc={m['rolling_accuracy']:.1%} ll={m['rolling_logloss']:.3f}"
+                f"{weight_text} [{status}]"
+            )
     else:
         expert_metrics = {}
+        suppressed_alerts = []
         print("No outcomes available yet for rolling metrics.")
 
     weight_alerts = _check_ensemble_weights(args.ensemble_weights)
@@ -214,7 +274,9 @@ def main() -> None:
         "rolling_window": ROLLING_WINDOW,
         "expert_metrics": expert_metrics,
         "alerts": all_alerts,
+        "suppressed_alerts": suppressed_alerts,
         "alert_count": len(all_alerts),
+        "suppressed_alert_count": len(suppressed_alerts),
     }
 
     output = Path(args.output)
@@ -244,6 +306,8 @@ def main() -> None:
                 )
     else:
         print("\nAll models healthy.")
+    if suppressed_alerts:
+        print(f"Suppressed alerts (audit only): {len(suppressed_alerts)}")
 
 
 if __name__ == "__main__":

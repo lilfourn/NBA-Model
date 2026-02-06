@@ -208,8 +208,9 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
     try:
         from app.ml.artifact_store import upload_file
         upload_file(engine, model_name="baseline_logreg", file_path=model_path)
-    except Exception:  # noqa: BLE001
-        pass
+        print(f"Uploaded baseline_logreg artifact to DB ({model_path})")
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: DB upload failed for baseline_logreg: {exc}")
 
     run_id = uuid4()
     with engine.begin() as conn:

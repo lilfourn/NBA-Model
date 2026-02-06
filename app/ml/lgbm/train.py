@@ -175,8 +175,9 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
     try:
         from app.ml.artifact_store import upload_file
         upload_file(engine, model_name="lgbm", file_path=model_path)
-    except Exception:  # noqa: BLE001
-        pass
+        print(f"Uploaded lgbm artifact to DB ({model_path})")
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: DB upload failed for lgbm: {exc}")
 
     run_id = uuid4()
     with engine.begin() as conn:

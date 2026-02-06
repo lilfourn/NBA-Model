@@ -165,6 +165,38 @@ def _evaluate_predictions(labels: np.ndarray, preds: np.ndarray) -> dict[str, fl
     }
 
 
+def _evaluate_single_experts(frame: pd.DataFrame, experts: list[str]) -> dict[str, dict[str, float | None]]:
+    out: dict[str, dict[str, float | None]] = {}
+    for expert in experts:
+        if expert not in frame.columns:
+            out[expert] = {"accuracy": None, "logloss": None, "roc_auc": None, "n": 0}
+            continue
+        sub = frame.dropna(subset=[expert, "over_label"]).copy()
+        if sub.empty:
+            out[expert] = {"accuracy": None, "logloss": None, "roc_auc": None, "n": 0}
+            continue
+        probs = np.clip(pd.to_numeric(sub[expert], errors="coerce").to_numpy(dtype=float), EPS, 1.0 - EPS)
+        labels = sub["over_label"].astype(int).to_numpy()
+        finite_mask = np.isfinite(probs)
+        if not np.any(finite_mask):
+            out[expert] = {"accuracy": None, "logloss": None, "roc_auc": None, "n": 0}
+            continue
+        out[expert] = _evaluate_predictions(labels[finite_mask], probs[finite_mask])
+    return out
+
+
+def _filter_frame_for_experts(frame: pd.DataFrame, experts: list[str], *, min_experts: int) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    if not experts:
+        return frame.head(0).copy()
+    out = frame.copy()
+    required = min(len(experts), max(1, int(min_experts)))
+    out["available_experts"] = out[experts].notna().sum(axis=1)
+    out = out[out["available_experts"] >= required].copy()
+    return out
+
+
 def _objective(
     frame: pd.DataFrame,
     experts: list[str],
@@ -388,65 +420,44 @@ def _evaluate_current_ensemble_replay(
     return _evaluate_predictions(np.array(labels, dtype=int), np.array(preds, dtype=np.float64))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Advanced expert-weight optimizer (global + contextual).")
-    parser.add_argument("--database-url", default=None)
-    parser.add_argument("--days-back", type=int, default=120)
-    parser.add_argument("--experts", nargs="*", default=DEFAULT_EXPERTS)
-    parser.add_argument("--min-experts", type=int, default=2)
-    parser.add_argument("--holdout-frac", type=float, default=0.2)
-    parser.add_argument("--random-trials", type=int, default=6000)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--contextual", action="store_true", default=True)
-    parser.add_argument("--min-context-rows", type=int, default=40)
-    parser.add_argument("--shrink-strength", type=float, default=80.0)
-    parser.add_argument("--reg-lambda", type=float, default=0.08)
-    parser.add_argument("--report-out", default="models/expert_weights_optimized.json")
-    parser.add_argument("--ensemble-out", default="models/ensemble_weights_optimized.json")
-    parser.add_argument("--current-ensemble", default="models/ensemble_weights.json")
-    parser.add_argument("--apply", action="store_true", help="Overwrite --current-ensemble with optimized weights.")
-    parser.add_argument("--upload-db", action="store_true", help="Upload optimized ensemble weights to DB artifacts.")
-    args = parser.parse_args()
-
-    load_env()
-    engine = get_engine(args.database_url)
-    experts = [str(e) for e in args.experts if str(e).strip()]
-    if not experts:
-        raise SystemExit("No experts provided.")
-
-    frame = _load_frame(
-        engine,
-        days_back=int(args.days_back),
-        experts=experts,
-        min_experts=int(args.min_experts),
-    )
-    if frame.empty:
-        raise SystemExit("No resolved rows available for optimization.")
-    train_frame, valid_frame = _time_split(frame, holdout_frac=float(args.holdout_frac))
+def _run_optimization_bundle(
+    *,
+    frame: pd.DataFrame,
+    experts: list[str],
+    holdout_frac: float,
+    random_trials: int,
+    seed: int,
+    contextual: bool,
+    min_context_rows: int,
+    shrink_strength: float,
+    reg_lambda: float,
+    current_ensemble_path: Path,
+) -> dict[str, Any]:
+    train_frame, valid_frame = _time_split(frame, holdout_frac=holdout_frac)
     if train_frame.empty or valid_frame.empty:
-        raise SystemExit("Not enough rows for time holdout split.")
+        raise RuntimeError("Not enough rows for time holdout split.")
 
     uniform = _uniform_weights(experts)
     global_opt = _optimize_weight_vector(
         train_frame,
         experts,
-        random_trials=int(args.random_trials),
-        seed=int(args.seed),
+        random_trials=int(random_trials),
+        seed=int(seed),
         prior=None,
         reg_lambda=0.0,
     )
 
     context_weights: dict[str, dict[str, float]] = {}
-    if bool(args.contextual):
+    if bool(contextual):
         context_weights = _contextual_weights(
             train_frame,
             experts,
             global_weights=global_opt,
-            min_context_rows=int(args.min_context_rows),
-            shrink_strength=float(args.shrink_strength),
-            random_trials=int(args.random_trials),
-            seed=int(args.seed),
-            reg_lambda=float(args.reg_lambda),
+            min_context_rows=int(min_context_rows),
+            shrink_strength=float(shrink_strength),
+            random_trials=int(random_trials),
+            seed=int(seed),
+            reg_lambda=float(reg_lambda),
         )
 
     y_train = train_frame["over_label"].astype(int).to_numpy()
@@ -474,8 +485,9 @@ def main() -> None:
     metrics_current_replay = _evaluate_current_ensemble_replay(
         valid_frame,
         experts,
-        ensemble_path=Path(args.current_ensemble),
+        ensemble_path=current_ensemble_path,
     )
+    valid_single = _evaluate_single_experts(valid_frame, experts)
 
     train_metrics = {
         "uniform": _evaluate_predictions(y_train, train_uniform_preds),
@@ -487,7 +499,200 @@ def main() -> None:
         "optimized_contextual": _evaluate_predictions(y_valid, valid_context_preds),
         "current_ensemble_replay": metrics_current_replay,
         "current_p_final_logged": metrics_pfinal,
+        "single_experts": valid_single,
     }
+
+    return {
+        "frame": frame,
+        "train_frame": train_frame,
+        "valid_frame": valid_frame,
+        "global_opt": global_opt,
+        "context_weights": context_weights,
+        "train_metrics": train_metrics,
+        "valid_metrics": valid_metrics,
+    }
+
+
+def _select_weak_experts_to_prune(
+    *,
+    experts: list[str],
+    global_weights: dict[str, float],
+    valid_metrics: dict[str, Any],
+    min_keep: int,
+    min_experts: int,
+    weight_threshold: float,
+    min_valid_rows: int,
+) -> tuple[list[str], list[str], dict[str, dict[str, float | int | None]]]:
+    if not experts:
+        return [], [], {}
+    min_keep_safe = min(len(experts), max(2, int(min_keep), int(min_experts)))
+    if len(experts) <= min_keep_safe:
+        return list(experts), [], {}
+
+    uniform_logloss = None
+    uniform_metrics = valid_metrics.get("uniform")
+    if isinstance(uniform_metrics, dict):
+        ll = uniform_metrics.get("logloss")
+        if ll is not None:
+            uniform_logloss = float(ll)
+
+    single_experts = valid_metrics.get("single_experts")
+    if not isinstance(single_experts, dict):
+        return list(experts), [], {}
+
+    candidates: list[tuple[float, float, str, int]] = []
+    reasons: dict[str, dict[str, float | int | None]] = {}
+    for expert in experts:
+        weight = float(global_weights.get(expert, 0.0))
+        m = single_experts.get(expert) if isinstance(single_experts, dict) else None
+        if not isinstance(m, dict):
+            continue
+        n_rows = int(m.get("n") or 0)
+        ll_val = m.get("logloss")
+        ll = float(ll_val) if ll_val is not None else None
+        weak_weight = weight < float(weight_threshold)
+        weak_perf = False
+        if ll is None or n_rows < int(min_valid_rows):
+            weak_perf = True
+        elif uniform_logloss is not None and ll >= uniform_logloss:
+            weak_perf = True
+        if weak_weight and weak_perf:
+            candidates.append((weight, -(ll if ll is not None else 9e9), expert, n_rows))
+            reasons[expert] = {
+                "weight": weight,
+                "single_logloss": ll,
+                "single_rows": n_rows,
+                "uniform_logloss": uniform_logloss,
+            }
+
+    if not candidates:
+        return list(experts), [], {}
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    keep = list(experts)
+    dropped: list[str] = []
+    for _, _, expert, _ in candidates:
+        if len(keep) <= min_keep_safe:
+            break
+        if expert in keep:
+            keep.remove(expert)
+            dropped.append(expert)
+
+    if not dropped:
+        return list(experts), [], {}
+    return keep, dropped, {k: reasons[k] for k in dropped if k in reasons}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Advanced expert-weight optimizer (global + contextual).")
+    parser.add_argument("--database-url", default=None)
+    parser.add_argument("--days-back", type=int, default=120)
+    parser.add_argument("--experts", nargs="*", default=DEFAULT_EXPERTS)
+    parser.add_argument("--min-experts", type=int, default=2)
+    parser.add_argument("--holdout-frac", type=float, default=0.2)
+    parser.add_argument("--random-trials", type=int, default=6000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--contextual", action="store_true", default=True)
+    parser.add_argument("--min-context-rows", type=int, default=40)
+    parser.add_argument("--shrink-strength", type=float, default=80.0)
+    parser.add_argument("--reg-lambda", type=float, default=0.08)
+    parser.add_argument(
+        "--auto-prune-weak-experts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Automatically drop low-weight experts that also underperform on holdout.",
+    )
+    parser.add_argument(
+        "--prune-weight-threshold",
+        type=float,
+        default=0.02,
+        help="Candidate prune threshold for optimized global weight.",
+    )
+    parser.add_argument(
+        "--prune-min-keep",
+        type=int,
+        default=4,
+        help="Never keep fewer than this many experts after pruning.",
+    )
+    parser.add_argument(
+        "--prune-min-valid-rows",
+        type=int,
+        default=40,
+        help="Treat experts with fewer holdout rows than this as unstable for pruning logic.",
+    )
+    parser.add_argument("--report-out", default="models/expert_weights_optimized.json")
+    parser.add_argument("--ensemble-out", default="models/ensemble_weights_optimized.json")
+    parser.add_argument("--current-ensemble", default="models/ensemble_weights.json")
+    parser.add_argument("--apply", action="store_true", help="Overwrite --current-ensemble with optimized weights.")
+    parser.add_argument("--upload-db", action="store_true", help="Upload optimized ensemble weights to DB artifacts.")
+    args = parser.parse_args()
+
+    load_env()
+    engine = get_engine(args.database_url)
+    experts = [str(e) for e in args.experts if str(e).strip()]
+    if not experts:
+        raise SystemExit("No experts provided.")
+
+    frame = _load_frame(
+        engine,
+        days_back=int(args.days_back),
+        experts=experts,
+        min_experts=int(args.min_experts),
+    )
+    frame = _filter_frame_for_experts(frame, experts, min_experts=int(args.min_experts))
+    if frame.empty:
+        raise SystemExit("No resolved rows available for optimization.")
+    base = _run_optimization_bundle(
+        frame=frame,
+        experts=experts,
+        holdout_frac=float(args.holdout_frac),
+        random_trials=int(args.random_trials),
+        seed=int(args.seed),
+        contextual=bool(args.contextual),
+        min_context_rows=int(args.min_context_rows),
+        shrink_strength=float(args.shrink_strength),
+        reg_lambda=float(args.reg_lambda),
+        current_ensemble_path=Path(args.current_ensemble),
+    )
+
+    pruned_experts: list[str] = []
+    prune_reasons: dict[str, dict[str, float | int | None]] = {}
+    if bool(args.auto_prune_weak_experts):
+        keep_experts, dropped, reasons = _select_weak_experts_to_prune(
+            experts=experts,
+            global_weights=base["global_opt"],
+            valid_metrics=base["valid_metrics"],
+            min_keep=int(args.prune_min_keep),
+            min_experts=int(args.min_experts),
+            weight_threshold=float(args.prune_weight_threshold),
+            min_valid_rows=int(args.prune_min_valid_rows),
+        )
+        if dropped and keep_experts:
+            pruned_frame = _filter_frame_for_experts(frame, keep_experts, min_experts=int(args.min_experts))
+            if len(pruned_frame) >= 20:
+                experts = keep_experts
+                frame = pruned_frame
+                base = _run_optimization_bundle(
+                    frame=frame,
+                    experts=experts,
+                    holdout_frac=float(args.holdout_frac),
+                    random_trials=int(args.random_trials),
+                    seed=int(args.seed),
+                    contextual=bool(args.contextual),
+                    min_context_rows=int(args.min_context_rows),
+                    shrink_strength=float(args.shrink_strength),
+                    reg_lambda=float(args.reg_lambda),
+                    current_ensemble_path=Path(args.current_ensemble),
+                )
+                pruned_experts = list(dropped)
+                prune_reasons = dict(reasons)
+
+    train_frame = base["train_frame"]
+    valid_frame = base["valid_frame"]
+    global_opt = base["global_opt"]
+    context_weights = base["context_weights"]
+    train_metrics = base["train_metrics"]
+    valid_metrics = base["valid_metrics"]
 
     # Build optimized ensemble state compatible with ContextualHedgeEnsembler.
     all_ctx = {
@@ -513,6 +718,8 @@ def main() -> None:
         "rows_train": int(len(train_frame)),
         "rows_valid": int(len(valid_frame)),
         "experts": list(experts),
+        "pruned_experts": pruned_experts,
+        "prune_reasons": prune_reasons,
         "weights_optimized_global": {k: float(v) for k, v in global_opt.items()},
         "weights_optimized_context_count": int(len(context_weights)),
         "metrics": {
@@ -552,6 +759,8 @@ def main() -> None:
             "rows_total": report["rows_total"],
             "rows_train": report["rows_train"],
             "rows_valid": report["rows_valid"],
+            "experts": report["experts"],
+            "pruned_experts": report["pruned_experts"],
             "weights_optimized_global": report["weights_optimized_global"],
             "context_weights": report["weights_optimized_context_count"],
             "valid_metrics": valid_metrics,

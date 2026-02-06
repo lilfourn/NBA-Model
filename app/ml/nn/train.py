@@ -285,8 +285,9 @@ def train_nn(
     try:
         from app.ml.artifact_store import upload_file
         upload_file(engine, model_name="nn_gru_attention", file_path=model_path)
-    except Exception:  # noqa: BLE001
-        pass
+        print(f"Uploaded nn_gru_attention artifact to DB ({model_path})")
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: DB upload failed for nn_gru_attention: {exc}")
 
     run_id = uuid4()
     with engine.begin() as conn:

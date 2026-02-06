@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time as _time
@@ -7,6 +8,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -528,17 +531,22 @@ def score_ensemble(
         lgbm_path = latest_compatible_joblib_path(models_path, "lgbm_*.joblib")
         meta_path = latest_compatible_joblib_path(models_path, "meta_learner_*.joblib")
 
+    logger.info(
+        "Model paths resolved (db=%s): nn=%s tabdl=%s lr=%s xgb=%s lgbm=%s meta=%s",
+        _use_db, nn_path, tabdl_path, lr_path, xgb_path, lgbm_path, meta_path,
+    )
+
     # Load conformal calibrators from saved models
     conformal_cals: list[ConformalCalibrator] = []
     for _mp in [lr_path, xgb_path, lgbm_path]:
         if _mp and _mp.exists():
             try:
-                _pl = load_joblib_artifact(str(_mp))
+                _pl = load_joblib_artifact(str(_mp), strict_sklearn_version=False)
                 _cd = _pl.get("conformal")
                 if _cd:
                     conformal_cals.append(ConformalCalibrator(**_cd))
             except Exception:  # noqa: BLE001
-                pass
+                logger.warning("Failed to load conformal from %s", _mp, exc_info=True)
     if nn_path and nn_path.exists():
         try:
             _pl = _torch.load(str(nn_path), map_location="cpu")
@@ -546,7 +554,7 @@ def score_ensemble(
             if _cd:
                 conformal_cals.append(ConformalCalibrator(**_cd))
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("Failed to load conformal from NN %s", nn_path, exc_info=True)
     if tabdl_path and tabdl_path.exists():
         try:
             _pl = _torch.load(str(tabdl_path), map_location="cpu")
@@ -554,7 +562,7 @@ def score_ensemble(
             if _cd:
                 conformal_cals.append(ConformalCalibrator(**_cd))
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("Failed to load conformal from TabDL %s", tabdl_path, exc_info=True)
 
     calibrator = None
     if calibration_path:
@@ -602,7 +610,7 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("NN inference failed for snapshot %s", resolved_snapshot, exc_info=True)
         else:
             for idx, r in enumerate(nn_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -623,7 +631,7 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("TabDL inference failed for snapshot %s", resolved_snapshot, exc_info=True)
         else:
             for idx, r in enumerate(tabdl_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -644,7 +652,7 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("LR inference failed for snapshot %s", resolved_snapshot, exc_info=True)
         else:
             for idx, r in enumerate(lr_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -665,7 +673,7 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("XGB inference failed for snapshot %s", resolved_snapshot, exc_info=True)
         else:
             for idx, r in enumerate(xgb_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -686,7 +694,7 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("LGBM inference failed for snapshot %s", resolved_snapshot, exc_info=True)
         else:
             for idx, r in enumerate(lgbm_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -727,7 +735,7 @@ def score_ensemble(
         try:
             thompson = _ensure_thompson_experts(ThompsonSamplingEnsembler.load(str(_ts_path)), experts)
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("Failed to load Thompson ensemble", exc_info=True)
 
     # Load Gating Model (optional)
     gating: GatingModel | None = None
@@ -735,7 +743,7 @@ def score_ensemble(
         try:
             gating = GatingModel.load(str(_gating_path))
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("Failed to load Gating model", exc_info=True)
 
     # Build hybrid combiner if Thompson or Gating available
     hybrid: HybridEnsembleCombiner | None = None
@@ -778,7 +786,9 @@ def score_ensemble(
                     n_eff=n_eff_val,
                 )
             except Exception:  # noqa: BLE001
-                pass
+                if not hasattr(score_ensemble, "_meta_warned"):
+                    logger.warning("Meta-learner inference failed", exc_info=True)
+                    score_ensemble._meta_warned = True  # type: ignore[attr-defined]
         ctx = Context(stat_type=stat_type, is_live=is_live, n_eff=n_eff_val)
         # Primary: hybrid combiner (Thompson + Gating + Meta)
         # Fallback chain: hybrid → meta-learner → Hedge
@@ -804,7 +814,9 @@ def score_ensemble(
                 if math.isfinite(p_hybrid):
                     p_raw = p_hybrid
             except Exception:  # noqa: BLE001
-                pass
+                if not hasattr(score_ensemble, "_hybrid_warned"):
+                    logger.warning("Hybrid ensemble prediction failed", exc_info=True)
+                    score_ensemble._hybrid_warned = True  # type: ignore[attr-defined]
         if p_raw is None and p_meta_val is not None and math.isfinite(p_meta_val):
             p_raw = p_meta_val
         if p_raw is None:

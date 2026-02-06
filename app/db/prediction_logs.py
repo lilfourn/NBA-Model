@@ -49,6 +49,13 @@ def _normalize_pick(value: Any, *, prob_over: Decimal | None = None) -> str:
     return "OVER"
 
 
+def _normalize_team_abbreviation(value: Any) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip().upper()
+    return text_value or None
+
+
 def _load_name_overrides() -> dict[str, str]:
     path = Path(settings.player_name_overrides_path)
     if not path.exists():
@@ -234,10 +241,14 @@ def resolve_prediction_outcomes(
         text(
             """
             select
-                id as game_id,
-                (start_time at time zone 'America/New_York')::date as game_date
-            from games
-            where id = any(:ids)
+                g.id as game_id,
+                (g.start_time at time zone 'America/New_York')::date as game_date,
+                ht.abbreviation as home_team_abbreviation,
+                at.abbreviation as away_team_abbreviation
+            from games g
+            left join teams ht on ht.id = g.home_team_id
+            left join teams at on at.id = g.away_team_id
+            where g.id = any(:ids)
             """
         ),
         engine,
@@ -302,6 +313,8 @@ def resolve_prediction_outcomes(
     candidates["player_id"] = candidates["player_id"].astype(str)
     candidates["game_id"] = candidates["game_id"].astype(str)
     games["game_id"] = games["game_id"].astype(str)
+    games["home_team_abbreviation"] = games["home_team_abbreviation"].apply(_normalize_team_abbreviation)
+    games["away_team_abbreviation"] = games["away_team_abbreviation"].apply(_normalize_team_abbreviation)
 
     merged = candidates.merge(mapped, on="player_id", how="left").merge(games, on="game_id", how="left")
     no_nba_id = int(merged["nba_player_id"].isna().sum())
@@ -322,6 +335,64 @@ def resolve_prediction_outcomes(
 
     date_from = merged["game_date"].min()
     date_to = merged["game_date"].max()
+
+    # Map PP game -> NBA game by date + matchup abbreviations so we can detect
+    # "player has no boxscore row but game data exists" and void those props.
+    nba_games = pd.read_sql(
+        text(
+            """
+            select
+                id as nba_game_id,
+                game_date,
+                upper(home_team_abbreviation) as home_team_abbreviation,
+                upper(away_team_abbreviation) as away_team_abbreviation
+            from nba_games
+            where game_date >= :date_from
+              and game_date <= :date_to
+            """
+        ),
+        engine,
+        params={"date_from": date_from, "date_to": date_to},
+    )
+    if nba_games.empty:
+        merged["nba_game_id"] = None
+    else:
+        nba_games = nba_games.drop_duplicates(
+            subset=["game_date", "home_team_abbreviation", "away_team_abbreviation"]
+        )
+        merged = merged.merge(
+            nba_games,
+            on=["game_date", "home_team_abbreviation", "away_team_abbreviation"],
+            how="left",
+        )
+
+    nba_game_ids = sorted({str(v) for v in merged["nba_game_id"].dropna().unique().tolist()})
+    if nba_game_ids:
+        game_boxscore_counts = pd.read_sql(
+            text(
+                """
+                select
+                    game_id as nba_game_id,
+                    count(*)::int as nba_game_boxscore_rows
+                from nba_player_game_stats
+                where game_id = any(:game_ids)
+                group by game_id
+                """
+            ),
+            engine,
+            params={"game_ids": nba_game_ids},
+        )
+    else:
+        game_boxscore_counts = pd.DataFrame(columns=["nba_game_id", "nba_game_boxscore_rows"])
+    if game_boxscore_counts.empty:
+        merged["nba_game_boxscore_rows"] = 0
+    else:
+        game_boxscore_counts["nba_game_id"] = game_boxscore_counts["nba_game_id"].astype(str)
+        merged = merged.merge(game_boxscore_counts, on="nba_game_id", how="left")
+        merged["nba_game_boxscore_rows"] = pd.to_numeric(
+            merged["nba_game_boxscore_rows"], errors="coerce"
+        ).fillna(0)
+
     nba_ids = sorted({str(v) for v in merged["nba_player_id"].unique().tolist()})
     stats = pd.read_sql(
         text(
@@ -342,10 +413,10 @@ def resolve_prediction_outcomes(
                 s.ftm,
                 s.fta,
                 s.minutes,
-                s.stats_json->>'OREB' as oreb,
-                s.stats_json->>'DREB' as dreb,
-                s.stats_json->>'PF' as pf,
-                s.stats_json->>'DUNKS' as dunks
+                coalesce(nullif(s.stats_json->>'OREB', '')::numeric, 0) as oreb,
+                coalesce(nullif(s.stats_json->>'DREB', '')::numeric, 0) as dreb,
+                coalesce(nullif(s.stats_json->>'PF', '')::numeric, 0) as pf,
+                coalesce(nullif(s.stats_json->>'DUNKS', '')::numeric, 0) as dunks
             from nba_player_game_stats s
             join nba_games ng on ng.id = s.game_id
             where s.player_id = any(:player_ids)
@@ -359,32 +430,39 @@ def resolve_prediction_outcomes(
     # Ensure nba_player_id is str for merge consistency.
     if not stats.empty:
         stats["nba_player_id"] = stats["nba_player_id"].astype(str)
-    if stats.empty:
-        return {
-            "candidates": int(len(candidates)),
-            "matched_boxscores": 0,
-            "updated": 0,
-            "wins": 0,
-            "losses": 0,
-            "pushes": 0,
-        }
 
     # Ensure consistent str type for merge key.
     merged["nba_player_id"] = merged["nba_player_id"].astype(str)
-    resolved = merged.merge(stats, on=["nba_player_id", "game_date"], how="left")
+    resolved = merged.merge(stats, on=["nba_player_id", "game_date"], how="left", indicator="_stats_merge")
+    matched_boxscores = int((resolved["_stats_merge"] == "both").sum())
     resolved["actual_value"] = [
         stat_value_from_row(getattr(row, "stat_type", None), row)
         for row in resolved.itertuples(index=False)
     ]
+
+    # If game boxscore data exists for the matched NBA game but this player has
+    # no row, treat as no-appearance and grade as push (void) instead of leaving
+    # it unresolved forever.
+    forced_push_mask = (
+        resolved["actual_value"].isna()
+        & resolved["line_score"].notna()
+        & resolved["_stats_merge"].eq("left_only")
+        & pd.to_numeric(resolved["nba_game_boxscore_rows"], errors="coerce").fillna(0).gt(0)
+    )
+    resolved["forced_push_no_boxscore"] = forced_push_mask
+    resolved.loc[forced_push_mask, "actual_value"] = resolved.loc[forced_push_mask, "line_score"].astype(float)
+    forced_push_no_boxscore = int(forced_push_mask.sum())
+
     resolved = resolved.dropna(subset=["actual_value", "line_score"])
     if resolved.empty:
         return {
             "candidates": int(len(candidates)),
-            "matched_boxscores": 0,
+            "matched_boxscores": matched_boxscores,
             "updated": 0,
             "wins": 0,
             "losses": 0,
             "pushes": 0,
+            "forced_push_no_boxscore": forced_push_no_boxscore,
         }
 
     updates: list[dict[str, Any]] = []
@@ -393,8 +471,14 @@ def resolve_prediction_outcomes(
     pushes = 0
     for row in resolved.itertuples(index=False):
         line_score = float(getattr(row, "line_score"))
+        forced_push = bool(getattr(row, "forced_push_no_boxscore", False))
         actual_value = float(getattr(row, "actual_value"))
-        over_label, outcome = _resolve_over_under_outcome(line_score=line_score, actual_value=actual_value)
+        if forced_push:
+            over_label: int | None = None
+            outcome = "push"
+        else:
+            over_label_raw, outcome = _resolve_over_under_outcome(line_score=line_score, actual_value=actual_value)
+            over_label = None if outcome == "push" else int(over_label_raw)
         pick = str(getattr(row, "pick") or "").strip().lower()
         is_correct: bool | None
         if outcome == "push":
@@ -413,7 +497,7 @@ def resolve_prediction_outcomes(
             {
                 "id": str(getattr(row, "id")),
                 "actual_value": Decimal(str(actual_value)),
-                "over_label": int(over_label),
+                "over_label": over_label,
                 "outcome": outcome,
                 "is_correct": is_correct,
                 "resolved_at": now,
@@ -423,11 +507,12 @@ def resolve_prediction_outcomes(
     if not updates:
         return {
             "candidates": int(len(candidates)),
-            "matched_boxscores": int(len(resolved)),
+            "matched_boxscores": matched_boxscores,
             "updated": 0,
             "wins": wins,
             "losses": losses,
             "pushes": pushes,
+            "forced_push_no_boxscore": forced_push_no_boxscore,
         }
 
     deduped: dict[str, dict[str, Any]] = {row["id"]: row for row in updates}
@@ -452,9 +537,10 @@ def resolve_prediction_outcomes(
 
     return {
         "candidates": int(len(candidates)),
-        "matched_boxscores": int(len(resolved)),
+        "matched_boxscores": matched_boxscores,
         "updated": updated_rows,
         "wins": wins,
         "losses": losses,
         "pushes": pushes,
+        "forced_push_no_boxscore": forced_push_no_boxscore,
     }

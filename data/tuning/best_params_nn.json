@@ -1,0 +1,8 @@
+{
+  "learning_rate": 0.0024634154552765275,
+  "weight_decay": 1.1982572709304893e-05,
+  "dropout": 0.17969051863263336,
+  "mlp_hidden": 256,
+  "seq_hidden": 64,
+  "batch_size": 1024
+}

@@ -145,8 +145,9 @@ def train_meta_learner(
         try:
             from app.ml.artifact_store import upload_file
             upload_file(engine, model_name="meta_learner", file_path=model_path)
-        except Exception:  # noqa: BLE001
-            pass
+            print(f"Uploaded meta_learner artifact to DB ({model_path})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: DB upload failed for meta_learner: {exc}")
 
         run_id = uuid4()
         with engine.begin() as conn:
@@ -188,7 +189,7 @@ def infer_meta_learner(
     Returns:
         Meta-learner P(over) or None if too few experts available.
     """
-    payload = load_joblib_artifact(model_path)
+    payload = load_joblib_artifact(model_path, strict_sklearn_version=False)
     model = payload["model"]
     infer_cols = payload.get("infer_expert_cols", INFER_EXPERT_COLS)
     has_context = bool(payload.get("context_cols"))
@@ -221,7 +222,7 @@ def batch_infer_meta_learner(
     n_eff_series: pd.Series | None = None,
 ) -> np.ndarray:
     """Batch inference: expert_df columns must include INFER_EXPERT_COLS."""
-    payload = load_joblib_artifact(model_path)
+    payload = load_joblib_artifact(model_path, strict_sklearn_version=False)
     model = payload["model"]
     infer_cols = payload.get("infer_expert_cols", INFER_EXPERT_COLS)
     has_context = bool(payload.get("context_cols"))

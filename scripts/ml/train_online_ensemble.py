@@ -465,10 +465,21 @@ def main() -> None:
 
     for row in joined.itertuples(index=False):
         expert_probs = {col: getattr(row, col) for col in experts}
+        raw_n_eff = getattr(row, "n_eff")
+        n_eff_val: float | None
+        if raw_n_eff is None or pd.isna(raw_n_eff):
+            n_eff_val = None
+        else:
+            try:
+                n_eff_candidate = float(raw_n_eff)
+            except (TypeError, ValueError):
+                n_eff_val = None
+            else:
+                n_eff_val = n_eff_candidate if np.isfinite(n_eff_candidate) else None
         ctx = Context(
             stat_type=str(getattr(row, "stat_type") or ""),
             is_live=bool(getattr(row, "is_live") or False),
-            n_eff=float(getattr(row, "n_eff")) if getattr(row, "n_eff") is not None else None,
+            n_eff=n_eff_val,
         )
         y = int(getattr(row, "over_label"))
         p_ens = float(ens.predict(expert_probs, ctx))
@@ -484,7 +495,6 @@ def main() -> None:
         # Thompson Sampling update
         stat_type = str(getattr(row, "stat_type") or "")
         is_live = bool(getattr(row, "is_live") or False)
-        n_eff_val = float(getattr(row, "n_eff")) if getattr(row, "n_eff") is not None else None
         ctx_tuple = (
             stat_type,
             "live" if is_live else "pregame",
@@ -494,7 +504,7 @@ def main() -> None:
 
         # Collect for gating model
         gating_labels.append(float(y))
-        gating_n_effs.append(n_eff_val or 0.0)
+        gating_n_effs.append(n_eff_val if n_eff_val is not None else 0.0)
         for col in experts:
             p = expert_probs.get(col)
             gating_expert_probs[col].append(float(p) if p is not None and not pd.isna(p) else 0.5)
