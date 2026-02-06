@@ -1,6 +1,73 @@
 {
-  "recent_rows": 440,
-  "baseline_rows": 0,
-  "checks": [],
-  "any_drift": false
+  "metrics_version": "2.0.0",
+  "status": "ok",
+  "recent_rows": 2635,
+  "baseline_rows": 2635,
+  "latest_event_time": "2026-02-06 05:39:09.185657+00:00",
+  "data_freshness": "ok",
+  "time_column": "coalesce(pp.decision_time, pp.resolved_at, pp.created_at)",
+  "window_mode": "row_fallback",
+  "alert_policy": "fallback_distribution_advisory",
+  "insufficient_data": false,
+  "invalid_baseline": false,
+  "notes": [
+    "Time-window baseline was insufficient; switched to row-based fallback windows.",
+    "Distribution-only drift in row-fallback mode was downgraded to advisory to reduce noisy retrain triggers."
+  ],
+  "checks": [
+    {
+      "check_type": "performance",
+      "is_drifted": false,
+      "metric_value": -0.0087,
+      "threshold": 0.05,
+      "details": {
+        "accuracy_recent": 0.5438,
+        "accuracy_baseline": 0.5351,
+        "delta": -0.0087,
+        "n_recent": 2635,
+        "n_baseline": 2635
+      }
+    },
+    {
+      "check_type": "distribution",
+      "is_drifted": true,
+      "metric_value": 1.1044,
+      "threshold": 0.2,
+      "details": {
+        "psi_scores": {
+          "prob_over": 1.1044,
+          "line_score": 0.0138,
+          "n_eff": 0.1027
+        },
+        "drifted_features": [
+          "prob_over"
+        ],
+        "n_features_checked": 3
+      }
+    },
+    {
+      "check_type": "calibration",
+      "is_drifted": false,
+      "metric_value": 0.0766,
+      "threshold": 0.1,
+      "details": {
+        "ece": 0.0766,
+        "n_samples": 2635
+      }
+    }
+  ],
+  "suppressed_checks": [
+    {
+      "check_type": "distribution",
+      "reason": "distribution_only_drift_in_row_fallback_mode"
+    }
+  ],
+  "any_drift_raw": true,
+  "any_drift": false,
+  "fallback_info": {
+    "reason": "ok",
+    "total_rows": 5271,
+    "recent_rows": 2635,
+    "baseline_rows": 2635
+  }
 }

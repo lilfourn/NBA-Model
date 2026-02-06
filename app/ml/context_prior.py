@@ -89,12 +89,22 @@ def compute_context_priors_from_db(engine, *, days_back: int = 90) -> dict[str, 
         valid_lines = group["line_score"].dropna()
         if len(valid_lines) >= MIN_BUCKET_ROWS * N_LINE_BUCKETS:
             quantiles = np.linspace(0, 1, N_LINE_BUCKETS + 1)[1:-1]
-            edges = [round(float(np.quantile(valid_lines, q)), 2) for q in quantiles]
+            raw_edges = [
+                round(float(np.quantile(valid_lines, q)), 2) for q in quantiles
+            ]
+            # Deduplicate edges to avoid pd.cut ValueError
+            edges = sorted(set(raw_edges))
+            if not edges:
+                # All quantiles collapsed — fall back to stat-type prior
+                for label in _bucket_labels(N_LINE_BUCKETS):
+                    bucket_priors[f"{st}__{label}"] = stat_type_priors[st]
+                continue
+            n_actual_buckets = len(edges) + 1
             bucket_edges[st] = edges
 
             # Assign bucket labels
             bins = [-math.inf] + edges + [math.inf]
-            labels = _bucket_labels(N_LINE_BUCKETS)
+            labels = _bucket_labels(n_actual_buckets)
             group = group.copy()
             group["bucket"] = pd.cut(
                 group["line_score"], bins=bins, labels=labels, include_lowest=True
@@ -107,6 +117,11 @@ def compute_context_priors_from_db(engine, *, days_back: int = 90) -> dict[str, 
                         float(bucket_group["over_label"].mean()), 4
                     )
                 else:
+                    bucket_priors[key] = stat_type_priors[st]
+            # Fill any canonical bucket labels not covered (when edges collapsed)
+            for canonical in _bucket_labels(N_LINE_BUCKETS):
+                key = f"{st}__{canonical}"
+                if key not in bucket_priors:
                     bucket_priors[key] = stat_type_priors[st]
         else:
             # Not enough data for line buckets; use stat-type prior for all

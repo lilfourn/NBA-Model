@@ -1,0 +1,112 @@
+{
+  "created_at": "2026-02-06T19:28:21.503038+00:00",
+  "rows_total": 2283,
+  "rows_train": 1826,
+  "rows_valid": 457,
+  "experts": [
+    "p_forecast_cal",
+    "p_tabdl",
+    "p_xgb",
+    "p_lgbm"
+  ],
+  "pruned_experts": [
+    "p_nn",
+    "p_lr"
+  ],
+  "prune_reasons": {
+    "p_nn": {
+      "weight": 0.0,
+      "single_logloss": 0.9019478256553345,
+      "single_rows": 874,
+      "uniform_logloss": 0.7375930053441907
+    },
+    "p_lr": {
+      "weight": 0.0,
+      "single_logloss": 0.808937560776442,
+      "single_rows": 874,
+      "uniform_logloss": 0.7375930053441907
+    }
+  },
+  "weights_optimized_global": {
+    "p_forecast_cal": 0.0,
+    "p_tabdl": 1.0,
+    "p_xgb": 0.0,
+    "p_lgbm": 0.0
+  },
+  "weights_optimized_context_count": 52,
+  "metrics": {
+    "train": {
+      "uniform": {
+        "accuracy": 0.5125958378970427,
+        "logloss": 0.7177594103791601,
+        "roc_auc": 0.5286719096078839,
+        "n": 1826
+      },
+      "optimized_global": {
+        "accuracy": 0.4868565169769989,
+        "logloss": 0.6931471805599451,
+        "roc_auc": 0.5,
+        "n": 1826
+      }
+    },
+    "valid": {
+      "uniform": {
+        "accuracy": 0.5361050328227571,
+        "logloss": 0.7117249751695046,
+        "roc_auc": 0.4939930689256835,
+        "n": 457
+      },
+      "optimized_global": {
+        "accuracy": 0.4617067833698031,
+        "logloss": 0.696693718214869,
+        "roc_auc": 0.4977281478629187,
+        "n": 457
+      },
+      "optimized_contextual": {
+        "accuracy": 0.5010940919037199,
+        "logloss": 0.6843171903640785,
+        "roc_auc": 0.5477570273392376,
+        "n": 457
+      },
+      "current_ensemble_replay": {
+        "accuracy": 0.5645514223194749,
+        "logloss": 0.6943973528453222,
+        "roc_auc": 0.5515402387370043,
+        "n": 457
+      },
+      "current_p_final_logged": {
+        "accuracy": 0.5601750547045952,
+        "logloss": 0.719559757842099,
+        "roc_auc": 0.5162687716596073,
+        "n": 457
+      },
+      "single_experts": {
+        "p_forecast_cal": {
+          "accuracy": 0.5514223194748359,
+          "logloss": 0.7419628546725869,
+          "roc_auc": 0.5169618790912591,
+          "n": 457
+        },
+        "p_tabdl": {
+          "accuracy": 0.5,
+          "logloss": 0.7741855659749534,
+          "roc_auc": 0.5454545454545454,
+          "n": 20
+        },
+        "p_xgb": {
+          "accuracy": 0.5081081081081081,
+          "logloss": 0.7486386036831423,
+          "roc_auc": 0.4875820056232428,
+          "n": 185
+        },
+        "p_lgbm": {
+          "accuracy": 0.5098468271334792,
+          "logloss": 0.7302524020067271,
+          "roc_auc": 0.5064208702348865,
+          "n": 457
+        }
+      }
+    }
+  },
+  "ensemble_state_path": "models/ensemble_weights_optimized.json"
+}

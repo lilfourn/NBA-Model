@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-02-06T19:38:58.429059+00:00",
+  "days_back": 90,
+  "rolling_window": 50,
+  "total_rows": 5223,
+  "components": {
+    "p_forecast_cal": {
+      "rolling_accuracy": 0.5,
+      "rolling_logloss": 0.7534,
+      "rolling_brier": 0.2786,
+      "n": 50
+    },
+    "p_nn": {
+      "rolling_accuracy": 0.44,
+      "rolling_logloss": 1.584,
+      "rolling_brier": 0.3949,
+      "n": 50
+    },
+    "p_lr": {
+      "rolling_accuracy": 0.52,
+      "rolling_logloss": 0.9472,
+      "rolling_brier": 0.3232,
+      "n": 50
+    },
+    "p_xgb": {
+      "rolling_accuracy": 0.44,
+      "rolling_logloss": 0.7843,
+      "rolling_brier": 0.2905,
+      "n": 50
+    },
+    "p_lgbm": {
+      "rolling_accuracy": 0.48,
+      "rolling_logloss": 0.7785,
+      "rolling_brier": 0.2886,
+      "n": 50
+    },
+    "p_final": {
+      "rolling_accuracy": 0.5,
+      "rolling_logloss": 0.8267,
+      "rolling_brier": 0.3071,
+      "n": 50
+    }
+  },
+  "warnings": []
+}
