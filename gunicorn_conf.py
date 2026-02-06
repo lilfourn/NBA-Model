@@ -2,7 +2,7 @@ import multiprocessing
 import os
 
 bind = f"0.0.0.0:{os.getenv('PORT', '8000')}"
-workers = int(os.getenv("WEB_CONCURRENCY", multiprocessing.cpu_count() * 2 + 1))
+workers = int(os.getenv("WEB_CONCURRENCY", min(multiprocessing.cpu_count() * 2 + 1, 2)))
 worker_class = "uvicorn.workers.UvicornWorker"
 accesslog = "-"
 errorlog = "-"
