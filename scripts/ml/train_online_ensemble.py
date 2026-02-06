@@ -26,7 +26,7 @@ from scripts.ops.log_decisions import PRED_LOG_DEFAULT  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
-EXPERT_COLS_DEFAULT = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
+EXPERT_COLS_DEFAULT = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
 
 
 def _parse_timestamp(series: pd.Series) -> pd.Series:
@@ -181,7 +181,18 @@ def _load_outcomes(engine, df: pd.DataFrame) -> pd.DataFrame:
         for row in out.itertuples(index=False)
     ]
     out = out.dropna(subset=["actual_value", "line_score"])
-    out["over_label"] = (out["actual_value"].astype(float) > out["line_score"].astype(float)).astype(int)
+    line_vals = out["line_score"].astype(float)
+    actual_vals = out["actual_value"].astype(float)
+    out["outcome"] = np.where(
+        actual_vals > line_vals,
+        "over",
+        np.where(actual_vals < line_vals, "under", "push"),
+    )
+    out["over_label"] = np.where(
+        out["outcome"] == "over",
+        1.0,
+        np.where(out["outcome"] == "under", 0.0, np.nan),
+    )
     return out
 
 
@@ -247,17 +258,20 @@ def _load_training_frame_from_db(engine, *, days_back: int) -> pd.DataFrame:
                 n_eff,
                 p_forecast_cal,
                 p_nn,
+                coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl,
                 p_lr,
                 p_xgb,
                 p_lgbm,
                 prob_over as p_final,
                 coalesce(decision_time, created_at) as decision_time_parsed,
+                created_at,
                 details->>'is_live' as is_live
             from projection_predictions
             where over_label is not null
               and actual_value is not null
+              and outcome in ('over', 'under')
               and coalesce(decision_time, created_at) >= now() - (:days_back * interval '1 day')
-            order by coalesce(decision_time, created_at) asc
+            order by coalesce(decision_time, created_at) asc, created_at asc, id asc
             """
         ),
         engine,

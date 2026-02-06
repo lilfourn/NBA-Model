@@ -38,6 +38,12 @@ def _get_client() -> CrawlerClient:
     return _client
 
 
+def reset_nba_stats_client() -> None:
+    """Reset shared NBA stats HTTP client (forces a fresh session)."""
+    global _client  # noqa: PLW0603
+    _client = None
+
+
 def _request(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     url = f"{settings.nba_stats_api_url.rstrip('/')}/{endpoint}"
     client = _get_client()

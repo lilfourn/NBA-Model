@@ -21,8 +21,6 @@ SECRET_NAME = os.getenv("MODAL_SECRET_NAME", "nba-stats-env")
 STATE_VOLUME_NAME = os.getenv("MODAL_STATE_VOLUME_NAME", "nba-stats-state")
 SCHEDULE_TIMEZONE = os.getenv("MODAL_SCHEDULE_TIMEZONE", "America/Chicago")
 TRAIN_GPU = os.getenv("MODAL_TRAIN_GPU", "A10")
-API_LABEL = os.getenv("MODAL_API_LABEL", "nba-stats-api")
-API_VERIFY_DB = os.getenv("MODAL_API_VERIFY_DB", "1").strip().lower() not in {"0", "false", "no"}
 ENFORCE_DB_SSLMODE = os.getenv("MODAL_ENFORCE_DB_SSLMODE", "1").strip().lower() not in {"0", "false", "no"}
 SECURE_SSLMODES = {"require", "verify-ca", "verify-full"}
 
@@ -33,24 +31,8 @@ REMOTE_MONITORING_LOG = REMOTE_DATA_DIR / "monitoring" / "prediction_log.csv"
 REMOTE_CALIBRATION_DIR = REMOTE_DATA_DIR / "calibration"
 REMOTE_HEALTH_REPORT = REMOTE_DATA_DIR / "reports" / "model_health.json"
 
-REQUIREMENTS = [
-    line.strip()
-    for line in (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
-    if line.strip() and not line.strip().startswith("#")
-]
-
 app = modal.App(APP_NAME)
 state_volume = modal.Volume.from_name(STATE_VOLUME_NAME, create_if_missing=True)
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer, got: {raw!r}") from exc
 
 
 def _parse_gpu_spec(raw: str) -> Union[str, list[str]]:
@@ -63,16 +45,11 @@ def _parse_gpu_spec(raw: str) -> Union[str, list[str]]:
 
 
 TRAIN_GPU_SPEC = _parse_gpu_spec(TRAIN_GPU)
-API_MIN_CONTAINERS = _env_int("MODAL_API_MIN_CONTAINERS", 0)
-API_MAX_CONTAINERS = _env_int("MODAL_API_MAX_CONTAINERS", 3)
-API_CONCURRENCY = _env_int("MODAL_API_CONCURRENCY", 100)
-API_TIMEOUT_SECONDS = _env_int("MODAL_API_TIMEOUT_SECONDS", 60)
-API_SCALEDOWN_WINDOW_SECONDS = _env_int("MODAL_API_SCALEDOWN_WINDOW_SECONDS", 300)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("libgomp1")
-    .pip_install(*REQUIREMENTS)
+    .pip_install_from_requirements(str(REPO_ROOT / "requirements.txt"))
     .add_local_dir(str(REPO_ROOT / "app"), remote_path=str(REMOTE_PROJECT_ROOT / "app"), copy=True)
     .add_local_dir(str(REPO_ROOT / "scripts"), remote_path=str(REMOTE_PROJECT_ROOT / "scripts"), copy=True)
     .add_local_dir(str(REPO_ROOT / "alembic"), remote_path=str(REMOTE_PROJECT_ROOT / "alembic"), copy=True)
@@ -84,12 +61,18 @@ image = (
     .add_local_file(
         str(REPO_ROOT / "data" / "name_overrides.json"),
         remote_path=str(REMOTE_PROJECT_ROOT / "data" / "name_overrides.json"),
+        copy=True,
     )
     .add_local_file(
         str(REPO_ROOT / "data" / "team_abbrev_overrides.json"),
         remote_path=str(REMOTE_PROJECT_ROOT / "data" / "team_abbrev_overrides.json"),
+        copy=True,
     )
-    .add_local_file(str(REPO_ROOT / "alembic.ini"), remote_path=str(REMOTE_PROJECT_ROOT / "alembic.ini"))
+    .add_local_file(
+        str(REPO_ROOT / "alembic.ini"),
+        remote_path=str(REMOTE_PROJECT_ROOT / "alembic.ini"),
+        copy=True,
+    )
     .env({"PYTHONUNBUFFERED": "1"})
 )
 
@@ -104,6 +87,9 @@ def _runtime_defaults() -> dict[str, str]:
     return {
         "PYTHONPATH": str(REMOTE_PROJECT_ROOT),
         "CACHE_DIR": str(REMOTE_DATA_DIR / "cache"),
+        "TUNING_DIR": str(REMOTE_DATA_DIR / "tuning"),
+        "MODELS_DIR": str(REMOTE_MODELS_DIR),
+        "ENSEMBLE_WEIGHTS_PATH": str(REMOTE_MODELS_DIR / "ensemble_weights.json"),
         "COLLECTION_LOG_PATH": str(REMOTE_LOGS_DIR / "collection.jsonl"),
         "PLAYER_NAME_OVERRIDES_PATH": str(REMOTE_PROJECT_ROOT / "data" / "name_overrides.json"),
         "TEAM_ABBREV_OVERRIDES_PATH": str(REMOTE_PROJECT_ROOT / "data" / "team_abbrev_overrides.json"),
@@ -134,6 +120,7 @@ def _prepare_state() -> None:
     (REMOTE_DATA_DIR / "snapshots").mkdir(parents=True, exist_ok=True)
     (REMOTE_DATA_DIR / "monitoring").mkdir(parents=True, exist_ok=True)
     (REMOTE_DATA_DIR / "reports").mkdir(parents=True, exist_ok=True)
+    (REMOTE_DATA_DIR / "tuning").mkdir(parents=True, exist_ok=True)
     REMOTE_CALIBRATION_DIR.mkdir(parents=True, exist_ok=True)
     REMOTE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
     REMOTE_LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -316,6 +303,52 @@ def train_nn_gpu() -> None:
 
 @app.function(
     gpu=TRAIN_GPU_SPEC,
+    timeout=2 * 60 * 60,
+    retries=modal.Retries(max_retries=1, initial_delay=15.0, backoff_coefficient=2.0),
+    max_containers=1,
+    **shared_kwargs,
+)
+def train_tabdl_gpu() -> None:
+    _begin_run()
+    _verify_gpu_runtime()
+    _run_cmd(
+        [
+            "-m",
+            "scripts.ml.train_tabdl_model",
+            "--model-dir",
+            str(REMOTE_MODELS_DIR),
+        ]
+    )
+    _finish_run()
+
+
+@app.function(
+    gpu=TRAIN_GPU_SPEC,
+    timeout=4 * 60 * 60,
+    retries=modal.Retries(max_retries=1, initial_delay=20.0, backoff_coefficient=2.0),
+    max_containers=1,
+    **shared_kwargs,
+)
+def tune_tabdl_gpu(trials: int = 24) -> None:
+    _begin_run()
+    _verify_gpu_runtime()
+    _run_cmd(
+        [
+            "-m",
+            "scripts.ml.tune_tabdl_model",
+            "--trials",
+            str(max(4, int(trials))),
+            "--output",
+            str(REMOTE_DATA_DIR / "tuning" / "best_params_tabdl.json"),
+            "--model-dir",
+            str(REMOTE_MODELS_DIR),
+        ]
+    )
+    _finish_run()
+
+
+@app.function(
+    gpu=TRAIN_GPU_SPEC,
     timeout=15 * 60,
     retries=modal.Retries(max_retries=1, initial_delay=5.0, backoff_coefficient=2.0),
     max_containers=1,
@@ -361,6 +394,7 @@ def _run_train_pipeline() -> None:
         ]
     )
     train_nn_gpu.remote()
+    train_tabdl_gpu.remote()
     _run_cmd(
         [
             "-m",
@@ -447,25 +481,6 @@ def run_train_now() -> None:
     _run_train_pipeline()
 
 
-@app.function(
-    min_containers=API_MIN_CONTAINERS,
-    max_containers=API_MAX_CONTAINERS,
-    scaledown_window=API_SCALEDOWN_WINDOW_SECONDS,
-    timeout=API_TIMEOUT_SECONDS,
-    **shared_kwargs,
-)
-@modal.concurrent(max_inputs=API_CONCURRENCY)
-@modal.asgi_app(label=API_LABEL)
-def api() -> object:
-    _prepare_state()
-    _apply_runtime_env_defaults()
-    if API_VERIFY_DB:
-        _verify_database_connection()
-    from app.main import app as fastapi_app
-
-    return fastapi_app
-
-
 @app.local_entrypoint()
 def collect_now() -> None:
     run_collect_now.remote()
@@ -482,5 +497,5 @@ def gpu_check() -> None:
 
 
 @app.local_entrypoint()
-def api_url() -> None:
-    print(api.get_web_url())
+def tune_tabdl_now(trials: int = 24) -> None:
+    tune_tabdl_gpu.remote(trials=trials)

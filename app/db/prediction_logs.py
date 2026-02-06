@@ -108,6 +108,7 @@ def append_prediction_rows(engine: Engine, rows: list[dict[str, Any]]) -> int:
                 "confidence": _parse_decimal(row.get("confidence")),
                 "p_forecast_cal": _parse_decimal(row.get("p_forecast_cal")),
                 "p_nn": _parse_decimal(row.get("p_nn")),
+                "p_tabdl": _parse_decimal(row.get("p_tabdl")),
                 "p_lr": _parse_decimal(row.get("p_lr")),
                 "p_xgb": _parse_decimal(row.get("p_xgb")),
                 "p_lgbm": _parse_decimal(row.get("p_lgbm")),

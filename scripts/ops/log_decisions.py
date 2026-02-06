@@ -24,6 +24,7 @@ LOG_COLS = [
     "p_over_cal",
     "p_forecast_cal",
     "p_nn",
+    "p_tabdl",
     "p_lr",
     "p_xgb",
     "p_lgbm",

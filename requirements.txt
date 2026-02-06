@@ -13,8 +13,6 @@ joblib
 scipy
 xgboost
 lightgbm
-shap
-optuna
 lxml
 torch
 matplotlib

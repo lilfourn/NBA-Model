@@ -309,6 +309,7 @@ projection_predictions = Table(
     Column("confidence", Numeric, nullable=True),
     Column("p_forecast_cal", Numeric, nullable=True),
     Column("p_nn", Numeric, nullable=True),
+    Column("p_tabdl", Numeric, nullable=True),
     Column("p_lr", Numeric, nullable=True),
     Column("p_xgb", Numeric, nullable=True),
     Column("p_lgbm", Numeric, nullable=True),

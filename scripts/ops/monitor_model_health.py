@@ -19,7 +19,7 @@ from app.ml.stat_mappings import stat_value_from_row  # noqa: E402
 from app.utils.names import normalize_name  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
-EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
+EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
 ROLLING_WINDOW = 50
 ACCURACY_ALERT_THRESHOLD = 0.48
 LOGLOSS_ALERT_THRESHOLD = 0.75
@@ -39,15 +39,20 @@ def _load_resolved_predictions(engine, *, days_back: int = 90) -> pd.DataFrame:
         sa_text(
             """
             select
+                id::text as prediction_id,
                 prob_over as p_final,
-                p_forecast_cal, p_nn, p_lr, p_xgb, p_lgbm,
+                p_forecast_cal, p_nn, coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl, p_lr, p_xgb, p_lgbm,
                 over_label,
-                coalesce(decision_time, created_at) as decision_time
+                is_correct,
+                outcome,
+                coalesce(decision_time, created_at) as decision_time,
+                created_at
             from projection_predictions
             where over_label is not null
               and actual_value is not null
+              and outcome in ('over', 'under')
               and coalesce(decision_time, created_at) >= now() - (:days_back * interval '1 day')
-            order by coalesce(decision_time, created_at) asc
+            order by coalesce(decision_time, created_at) asc, created_at asc, id asc
             """
         ),
         engine,
@@ -56,6 +61,8 @@ def _load_resolved_predictions(engine, *, days_back: int = 90) -> pd.DataFrame:
     for col in EXPERT_COLS + ["p_final"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "is_correct" in df.columns:
+        df["is_correct"] = pd.to_numeric(df["is_correct"], errors="coerce")
     return df
 
 
@@ -77,8 +84,16 @@ def _check_rolling_metrics(
         probs = recent[expert].to_numpy(dtype=float)
         labels = recent["over_label"].to_numpy(dtype=int)
 
-        picks = (probs >= 0.5).astype(int)
-        accuracy = float((picks == labels).mean())
+        if expert == "p_final" and "is_correct" in recent.columns:
+            is_correct = pd.to_numeric(recent["is_correct"], errors="coerce").dropna()
+            if len(is_correct) == len(recent):
+                accuracy = float(is_correct.mean())
+            else:
+                picks = (probs >= 0.5).astype(int)
+                accuracy = float((picks == labels).mean())
+        else:
+            picks = (probs >= 0.5).astype(int)
+            accuracy = float((picks == labels).mean())
         avg_ll = float(np.mean([_logloss(int(y), float(p)) for y, p in zip(labels, probs)]))
 
         metrics[expert] = {
@@ -119,6 +134,13 @@ def _check_ensemble_weights(weights_path: str) -> list[dict]:
         return alerts
 
     weights = data.get("weights") or data.get("global_weights") or {}
+    if isinstance(weights, dict) and weights and all(isinstance(v, dict) for v in weights.values()):
+        nested_weights = weights
+        all_w: dict[str, list[float]] = {}
+        for bucket_weights in nested_weights.values():
+            for expert, value in bucket_weights.items():
+                all_w.setdefault(str(expert), []).append(float(value))
+        weights = {expert: float(np.mean(values)) for expert, values in all_w.items()}
     if not weights:
         # Try extracting from context buckets
         buckets = data.get("context_weights", {})

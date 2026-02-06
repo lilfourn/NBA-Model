@@ -17,6 +17,10 @@ from app.db.engine import get_engine  # noqa: E402
 from app.db.prediction_logs import append_prediction_rows  # noqa: E402
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs  # noqa: E402
 from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs, latest_compatible_checkpoint  # noqa: E402
+from app.ml.tabdl.infer import (  # noqa: E402
+    infer_over_probs as infer_tabdl_over_probs,
+    latest_compatible_checkpoint as latest_compatible_tabdl_checkpoint,
+)
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs  # noqa: E402
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs  # noqa: E402
 from app.ml.artifacts import load_joblib_artifact, latest_compatible_joblib_path  # noqa: E402
@@ -126,6 +130,24 @@ def _risk_adjusted_confidence(*, p_over: float, n_eff: float | None, status: str
     elif status == "fallback_global":
         rho = min(rho, 0.75)
     return 0.5 + rho * (p_pick - 0.5)
+
+
+def _ensure_ensemble_experts(ens: ContextualHedgeEnsembler, experts: list[str]) -> ContextualHedgeEnsembler:
+    if ens.experts == experts:
+        return ens
+    ens.experts = list(experts)
+    seed = ens._init_weights()  # noqa: SLF001
+    for ctx_key, weights in ens.weights.items():
+        for expert in experts:
+            if expert not in weights:
+                weights[expert] = float(seed.get(expert, 0.0))
+        total = sum(max(0.0, float(weights.get(expert, 0.0))) for expert in experts)
+        if not math.isfinite(total) or total <= 0:
+            ens.weights[ctx_key] = dict(seed)
+            continue
+        for expert in experts:
+            weights[expert] = max(0.0, float(weights.get(expert, 0.0))) / total
+    return ens
 
 
 def _load_projection_frame(engine, snapshot_id: str, *, include_non_today: bool) -> pd.DataFrame:
@@ -270,6 +292,7 @@ def main() -> None:
 
     models_dir = Path(args.models_dir)
     nn_path = latest_compatible_checkpoint(models_dir, "nn_gru_attention_*.pt")
+    tabdl_path = latest_compatible_tabdl_checkpoint(models_dir, "tabdl_*.pt")
     lr_path = latest_compatible_joblib_path(models_dir, "baseline_logreg_*.joblib")
     xgb_path = latest_compatible_joblib_path(models_dir, "xgb_*.joblib")
     lgbm_path = latest_compatible_joblib_path(models_dir, "lgbm_*.joblib")
@@ -334,6 +357,30 @@ def main() -> None:
                 if not math.isfinite(prob):
                     continue
                 p_nn[str(proj_id)] = prob
+
+    # Deep tabular expert (optional)
+    p_tabdl: dict[str, float] = {}
+    if tabdl_path:
+        try:
+            tabdl_inf = infer_tabdl_over_probs(
+                engine=engine,
+                model_path=str(tabdl_path),
+                snapshot_id=str(snapshot_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"Warning: TabDL expert failed ({tabdl_path.name}): {exc.__class__.__name__}: {exc}. "
+                "Continuing without TabDL."
+            )
+        else:
+            for idx, r in enumerate(tabdl_inf.frame.itertuples(index=False)):
+                proj_id = getattr(r, "projection_id", None)
+                if proj_id is None:
+                    continue
+                prob = float(tabdl_inf.probs[idx])
+                if not math.isfinite(prob):
+                    continue
+                p_tabdl[str(proj_id)] = prob
 
     # LR expert (optional)
     p_lr: dict[str, float] = {}
@@ -429,10 +476,19 @@ def main() -> None:
                 conformal_cals.append(ConformalCalibrator(**_cd))
         except Exception:  # noqa: BLE001
             pass
+    if tabdl_path and tabdl_path.exists():
+        try:
+            import torch as _torch
+            _pl = _torch.load(str(tabdl_path), map_location="cpu")
+            _cd = _pl.get("conformal")
+            if _cd:
+                conformal_cals.append(ConformalCalibrator(**_cd))
+        except Exception:  # noqa: BLE001
+            pass
 
-    experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
+    experts = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
     if Path(args.ensemble_weights).exists():
-        ens = ContextualHedgeEnsembler.load(args.ensemble_weights)
+        ens = _ensure_ensemble_experts(ContextualHedgeEnsembler.load(args.ensemble_weights), experts)
     else:
         ens = ContextualHedgeEnsembler(experts=experts, eta=0.2, shrink_to_uniform=0.01)
 
@@ -448,6 +504,7 @@ def main() -> None:
         expert_probs = {
             "p_forecast_cal": _safe_prob(f.get("p_forecast_cal")),
             "p_nn": _safe_prob(p_nn.get(proj_id)),
+            "p_tabdl": _safe_prob(p_tabdl.get(proj_id)),
             "p_lr": _safe_prob(p_lr.get(proj_id)),
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
@@ -509,6 +566,7 @@ def main() -> None:
                 "rank_score": float(score),
                 "p_forecast_cal": expert_probs["p_forecast_cal"],
                 "p_nn": expert_probs["p_nn"],
+                "p_tabdl": expert_probs["p_tabdl"],
                 "p_lr": expert_probs["p_lr"],
                 "p_xgb": expert_probs["p_xgb"],
                 "p_lgbm": expert_probs["p_lgbm"],
@@ -534,6 +592,7 @@ def main() -> None:
         ep = {
             "p_forecast_cal": item.get("p_forecast_cal"),
             "p_nn": item.get("p_nn"),
+            "p_tabdl": item.get("p_tabdl"),
             "p_lr": item.get("p_lr"),
             "p_xgb": item.get("p_xgb"),
             "p_lgbm": item.get("p_lgbm"),
@@ -588,6 +647,7 @@ def main() -> None:
                     "p_over_cal": item.get("p_forecast_cal"),
                     "p_forecast_cal": item.get("p_forecast_cal"),
                     "p_nn": item.get("p_nn"),
+                    "p_tabdl": item.get("p_tabdl"),
                     "p_lr": item.get("p_lr"),
                     "p_xgb": item.get("p_xgb"),
                     "p_lgbm": item.get("p_lgbm"),

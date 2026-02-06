@@ -9,13 +9,14 @@ import pandas as pd
 from fastapi import APIRouter, Query
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.db.engine import get_async_engine, get_engine
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
-ENSEMBLE_WEIGHTS_PATH = Path("models/ensemble_weights.json")
+ENSEMBLE_WEIGHTS_PATH = Path(settings.ensemble_weights_path)
 CALIBRATION_DIR = Path("data/calibration")
-EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
+EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
 
 
 @router.get("/training-history")
@@ -91,17 +92,21 @@ def _load_prediction_records_sync() -> pd.DataFrame | None:
             text(
                 """
                 select
+                    id::text as prediction_id,
                     coalesce(decision_time, created_at) as decision_time,
                     created_at,
                     over_label,
+                    outcome,
+                    is_correct,
                     prob_over as p_final,
                     p_forecast_cal,
                     p_nn,
+                    coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl,
                     p_lr,
                     p_xgb,
                     p_lgbm
                 from projection_predictions
-                order by coalesce(decision_time, created_at) asc
+                order by coalesce(decision_time, created_at) asc, created_at asc, id asc
                 """
             ),
             engine,
@@ -117,66 +122,88 @@ def _load_prediction_records_sync() -> pd.DataFrame | None:
 async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
     df = await asyncio.to_thread(_load_prediction_records_sync)
     if df is None:
-        return {"total_predictions": 0, "total_resolved": 0, "overall_hit_rate": None, "rolling": []}
+        return {
+            "total_predictions": 0,
+            "total_resolved": 0,
+            "total_scored": 0,
+            "overall_hit_rate": None,
+            "rolling": [],
+        }
 
     if "over_label" not in df.columns:
-        return {"total_predictions": len(df), "total_resolved": 0, "overall_hit_rate": None, "rolling": []}
+        return {
+            "total_predictions": len(df),
+            "total_resolved": 0,
+            "total_scored": 0,
+            "overall_hit_rate": None,
+            "rolling": [],
+        }
 
     df["over_label"] = pd.to_numeric(df["over_label"], errors="coerce")
     total_predictions = len(df)
 
+    if "outcome" in df.columns:
+        resolved = df[df["outcome"].isin(["over", "under"])].copy()
+    else:
+        resolved = df.copy()
+    resolved = resolved.dropna(subset=["over_label"]).copy()
+
     # p_final threshold: pick OVER if p_final >= 0.5
     if "p_final" in df.columns:
-        df["p_final"] = pd.to_numeric(df["p_final"], errors="coerce")
-        df["ensemble_correct"] = (
-            ((df["p_final"] >= 0.5) & (df["over_label"] == 1))
-            | ((df["p_final"] < 0.5) & (df["over_label"] == 0))
+        resolved["p_final"] = pd.to_numeric(resolved["p_final"], errors="coerce")
+        resolved["ensemble_correct"] = (
+            ((resolved["p_final"] >= 0.5) & (resolved["over_label"] == 1))
+            | ((resolved["p_final"] < 0.5) & (resolved["over_label"] == 0))
         ).astype(float)
-        df.loc[df["over_label"].isna() | df["p_final"].isna(), "ensemble_correct"] = float("nan")
+        resolved.loc[resolved["p_final"].isna(), "ensemble_correct"] = float("nan")
+        if "is_correct" in resolved.columns:
+            resolved["is_correct"] = pd.to_numeric(resolved["is_correct"], errors="coerce")
+            mask = resolved["is_correct"].notna() & resolved["p_final"].notna()
+            resolved.loc[mask, "ensemble_correct"] = resolved.loc[mask, "is_correct"].astype(float)
     else:
-        df["ensemble_correct"] = float("nan")
+        resolved["ensemble_correct"] = float("nan")
 
     for col in EXPERT_COLS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-            df[f"{col}_correct"] = (
-                ((df[col] >= 0.5) & (df["over_label"] == 1))
-                | ((df[col] < 0.5) & (df["over_label"] == 0))
+        if col in resolved.columns:
+            resolved[col] = pd.to_numeric(resolved[col], errors="coerce")
+            resolved[f"{col}_correct"] = (
+                ((resolved[col] >= 0.5) & (resolved["over_label"] == 1))
+                | ((resolved[col] < 0.5) & (resolved["over_label"] == 0))
             ).astype(float)
-            df.loc[df["over_label"].isna() | df[col].isna(), f"{col}_correct"] = float("nan")
+            resolved.loc[resolved[col].isna(), f"{col}_correct"] = float("nan")
         else:
-            df[f"{col}_correct"] = float("nan")
-
-    resolved = df.dropna(subset=["over_label"])
+            resolved[f"{col}_correct"] = float("nan")
     total_resolved = len(resolved)
     overall_hit_rate = float(resolved["ensemble_correct"].mean()) if total_resolved > 0 and "ensemble_correct" in resolved.columns else None
 
-    if total_resolved < 2:
+    scored = resolved.dropna(subset=["ensemble_correct"]).copy()
+    if len(scored) < 2:
         return {
             "total_predictions": total_predictions,
             "total_resolved": total_resolved,
+            "total_scored": int(len(scored)),
             "overall_hit_rate": overall_hit_rate,
             "rolling": [],
         }
 
-    resolved = resolved.reset_index(drop=True)
+    scored = scored.reset_index(drop=True)
 
     rolling_data = []
-    ens_rolling = resolved["ensemble_correct"].rolling(window, min_periods=max(5, window // 4)).mean()
+    ens_rolling = scored["ensemble_correct"].rolling(window, min_periods=max(5, window // 4)).mean()
 
     expert_rolling = {}
     for col in EXPERT_COLS:
         c = f"{col}_correct"
-        if c in resolved.columns:
-            expert_rolling[col] = resolved[c].rolling(window, min_periods=max(5, window // 4)).mean()
+        if c in scored.columns:
+            expert_rolling[col] = scored[c].rolling(window, min_periods=max(5, window // 4)).mean()
 
     date_col = None
     for candidate in ["decision_time", "created_at"]:
-        if candidate in resolved.columns:
+        if candidate in scored.columns:
             date_col = candidate
             break
 
-    for i in range(len(resolved)):
+    for i in range(len(scored)):
         if pd.isna(ens_rolling.iloc[i]):
             continue
         point: dict = {"index": i, "ensemble_hit_rate": _safe_float(ens_rolling.iloc[i])}
@@ -184,7 +211,7 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
             val = expert_rolling.get(col)
             point[f"{col}_hit_rate"] = _safe_float(val.iloc[i]) if val is not None else None
         if date_col:
-            point["date"] = str(resolved[date_col].iloc[i]) if pd.notna(resolved[date_col].iloc[i]) else None
+            point["date"] = str(scored[date_col].iloc[i]) if pd.notna(scored[date_col].iloc[i]) else None
         rolling_data.append(point)
 
     # Downsample if too many points
@@ -195,6 +222,7 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
     return {
         "total_predictions": total_predictions,
         "total_resolved": total_resolved,
+        "total_scored": int(len(scored)),
         "overall_hit_rate": _safe_float(overall_hit_rate),
         "rolling": rolling_data,
     }
@@ -285,10 +313,15 @@ async def confidence_dist(bins: int = Query(20, ge=5, le=50)) -> dict:
     has_outcomes = "over_label" in df.columns
     if has_outcomes:
         df["over_label"] = pd.to_numeric(df["over_label"], errors="coerce")
+        if "outcome" in df.columns:
+            df = df[df["outcome"].isin(["over", "under"]) | df["outcome"].isna()].copy()
         df["hit"] = (
             ((df["p_final"] >= 0.5) & (df["over_label"] == 1))
             | ((df["p_final"] < 0.5) & (df["over_label"] == 0))
         )
+        if "is_correct" in df.columns:
+            df["is_correct"] = pd.to_numeric(df["is_correct"], errors="coerce")
+            df.loc[df["is_correct"].notna(), "hit"] = df.loc[df["is_correct"].notna(), "is_correct"].astype(bool)
 
     bin_edges = [0.5 + i * (0.5 / bins) for i in range(bins + 1)]
     result = []

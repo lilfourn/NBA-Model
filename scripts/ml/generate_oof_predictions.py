@@ -75,6 +75,28 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     return X, y, df
 
 
+def _prequential_fold_indices(n_rows: int, n_folds: int) -> list[tuple[list[int], list[int]]]:
+    if n_rows < 2 or n_folds <= 0:
+        return []
+
+    fold_count = min(int(n_folds), int(n_rows))
+    base_size = n_rows // fold_count
+    remainder = n_rows % fold_count
+    folds: list[tuple[list[int], list[int]]] = []
+
+    cursor = 0
+    for fold in range(fold_count):
+        fold_size = base_size + (1 if fold < remainder else 0)
+        test_start = cursor
+        test_end = min(n_rows, test_start + fold_size)
+        test_idx = list(range(test_start, test_end))
+        train_idx = list(range(0, test_start))
+        if test_idx:
+            folds.append((train_idx, test_idx))
+        cursor = test_end
+    return folds
+
+
 def _train_lr(X_train, y_train, X_test):
     pipe = Pipeline([
         ("scaler", StandardScaler()),
@@ -145,8 +167,8 @@ def main() -> None:
 
     print(f"Generating OOF predictions: {n} rows, {args.n_folds} folds")
 
-    # Time-ordered fold assignment
-    fold_size = n // args.n_folds
+    # Prequential folds: train only on rows that occur before each test block.
+    folds = _prequential_fold_indices(n_rows=n, n_folds=args.n_folds)
     oof_lr = np.full(n, np.nan)
     oof_xgb = np.full(n, np.nan)
     oof_lgbm = np.full(n, np.nan)
@@ -155,11 +177,9 @@ def main() -> None:
     # Suppress sklearn matmul RuntimeWarnings from polynomial feature interactions
     warnings.filterwarnings("ignore", message=".*encountered in matmul", category=RuntimeWarning)
 
-    for fold in range(args.n_folds):
-        test_start = fold * fold_size
-        test_end = test_start + fold_size if fold < args.n_folds - 1 else n
-        test_idx = list(range(test_start, test_end))
-        train_idx = list(range(0, test_start)) + list(range(test_end, n))
+    for fold_idx, (train_idx, test_idx) in enumerate(folds, start=1):
+        if not test_idx:
+            continue
 
         if len(train_idx) < 50 or len(test_idx) < 10:
             continue
@@ -168,7 +188,7 @@ def main() -> None:
         y_train = y.iloc[train_idx]
         X_test = X.iloc[test_idx]
 
-        print(f"  Fold {fold+1}/{args.n_folds}: train={len(train_idx)} test={len(test_idx)}")
+        print(f"  Fold {fold_idx}/{len(folds)}: train={len(train_idx)} test={len(test_idx)}")
 
         try:
             oof_lr[test_idx] = _train_lr(X_train, y_train, X_test)
