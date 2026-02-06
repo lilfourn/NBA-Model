@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     app_name: str = "NBA Stats API"
     environment: str = "development"
     log_level: str = "INFO"
-    cors_allow_origins: str = Field(default="http://localhost:3000", validation_alias="CORS_ALLOW_ORIGINS")
+    cors_allow_origins: str = Field(default="http://localhost:3000,http://localhost:3001", validation_alias="CORS_ALLOW_ORIGINS")
     prizepicks_api_url: str = Field(
         default="http://partner-api.prizepicks.com",
         validation_alias="PRIZEPICKS_API_URL",
@@ -118,6 +118,11 @@ class Settings(BaseSettings):
 
     # Model artifact source: "fs" for local filesystem (default), "db" for Postgres
     model_source: str = Field(default="fs", validation_alias="MODEL_SOURCE")
+    models_dir: str = Field(default="models", validation_alias="MODELS_DIR")
+    ensemble_weights_path: str = Field(
+        default="models/ensemble_weights.json",
+        validation_alias="ENSEMBLE_WEIGHTS_PATH",
+    )
 
     @property
     def cors_origins(self) -> list[str]:
