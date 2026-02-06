@@ -14,6 +14,14 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
     && /opt/venv/bin/pip install -r requirements.txt
 
+FROM base AS deps-prod
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
+COPY requirements-prod.txt ./
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --upgrade pip \
+    && /opt/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu \
+    && /opt/venv/bin/pip install -r requirements-prod.txt
+
 FROM base AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt requirements-dev.txt ./
@@ -27,7 +35,7 @@ EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 FROM base AS prod
-COPY --from=deps /opt/venv /opt/venv
+COPY --from=deps-prod /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 COPY app ./app
 COPY alembic ./alembic
