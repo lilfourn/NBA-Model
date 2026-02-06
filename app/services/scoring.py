@@ -23,7 +23,10 @@ from app.ml.artifacts import load_joblib_artifact, latest_compatible_joblib_path
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs
 from app.ml.meta_learner import infer_meta_learner
-from app.ml.nn.infer import infer_over_probs as infer_nn_over_probs, latest_compatible_checkpoint
+from app.ml.nn.infer import (
+    infer_over_probs as infer_nn_over_probs,
+    latest_compatible_checkpoint,
+)
 from app.ml.tabdl.infer import (
     infer_over_probs as infer_tabdl_over_probs,
     latest_compatible_checkpoint as latest_compatible_tabdl_checkpoint,
@@ -36,7 +39,11 @@ from app.modeling.gating_model import GatingModel, build_context_features
 from app.modeling.hybrid_ensemble import HybridEnsembleCombiner
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler
 from app.modeling.probability import confidence_from_probability
-from app.modeling.stat_forecast import ForecastParams, LeaguePriors, StatForecastPredictor
+from app.modeling.stat_forecast import (
+    ForecastParams,
+    LeaguePriors,
+    StatForecastPredictor,
+)
 from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler
 from app.modeling.types import Projection
 from app.ml.stat_mappings import (
@@ -112,28 +119,59 @@ class ScoringResult:
 # --- Probability shrinkage ---
 # Real sports betting edges are small.  Even the sharpest models rarely
 # exceed 60-65% true probability.  Raw model outputs of 99%+ are almost
-# certainly overfit.  We shrink toward the empirical base rate using a
-# Beta-prior blend.
+# certainly overfit.  We shrink toward a context-aware prior using a
+# logit-space blend.
 #
-# shrunk = (1 - k) * raw + k * SHRINK_ANCHOR   where k depends on n_eff.
+# logit(p_final) = (1-k)*logit(p_raw) + k*logit(prior)
 # With n_eff >= 30 games of history, k = SHRINK_MIN (modest pull).
 # With little data, k = SHRINK_MAX (heavy pull toward prior).
 #
-# SHRINK_ANCHOR: empirical OVER base rate from training data (~42%).
-# Shrinking toward 0.5 when the true base rate is lower inflates OVER
-# predictions and destroys calibration.
-SHRINK_ANCHOR = 0.42
-SHRINK_MIN = 0.05   # best-data picks: 5% pull (models are already calibrated)
-SHRINK_MAX = 0.25   # low-data picks: 25% pull toward base rate
+# The prior is loaded from models/context_priors.json (refreshed daily).
+# It adapts per stat_type and line_score bucket.  Fallback: 0.42.
+SHRINK_ANCHOR = 0.42  # Global fallback only -- prefer context prior
+SHRINK_MIN = 0.05  # best-data picks: 5% pull (models are already calibrated)
+SHRINK_MAX = 0.25  # low-data picks: 25% pull toward base rate
+
+# Abstain policy: only publish picks with p_pick >= threshold
+# p_pick = max(p_final, 1 - p_final)
+PICK_THRESHOLD = 0.57
 
 
-def shrink_probability(p: float, n_eff: float | None = None) -> float:
-    """Shrink a probability toward empirical base rate based on data quality."""
+def _logit(p: float) -> float:
+    """Logit function with clamping to avoid infinities."""
+    eps = 1e-7
+    p = max(eps, min(1.0 - eps, p))
+    return math.log(p / (1.0 - p))
+
+
+def _sigmoid(x: float) -> float:
+    """Sigmoid function with overflow protection."""
+    if x > 500:
+        return 1.0
+    if x < -500:
+        return 0.0
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def shrink_probability(
+    p: float,
+    n_eff: float | None = None,
+    context_prior: float | None = None,
+) -> float:
+    """Shrink a probability toward prior in logit space based on data quality.
+
+    Uses logit-space blending (more stable than linear probability averaging):
+      logit(p_final) = (1-k)*logit(p_raw) + k*logit(prior)
+    """
+    prior = context_prior if context_prior is not None else SHRINK_ANCHOR
     if n_eff is not None and n_eff > 0:
         k = SHRINK_MAX - (SHRINK_MAX - SHRINK_MIN) * min(1.0, n_eff / 30.0)
     else:
         k = SHRINK_MAX
-    return (1.0 - k) * p + k * SHRINK_ANCHOR
+    logit_p = _logit(p)
+    logit_prior = _logit(prior)
+    logit_final = (1.0 - k) * logit_p + k * logit_prior
+    return _sigmoid(logit_final)
 
 
 def _compute_edge(
@@ -164,8 +202,7 @@ def _compute_edge(
     if n_experts >= 2:
         # "Qualified" = agrees on direction AND prob is in [0.25, 0.75]
         qualified = sum(
-            1 for v in available
-            if (v >= 0.5) == pick_over and 0.25 <= v <= 0.75
+            1 for v in available if (v >= 0.5) == pick_over and 0.25 <= v <= 0.75
         )
         # Unqualified dissenters are a red flag
         dissenters = sum(1 for v in available if (v >= 0.5) != pick_over)
@@ -182,8 +219,7 @@ def _compute_edge(
     #    Uses only experts in the pick direction with moderate outputs.
     if n_experts >= 2:
         qualified_probs = [
-            v for v in available
-            if (v >= 0.5) == pick_over and 0.25 <= v <= 0.75
+            v for v in available if (v >= 0.5) == pick_over and 0.25 <= v <= 0.75
         ]
         if len(qualified_probs) >= 2:
             spread = max(qualified_probs) - min(qualified_probs)
@@ -197,6 +233,7 @@ def _compute_edge(
     # 4. Data quality (max 15pts) — log scaling on n_eff
     if n_eff is not None and n_eff > 0:
         import math as _math
+
         data_q = min(1.0, _math.log1p(n_eff) / _math.log1p(30.0))
     else:
         data_q = 0.0
@@ -232,7 +269,9 @@ def _grade_from_edge(edge: float) -> str:
     return "F"
 
 
-def _conformal_set_size(calibrators: list[ConformalCalibrator], p_over: float) -> int | None:
+def _conformal_set_size(
+    calibrators: list[ConformalCalibrator], p_over: float
+) -> int | None:
     """Majority-vote conformal set size across available calibrators.
 
     Returns 1 (confident unique prediction) or 2 (ambiguous).
@@ -247,7 +286,9 @@ def _conformal_set_size(calibrators: list[ConformalCalibrator], p_over: float) -
 
 def _latest_snapshot_id(engine: Engine) -> str | None:
     with engine.connect() as conn:
-        return conn.execute(text("select id from snapshots order by fetched_at desc limit 1")).scalar()
+        return conn.execute(
+            text("select id from snapshots order by fetched_at desc limit 1")
+        ).scalar()
 
 
 def _snapshot_id_for_game_date(engine: Engine, game_date: str) -> str | None:
@@ -313,7 +354,9 @@ def _optional_str(value: object) -> str | None:
     return normalized or None
 
 
-def _risk_adjusted_confidence(*, p_over: float, n_eff: float | None, status: str) -> float:
+def _risk_adjusted_confidence(
+    *, p_over: float, n_eff: float | None, status: str
+) -> float:
     p_pick = max(p_over, 1.0 - p_over)
     rho = 0.85
     if n_eff is None or n_eff < 5:
@@ -346,7 +389,9 @@ def _nn_weight_cap_for_latest_auc(engine: Engine) -> dict[str, float]:
     return {"p_nn": 0.10}
 
 
-def _ensure_ensemble_experts(ens: ContextualHedgeEnsembler, experts: list[str]) -> ContextualHedgeEnsembler:
+def _ensure_ensemble_experts(
+    ens: ContextualHedgeEnsembler, experts: list[str]
+) -> ContextualHedgeEnsembler:
     if ens.experts == experts:
         return ens
     ens.experts = list(experts)
@@ -364,7 +409,9 @@ def _ensure_ensemble_experts(ens: ContextualHedgeEnsembler, experts: list[str]) 
     return ens
 
 
-def _ensure_thompson_experts(ts: ThompsonSamplingEnsembler, experts: list[str]) -> ThompsonSamplingEnsembler:
+def _ensure_thompson_experts(
+    ts: ThompsonSamplingEnsembler, experts: list[str]
+) -> ThompsonSamplingEnsembler:
     if ts.experts == experts:
         return ts
     ts.experts = list(experts)
@@ -388,7 +435,9 @@ def _is_supported_stat_type(stat_type: str) -> bool:
     )
 
 
-def _load_projection_frame(engine: Engine, snapshot_id: str, *, include_non_today: bool) -> pd.DataFrame:
+def _load_projection_frame(
+    engine: Engine, snapshot_id: str, *, include_non_today: bool
+) -> pd.DataFrame:
     query = text(
         """
         select
@@ -427,7 +476,10 @@ def _load_projection_frame(engine: Engine, snapshot_id: str, *, include_non_toda
     return pd.read_sql(
         query,
         engine,
-        params={"snapshot_id": snapshot_id, "include_non_today": bool(include_non_today)},
+        params={
+            "snapshot_id": snapshot_id,
+            "include_non_today": bool(include_non_today),
+        },
     )
 
 
@@ -443,7 +495,9 @@ def _to_projection(row: object) -> Projection:
         event_type=None,
         projection_type=_row_get(row, "projection_type"),
         trending_count=_row_get(row, "trending_count"),
-        is_today=bool(_row_get(row, "today")) if _row_get(row, "today") is not None else None,
+        is_today=bool(_row_get(row, "today"))
+        if _row_get(row, "today") is not None
+        else None,
         is_combo=bool(_row_get(row, "combo") or False),
     )
 
@@ -501,7 +555,12 @@ def score_ensemble(
             picks=[],
         )
 
-    unsupported = frame["stat_type"].fillna("").astype(str).map(lambda v: not _is_supported_stat_type(v))
+    unsupported = (
+        frame["stat_type"]
+        .fillna("")
+        .astype(str)
+        .map(lambda v: not _is_supported_stat_type(v))
+    )
     if unsupported.any():
         frame = frame[~unsupported].copy()
         if frame.empty:
@@ -518,10 +577,14 @@ def score_ensemble(
     if _use_db:
         nn_path = load_latest_artifact_as_file(engine, "nn_gru_attention", suffix=".pt")
         tabdl_path = load_latest_artifact_as_file(engine, "tabdl_mlp", suffix=".pt")
-        lr_path = load_latest_artifact_as_file(engine, "baseline_logreg", suffix=".joblib")
+        lr_path = load_latest_artifact_as_file(
+            engine, "baseline_logreg", suffix=".joblib"
+        )
         xgb_path = load_latest_artifact_as_file(engine, "xgb", suffix=".joblib")
         lgbm_path = load_latest_artifact_as_file(engine, "lgbm", suffix=".joblib")
-        meta_path = load_latest_artifact_as_file(engine, "meta_learner", suffix=".joblib")
+        meta_path = load_latest_artifact_as_file(
+            engine, "meta_learner", suffix=".joblib"
+        )
     else:
         models_path = Path(models_dir)
         nn_path = latest_compatible_checkpoint(models_path, "nn_gru_attention_*.pt")
@@ -533,7 +596,13 @@ def score_ensemble(
 
     logger.info(
         "Model paths resolved (db=%s): nn=%s tabdl=%s lr=%s xgb=%s lgbm=%s meta=%s",
-        _use_db, nn_path, tabdl_path, lr_path, xgb_path, lgbm_path, meta_path,
+        _use_db,
+        nn_path,
+        tabdl_path,
+        lr_path,
+        xgb_path,
+        lgbm_path,
+        meta_path,
     )
 
     # Load conformal calibrators from saved models
@@ -554,7 +623,9 @@ def score_ensemble(
             if _cd:
                 conformal_cals.append(ConformalCalibrator(**_cd))
         except Exception:  # noqa: BLE001
-            logger.warning("Failed to load conformal from NN %s", nn_path, exc_info=True)
+            logger.warning(
+                "Failed to load conformal from NN %s", nn_path, exc_info=True
+            )
     if tabdl_path and tabdl_path.exists():
         try:
             _pl = _torch.load(str(tabdl_path), map_location="cpu")
@@ -562,7 +633,9 @@ def score_ensemble(
             if _cd:
                 conformal_cals.append(ConformalCalibrator(**_cd))
         except Exception:  # noqa: BLE001
-            logger.warning("Failed to load conformal from TabDL %s", tabdl_path, exc_info=True)
+            logger.warning(
+                "Failed to load conformal from TabDL %s", tabdl_path, exc_info=True
+            )
 
     calibrator = None
     if calibration_path:
@@ -571,8 +644,12 @@ def score_ensemble(
     # Forecast expert
     logs = load_db_game_logs(engine)
     params = ForecastParams()
-    needed_stat_types = sorted({str(v) for v in frame["stat_type"].fillna("").tolist() if str(v)})
-    priors = LeaguePriors(logs, stat_types=needed_stat_types, minutes_prior=params.minutes_prior)
+    needed_stat_types = sorted(
+        {str(v) for v in frame["stat_type"].fillna("").tolist() if str(v)}
+    )
+    priors = LeaguePriors(
+        logs, stat_types=needed_stat_types, minutes_prior=params.minutes_prior
+    )
     forecast = StatForecastPredictor(
         logs,
         min_games=min_games,
@@ -610,7 +687,9 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            logger.warning("NN inference failed for snapshot %s", resolved_snapshot, exc_info=True)
+            logger.warning(
+                "NN inference failed for snapshot %s", resolved_snapshot, exc_info=True
+            )
         else:
             for idx, r in enumerate(nn_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -631,7 +710,11 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            logger.warning("TabDL inference failed for snapshot %s", resolved_snapshot, exc_info=True)
+            logger.warning(
+                "TabDL inference failed for snapshot %s",
+                resolved_snapshot,
+                exc_info=True,
+            )
         else:
             for idx, r in enumerate(tabdl_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -652,7 +735,9 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            logger.warning("LR inference failed for snapshot %s", resolved_snapshot, exc_info=True)
+            logger.warning(
+                "LR inference failed for snapshot %s", resolved_snapshot, exc_info=True
+            )
         else:
             for idx, r in enumerate(lr_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -673,7 +758,9 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            logger.warning("XGB inference failed for snapshot %s", resolved_snapshot, exc_info=True)
+            logger.warning(
+                "XGB inference failed for snapshot %s", resolved_snapshot, exc_info=True
+            )
         else:
             for idx, r in enumerate(xgb_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -694,7 +781,11 @@ def score_ensemble(
                 snapshot_id=str(resolved_snapshot),
             )
         except Exception:  # noqa: BLE001
-            logger.warning("LGBM inference failed for snapshot %s", resolved_snapshot, exc_info=True)
+            logger.warning(
+                "LGBM inference failed for snapshot %s",
+                resolved_snapshot,
+                exc_info=True,
+            )
         else:
             for idx, r in enumerate(lgbm_inf.frame.itertuples(index=False)):
                 proj_id = getattr(r, "projection_id", None)
@@ -712,28 +803,44 @@ def score_ensemble(
     _ts_path: Path | str | None = None
     _gating_path: Path | str | None = None
     if _use_db:
-        _ens_path = load_latest_artifact_as_file(engine, "ensemble_weights", suffix=".json")
-        _ts_path = load_latest_artifact_as_file(engine, "thompson_weights", suffix=".json")
-        _gating_path = load_latest_artifact_as_file(engine, "gating_model", suffix=".joblib")
+        _ens_path = load_latest_artifact_as_file(
+            engine, "ensemble_weights", suffix=".json"
+        )
+        _ts_path = load_latest_artifact_as_file(
+            engine, "thompson_weights", suffix=".json"
+        )
+        _gating_path = load_latest_artifact_as_file(
+            engine, "gating_model", suffix=".joblib"
+        )
     else:
-        _ens_path = Path(ensemble_weights_path) if Path(ensemble_weights_path).exists() else None
+        _ens_path = (
+            Path(ensemble_weights_path)
+            if Path(ensemble_weights_path).exists()
+            else None
+        )
         _ts_candidate = Path(models_dir) / "thompson_weights.json"
         _ts_path = _ts_candidate if _ts_candidate.exists() else None
         _gating_candidate = Path(models_dir) / "gating_model.joblib"
         _gating_path = _gating_candidate if _gating_candidate.exists() else None
 
     if _ens_path:
-        ens = _ensure_ensemble_experts(ContextualHedgeEnsembler.load(str(_ens_path)), experts)
+        ens = _ensure_ensemble_experts(
+            ContextualHedgeEnsembler.load(str(_ens_path)), experts
+        )
         if not ens.max_weight:
             ens.max_weight = nn_cap
     else:
-        ens = ContextualHedgeEnsembler(experts=experts, eta=0.2, shrink_to_uniform=0.01, max_weight=nn_cap)
+        ens = ContextualHedgeEnsembler(
+            experts=experts, eta=0.2, shrink_to_uniform=0.01, max_weight=nn_cap
+        )
 
     # Load Thompson Sampling ensemble (optional)
     thompson: ThompsonSamplingEnsembler | None = None
     if _ts_path:
         try:
-            thompson = _ensure_thompson_experts(ThompsonSamplingEnsembler.load(str(_ts_path)), experts)
+            thompson = _ensure_thompson_experts(
+                ThompsonSamplingEnsembler.load(str(_ts_path)), experts
+            )
         except Exception:  # noqa: BLE001
             logger.warning("Failed to load Thompson ensemble", exc_info=True)
 
@@ -753,6 +860,11 @@ def score_ensemble(
             gating=gating,
             experts=experts,
         )
+
+    # Load context-aware priors for shrinkage (daily-refreshed from resolved data)
+    from app.ml.context_prior import get_context_prior, load_context_priors
+
+    _context_priors = load_context_priors()
 
     scored: list[dict[str, Any]] = []
     for row in frame.itertuples(index=False):
@@ -803,12 +915,18 @@ def score_ensemble(
                         {k: np.array([v]) for k, v in avail.items()},
                         n_eff=np.array([n_eff_val or 0.0]),
                     )[0]
-                ctx_tuple = (stat_type, "live" if is_live else "pregame",
-                             "high" if (n_eff_val or 0) >= 15 else "low")
+                ctx_tuple = (
+                    stat_type,
+                    "live" if is_live else "pregame",
+                    "high" if (n_eff_val or 0) >= 15 else "low",
+                )
                 p_hybrid = hybrid.predict(
-                    expert_probs, ctx_tuple,
+                    expert_probs,
+                    ctx_tuple,
                     context_features=ctx_feats,
-                    p_meta=p_meta_val if p_meta_val is not None and math.isfinite(p_meta_val) else None,
+                    p_meta=p_meta_val
+                    if p_meta_val is not None and math.isfinite(p_meta_val)
+                    else None,
                     n_eff=n_eff_val,
                 )
                 if math.isfinite(p_hybrid):
@@ -823,12 +941,18 @@ def score_ensemble(
             p_raw = float(ens.predict(expert_probs, ctx))
         if not math.isfinite(p_raw):
             continue
-        # Shrink toward 0.5 — real sports edges are small.
-        p_final = shrink_probability(p_raw, n_eff=n_eff_val)
+        # Shrink toward context-aware prior in logit space.
+        _line_score = float(getattr(row, "line_score", 0.0) or 0.0)
+        _ctx_prior = get_context_prior(
+            _context_priors, stat_type=stat_type, line_score=_line_score
+        )
+        p_final = shrink_probability(p_raw, n_eff=n_eff_val, context_prior=_ctx_prior)
         pick = "OVER" if p_final >= 0.5 else "UNDER"
         conf = float(confidence_from_probability(p_final))
         status = str(f.get("calibration_status") or "raw") if f else "raw"
-        p_adj = float(_risk_adjusted_confidence(p_over=p_final, n_eff=n_eff_val, status=status))
+        p_adj = float(
+            _risk_adjusted_confidence(p_over=p_final, n_eff=n_eff_val, status=status)
+        )
 
         score = p_adj
         if rank == "confidence":
@@ -840,13 +964,16 @@ def score_ensemble(
             {
                 "projection_id": proj_id,
                 "player_name": str(getattr(row, "player_name", "") or ""),
-                "player_image_url": _optional_str(getattr(row, "player_image_url", None)),
+                "player_image_url": _optional_str(
+                    getattr(row, "player_image_url", None)
+                ),
                 "player_id": str(getattr(row, "player_id", "") or ""),
                 "game_id": getattr(row, "game_id", None),
                 "stat_type": stat_type,
                 "line_score": float(getattr(row, "line_score", 0.0) or 0.0),
                 "pick": pick,
                 "prob_over": p_final,
+                "p_raw": p_raw,
                 "confidence": conf,
                 "rank_score": float(score),
                 "p_forecast_cal": expert_probs["p_forecast_cal"],
@@ -864,8 +991,12 @@ def score_ensemble(
             }
         )
         item = scored[-1]
-        item["edge"] = _compute_edge(p_final, expert_probs, item["conformal_set_size"], n_eff=n_eff_val)
+        item["edge"] = _compute_edge(
+            p_final, expert_probs, item["conformal_set_size"], n_eff=n_eff_val
+        )
         item["grade"] = _grade_from_edge(item["edge"])
+        p_pick = max(p_final, 1.0 - p_final)
+        item["is_publishable"] = bool(p_pick >= PICK_THRESHOLD)
 
     scored.sort(key=lambda item: item["edge"], reverse=True)
     top_picks = scored[:top]

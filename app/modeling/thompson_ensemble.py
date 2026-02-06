@@ -27,8 +27,9 @@ class ThompsonSamplingEnsembler:
     At prediction time, we sample from each posterior and normalize
     the samples to produce a weight simplex.
 
-    Updates use a continuous reward: reward = 1 - |y - p| so that
-    experts who predict closer to the true outcome get more credit.
+    Updates use Bernoulli correctness: reward = 1 if the expert's pick
+    direction matches the outcome, else 0.  This aligns with hit-rate
+    optimization and is consistent with the logloss-based Hedge ensemble.
     """
 
     experts: list[str]
@@ -38,7 +39,9 @@ class ThompsonSamplingEnsembler:
     prior_beta: float = 1.0
     max_weight: dict[str, float] = field(default_factory=dict)
     n_updates: int = 0
-    rng: np.random.RandomState = field(default_factory=lambda: np.random.RandomState(42))
+    rng: np.random.RandomState = field(
+        default_factory=lambda: np.random.RandomState(42)
+    )
 
     def _ensure_ctx(self, ctx_key: str) -> None:
         if ctx_key not in self.alpha:
@@ -100,7 +103,11 @@ class ThompsonSamplingEnsembler:
         deterministic : if True use Beta means; if False sample weights
         """
         ctx_key = _ctx_key(ctx)
-        weights = self._mean_weights(ctx_key) if deterministic else self._sample_weights(ctx_key)
+        weights = (
+            self._mean_weights(ctx_key)
+            if deterministic
+            else self._sample_weights(ctx_key)
+        )
 
         logit_sum = 0.0
         w_sum = 0.0
@@ -124,30 +131,40 @@ class ThompsonSamplingEnsembler:
         y: int,
         ctx: tuple[str, ...],
     ) -> None:
-        """Update Beta posteriors with continuous reward.
+        """Update Beta posteriors with Bernoulli correctness reward.
 
-        reward = 1 - |y - p|  (closer prediction = higher reward)
+        reward = 1 if expert's pick direction matches outcome, else 0.
+        Correct means: (p >= 0.5 and y == 1) or (p < 0.5 and y == 0).
+        This aligns with hit-rate optimization and is consistent with the
+        logloss-based Hedge ensemble.
         alpha += reward, beta += (1 - reward)
         """
         ctx_key = _ctx_key(ctx)
         self._ensure_ctx(ctx_key)
-        y_f = float(y)
 
         for e in self.experts:
             p = expert_probs.get(e)
             if p is None or (isinstance(p, float) and not np.isfinite(p)):
                 continue
             p = float(np.clip(p, EPS, 1.0 - EPS))
-            reward = 1.0 - abs(y_f - p)
+            pick_over = p >= 0.5
+            correct = (pick_over and y == 1) or (not pick_over and y == 0)
+            reward = 1.0 if correct else 0.0
             self.alpha[ctx_key][e] += reward
-            self.beta[ctx_key][e] += (1.0 - reward)
+            self.beta[ctx_key][e] += 1.0 - reward
 
         self.n_updates += 1
 
-    def get_weights(self, ctx: tuple[str, ...], *, deterministic: bool = True) -> dict[str, float]:
+    def get_weights(
+        self, ctx: tuple[str, ...], *, deterministic: bool = True
+    ) -> dict[str, float]:
         """Return current weights for a context (for logging/inspection)."""
         ctx_key = _ctx_key(ctx)
-        return self._mean_weights(ctx_key) if deterministic else self._sample_weights(ctx_key)
+        return (
+            self._mean_weights(ctx_key)
+            if deterministic
+            else self._sample_weights(ctx_key)
+        )
 
     def to_state_dict(self) -> dict[str, Any]:
         return {
@@ -177,12 +194,16 @@ class ThompsonSamplingEnsembler:
     def save(self, path: str) -> None:
         import json as _json
         from pathlib import Path
+
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(_json.dumps(self.to_state_dict(), indent=2), encoding="utf-8")
+        Path(path).write_text(
+            _json.dumps(self.to_state_dict(), indent=2), encoding="utf-8"
+        )
 
     @classmethod
     def load(cls, path: str) -> "ThompsonSamplingEnsembler":
         import json as _json
         from pathlib import Path
+
         state = _json.loads(Path(path).read_text(encoding="utf-8"))
         return cls.from_state_dict(state)

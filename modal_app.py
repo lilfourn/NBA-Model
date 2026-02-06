@@ -21,7 +21,11 @@ SECRET_NAME = os.getenv("MODAL_SECRET_NAME", "nba-stats-env")
 STATE_VOLUME_NAME = os.getenv("MODAL_STATE_VOLUME_NAME", "nba-stats-state")
 SCHEDULE_TIMEZONE = os.getenv("MODAL_SCHEDULE_TIMEZONE", "America/Chicago")
 TRAIN_GPU = os.getenv("MODAL_TRAIN_GPU", "A10")
-ENFORCE_DB_SSLMODE = os.getenv("MODAL_ENFORCE_DB_SSLMODE", "1").strip().lower() not in {"0", "false", "no"}
+ENFORCE_DB_SSLMODE = os.getenv("MODAL_ENFORCE_DB_SSLMODE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 SECURE_SSLMODES = {"require", "verify-ca", "verify-full"}
 
 REMOTE_MODELS_DIR = REMOTE_STATE_ROOT / "models"
@@ -30,7 +34,11 @@ REMOTE_LOGS_DIR = REMOTE_STATE_ROOT / "logs"
 REMOTE_MONITORING_LOG = REMOTE_DATA_DIR / "monitoring" / "prediction_log.csv"
 REMOTE_CALIBRATION_DIR = REMOTE_DATA_DIR / "calibration"
 REMOTE_HEALTH_REPORT = REMOTE_DATA_DIR / "reports" / "model_health.json"
-REMOTE_TRAIN_FRESHNESS_REPORT = REMOTE_DATA_DIR / "reports" / "train_data_freshness.json"
+REMOTE_ABLATION_REPORT = REMOTE_DATA_DIR / "reports" / "ablation_report.json"
+REMOTE_CONTEXT_PRIORS = REMOTE_MODELS_DIR / "context_priors.json"
+REMOTE_TRAIN_FRESHNESS_REPORT = (
+    REMOTE_DATA_DIR / "reports" / "train_data_freshness.json"
+)
 
 app = modal.App(APP_NAME)
 state_volume = modal.Volume.from_name(STATE_VOLUME_NAME, create_if_missing=True)
@@ -51,9 +59,19 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("libgomp1")
     .pip_install_from_requirements(str(REPO_ROOT / "requirements.txt"))
-    .add_local_dir(str(REPO_ROOT / "app"), remote_path=str(REMOTE_PROJECT_ROOT / "app"), copy=True)
-    .add_local_dir(str(REPO_ROOT / "scripts"), remote_path=str(REMOTE_PROJECT_ROOT / "scripts"), copy=True)
-    .add_local_dir(str(REPO_ROOT / "alembic"), remote_path=str(REMOTE_PROJECT_ROOT / "alembic"), copy=True)
+    .add_local_dir(
+        str(REPO_ROOT / "app"), remote_path=str(REMOTE_PROJECT_ROOT / "app"), copy=True
+    )
+    .add_local_dir(
+        str(REPO_ROOT / "scripts"),
+        remote_path=str(REMOTE_PROJECT_ROOT / "scripts"),
+        copy=True,
+    )
+    .add_local_dir(
+        str(REPO_ROOT / "alembic"),
+        remote_path=str(REMOTE_PROJECT_ROOT / "alembic"),
+        copy=True,
+    )
     .add_local_dir(
         str(REPO_ROOT / "data" / "tuning"),
         remote_path=str(REMOTE_PROJECT_ROOT / "data" / "tuning"),
@@ -92,8 +110,12 @@ def _runtime_defaults() -> dict[str, str]:
         "MODELS_DIR": str(REMOTE_MODELS_DIR),
         "ENSEMBLE_WEIGHTS_PATH": str(REMOTE_MODELS_DIR / "ensemble_weights.json"),
         "COLLECTION_LOG_PATH": str(REMOTE_LOGS_DIR / "collection.jsonl"),
-        "PLAYER_NAME_OVERRIDES_PATH": str(REMOTE_PROJECT_ROOT / "data" / "name_overrides.json"),
-        "TEAM_ABBREV_OVERRIDES_PATH": str(REMOTE_PROJECT_ROOT / "data" / "team_abbrev_overrides.json"),
+        "PLAYER_NAME_OVERRIDES_PATH": str(
+            REMOTE_PROJECT_ROOT / "data" / "name_overrides.json"
+        ),
+        "TEAM_ABBREV_OVERRIDES_PATH": str(
+            REMOTE_PROJECT_ROOT / "data" / "team_abbrev_overrides.json"
+        ),
     }
 
 
@@ -235,7 +257,10 @@ if not torch.cuda.is_available():
 
 
 def _latest_calibration_path() -> str | None:
-    candidates = sorted(REMOTE_CALIBRATION_DIR.glob("forecast_calibration_*.json"), key=lambda p: p.stat().st_mtime)
+    candidates = sorted(
+        REMOTE_CALIBRATION_DIR.glob("forecast_calibration_*.json"),
+        key=lambda p: p.stat().st_mtime,
+    )
     if not candidates:
         return None
     return str(candidates[-1])
@@ -402,6 +427,18 @@ def _run_train_pipeline() -> None:
             "3",
         ]
     )
+    # Generate context-aware priors for shrinkage (uses resolved data)
+    _run_cmd(
+        [
+            "-c",
+            (
+                "from app.ml.context_prior import compute_context_priors_from_db, save_context_priors; "
+                "from app.db.engine import get_engine; "
+                f"save_context_priors(compute_context_priors_from_db(get_engine(), days_back=90), '{REMOTE_CONTEXT_PRIORS}')"
+            ),
+        ],
+        allow_fail=True,
+    )
     freshness_rc = _run_cmd(
         [
             "-m",
@@ -533,6 +570,16 @@ def _run_train_pipeline() -> None:
             "--output",
             str(REMOTE_HEALTH_REPORT),
             "--alert-email",
+        ],
+        allow_fail=True,
+    )
+    # Ablation report — compare ensemble components
+    _run_cmd(
+        [
+            "-m",
+            "scripts.ops.ablation_report",
+            "--output",
+            str(REMOTE_ABLATION_REPORT),
         ],
         allow_fail=True,
     )

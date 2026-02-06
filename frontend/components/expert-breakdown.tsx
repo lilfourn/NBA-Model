@@ -49,7 +49,9 @@ export function ExpertBreakdown({ pick }: { pick: ScoredPick }) {
             <span className="font-mono font-semibold">{pick.edge}</span>
             <span className="text-muted-foreground">Grade</span>
             <span className="font-mono font-semibold">{pick.grade}</span>
-            <span className="text-muted-foreground">Ensemble P</span>
+            <span className="text-muted-foreground">P(Success)</span>
+            <span className="font-mono">{(pick.confidence * 100).toFixed(1)}%</span>
+            <span className="text-muted-foreground">P(Over)</span>
             <span className="font-mono">{(pick.prob_over * 100).toFixed(1)}%</span>
             <span className="text-muted-foreground">Conformal</span>
             <span className="font-mono">

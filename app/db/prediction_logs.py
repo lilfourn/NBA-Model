@@ -112,6 +112,7 @@ def append_prediction_rows(engine: Engine, rows: list[dict[str, Any]]) -> int:
                 "line_score": _parse_decimal(row.get("line_score")),
                 "pick": _normalize_pick(row.get("pick"), prob_over=prob_over),
                 "prob_over": prob_over,
+                "p_raw": _parse_decimal(row.get("p_raw")),
                 "confidence": _parse_decimal(row.get("confidence")),
                 "p_forecast_cal": _parse_decimal(row.get("p_forecast_cal")),
                 "p_nn": _parse_decimal(row.get("p_nn")),
@@ -121,8 +122,16 @@ def append_prediction_rows(engine: Engine, rows: list[dict[str, Any]]) -> int:
                 "p_lgbm": _parse_decimal(row.get("p_lgbm")),
                 "rank_score": _parse_decimal(row.get("rank_score")),
                 "n_eff": _parse_decimal(row.get("n_eff")),
-                "mean": _parse_decimal(row.get("mu_hat") if row.get("mu_hat") is not None else row.get("mean")),
-                "std": _parse_decimal(row.get("sigma_hat") if row.get("sigma_hat") is not None else row.get("std")),
+                "mean": _parse_decimal(
+                    row.get("mu_hat")
+                    if row.get("mu_hat") is not None
+                    else row.get("mean")
+                ),
+                "std": _parse_decimal(
+                    row.get("sigma_hat")
+                    if row.get("sigma_hat") is not None
+                    else row.get("std")
+                ),
                 "actual_value": None,
                 "over_label": None,
                 "outcome": None,
@@ -145,18 +154,26 @@ def append_prediction_rows(engine: Engine, rows: list[dict[str, Any]]) -> int:
                 conn.execute(pg_insert(schema.projection_predictions).values(batch))
             inserted += len(batch)
         except Exception as exc:  # noqa: BLE001
-            print(f"[prediction_logs] batch {i//batch_size} failed ({len(batch)} rows): {exc}")
+            print(
+                f"[prediction_logs] batch {i//batch_size} failed ({len(batch)} rows): {exc}"
+            )
             for row in batch:
                 try:
                     with engine.begin() as conn:
-                        conn.execute(pg_insert(schema.projection_predictions).values([row]))
+                        conn.execute(
+                            pg_insert(schema.projection_predictions).values([row])
+                        )
                     inserted += 1
                 except Exception as row_exc:  # noqa: BLE001
-                    print(f"[prediction_logs] row {row.get('projection_id')} failed: {row_exc}")
+                    print(
+                        f"[prediction_logs] row {row.get('projection_id')} failed: {row_exc}"
+                    )
     return inserted
 
 
-def _resolve_over_under_outcome(*, line_score: float, actual_value: float) -> tuple[int, str]:
+def _resolve_over_under_outcome(
+    *, line_score: float, actual_value: float
+) -> tuple[int, str]:
     if actual_value > line_score:
         return 1, "over"
     if actual_value < line_score:
@@ -218,7 +235,9 @@ def resolve_prediction_outcomes(
     candidates = candidates.copy()
     candidates["player_id"] = candidates["player_id"].apply(_normalize_id)
     candidates["game_id"] = candidates["game_id"].apply(_normalize_id)
-    candidates = candidates.dropna(subset=["player_id", "game_id", "stat_type", "line_score"])
+    candidates = candidates.dropna(
+        subset=["player_id", "game_id", "stat_type", "line_score"]
+    )
     if candidates.empty:
         return {
             "candidates": 0,
@@ -229,11 +248,17 @@ def resolve_prediction_outcomes(
             "pushes": 0,
         }
 
-    player_ids = sorted({str(v) for v in candidates["player_id"].dropna().unique().tolist()})
-    game_ids = sorted({str(v) for v in candidates["game_id"].dropna().unique().tolist()})
+    player_ids = sorted(
+        {str(v) for v in candidates["player_id"].dropna().unique().tolist()}
+    )
+    game_ids = sorted(
+        {str(v) for v in candidates["game_id"].dropna().unique().tolist()}
+    )
 
     players = pd.read_sql(
-        text("select id as player_id, name_key, display_name from players where id = any(:ids)"),
+        text(
+            "select id as player_id, name_key, display_name from players where id = any(:ids)"
+        ),
         engine,
         params={"ids": player_ids},
     )
@@ -269,7 +294,9 @@ def resolve_prediction_outcomes(
     players["normalized_name_key"] = players.apply(
         lambda r: normalize_name(r.get("display_name") or r.get("name_key")), axis=1
     )
-    keys = sorted({str(v) for v in players["normalized_name_key"].dropna().unique().tolist()})
+    keys = sorted(
+        {str(v) for v in players["normalized_name_key"].dropna().unique().tolist()}
+    )
     if not keys:
         print(f"[resolve] 0/{len(candidates)} candidates: no player name_keys resolved")
         return {
@@ -283,13 +310,21 @@ def resolve_prediction_outcomes(
         }
 
     nba_players = pd.read_sql(
-        text("select id as nba_player_id, name_key from nba_players where name_key = any(:keys)"),
+        text(
+            "select id as nba_player_id, name_key from nba_players where name_key = any(:keys)"
+        ),
         engine,
         params={"keys": keys},
     )
-    unmatched_names = set(keys) - set(nba_players["name_key"].tolist()) if not nba_players.empty else set(keys)
+    unmatched_names = (
+        set(keys) - set(nba_players["name_key"].tolist())
+        if not nba_players.empty
+        else set(keys)
+    )
     if unmatched_names:
-        print(f"[resolve] {len(unmatched_names)} player name_keys not found in nba_players: {sorted(unmatched_names)[:10]}")
+        print(
+            f"[resolve] {len(unmatched_names)} player name_keys not found in nba_players: {sorted(unmatched_names)[:10]}"
+        )
     if nba_players.empty:
         return {
             "candidates": int(len(candidates)),
@@ -313,15 +348,23 @@ def resolve_prediction_outcomes(
     candidates["player_id"] = candidates["player_id"].astype(str)
     candidates["game_id"] = candidates["game_id"].astype(str)
     games["game_id"] = games["game_id"].astype(str)
-    games["home_team_abbreviation"] = games["home_team_abbreviation"].apply(_normalize_team_abbreviation)
-    games["away_team_abbreviation"] = games["away_team_abbreviation"].apply(_normalize_team_abbreviation)
+    games["home_team_abbreviation"] = games["home_team_abbreviation"].apply(
+        _normalize_team_abbreviation
+    )
+    games["away_team_abbreviation"] = games["away_team_abbreviation"].apply(
+        _normalize_team_abbreviation
+    )
 
-    merged = candidates.merge(mapped, on="player_id", how="left").merge(games, on="game_id", how="left")
+    merged = candidates.merge(mapped, on="player_id", how="left").merge(
+        games, on="game_id", how="left"
+    )
     no_nba_id = int(merged["nba_player_id"].isna().sum())
     no_game_date = int(merged["game_date"].isna().sum())
     merged = merged.dropna(subset=["nba_player_id", "game_date"])
     if merged.empty:
-        print(f"[resolve] 0/{len(candidates)} matched: {no_nba_id} missing nba_player_id, {no_game_date} missing game_date")
+        print(
+            f"[resolve] 0/{len(candidates)} matched: {no_nba_id} missing nba_player_id, {no_game_date} missing game_date"
+        )
         return {
             "candidates": int(len(candidates)),
             "matched_boxscores": 0,
@@ -366,7 +409,9 @@ def resolve_prediction_outcomes(
             how="left",
         )
 
-    nba_game_ids = sorted({str(v) for v in merged["nba_game_id"].dropna().unique().tolist()})
+    nba_game_ids = sorted(
+        {str(v) for v in merged["nba_game_id"].dropna().unique().tolist()}
+    )
     if nba_game_ids:
         game_boxscore_counts = pd.read_sql(
             text(
@@ -383,11 +428,15 @@ def resolve_prediction_outcomes(
             params={"game_ids": nba_game_ids},
         )
     else:
-        game_boxscore_counts = pd.DataFrame(columns=["nba_game_id", "nba_game_boxscore_rows"])
+        game_boxscore_counts = pd.DataFrame(
+            columns=["nba_game_id", "nba_game_boxscore_rows"]
+        )
     if game_boxscore_counts.empty:
         merged["nba_game_boxscore_rows"] = 0
     else:
-        game_boxscore_counts["nba_game_id"] = game_boxscore_counts["nba_game_id"].astype(str)
+        game_boxscore_counts["nba_game_id"] = game_boxscore_counts[
+            "nba_game_id"
+        ].astype(str)
         merged = merged.merge(game_boxscore_counts, on="nba_game_id", how="left")
         merged["nba_game_boxscore_rows"] = pd.to_numeric(
             merged["nba_game_boxscore_rows"], errors="coerce"
@@ -433,7 +482,9 @@ def resolve_prediction_outcomes(
 
     # Ensure consistent str type for merge key.
     merged["nba_player_id"] = merged["nba_player_id"].astype(str)
-    resolved = merged.merge(stats, on=["nba_player_id", "game_date"], how="left", indicator="_stats_merge")
+    resolved = merged.merge(
+        stats, on=["nba_player_id", "game_date"], how="left", indicator="_stats_merge"
+    )
     matched_boxscores = int((resolved["_stats_merge"] == "both").sum())
     resolved["actual_value"] = [
         stat_value_from_row(getattr(row, "stat_type", None), row)
@@ -447,10 +498,14 @@ def resolve_prediction_outcomes(
         resolved["actual_value"].isna()
         & resolved["line_score"].notna()
         & resolved["_stats_merge"].eq("left_only")
-        & pd.to_numeric(resolved["nba_game_boxscore_rows"], errors="coerce").fillna(0).gt(0)
+        & pd.to_numeric(resolved["nba_game_boxscore_rows"], errors="coerce")
+        .fillna(0)
+        .gt(0)
     )
     resolved["forced_push_no_boxscore"] = forced_push_mask
-    resolved.loc[forced_push_mask, "actual_value"] = resolved.loc[forced_push_mask, "line_score"].astype(float)
+    resolved.loc[forced_push_mask, "actual_value"] = resolved.loc[
+        forced_push_mask, "line_score"
+    ].astype(float)
     forced_push_no_boxscore = int(forced_push_mask.sum())
 
     resolved = resolved.dropna(subset=["actual_value", "line_score"])
@@ -477,7 +532,9 @@ def resolve_prediction_outcomes(
             over_label: int | None = None
             outcome = "push"
         else:
-            over_label_raw, outcome = _resolve_over_under_outcome(line_score=line_score, actual_value=actual_value)
+            over_label_raw, outcome = _resolve_over_under_outcome(
+                line_score=line_score, actual_value=actual_value
+            )
             over_label = None if outcome == "push" else int(over_label_raw)
         pick = str(getattr(row, "pick") or "").strip().lower()
         is_correct: bool | None
@@ -485,7 +542,7 @@ def resolve_prediction_outcomes(
             is_correct = None
             pushes += 1
         elif pick in {"over", "under"}:
-            is_correct = (pick == outcome)
+            is_correct = pick == outcome
             if is_correct:
                 wins += 1
             else:

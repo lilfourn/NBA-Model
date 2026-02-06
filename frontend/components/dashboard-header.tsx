@@ -25,8 +25,6 @@ interface DashboardHeaderProps {
   onStatTypeChange: (v: string) => void;
   topN: number;
   onTopNChange: (n: number) => void;
-  rankStrategy: string;
-  onRankStrategyChange: (v: string) => void;
   totalScored: number;
   isLoading: boolean;
   onRerun: () => void;
@@ -44,8 +42,6 @@ export function DashboardHeader({
   onStatTypeChange,
   topN,
   onTopNChange,
-  rankStrategy,
-  onRankStrategyChange,
   totalScored,
   isLoading,
   onRerun,
@@ -118,16 +114,6 @@ export function DashboardHeader({
                 Top {n}
               </SelectItem>
             ))}
-          </SelectContent>
-        </Select>
-
-        <Select value={rankStrategy} onValueChange={onRankStrategyChange}>
-          <SelectTrigger className="w-[150px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="risk_adj">Risk Adjusted</SelectItem>
-            <SelectItem value="confidence">Confidence</SelectItem>
           </SelectContent>
         </Select>
       </div>

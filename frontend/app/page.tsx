@@ -15,7 +15,6 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statTypeFilter, setStatTypeFilter] = useState("all");
   const [topN, setTopN] = useState(50);
-  const [rankStrategy, setRankStrategy] = useState("risk_adj");
   const [totalScored, setTotalScored] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isScoring, setIsScoring] = useState(false);
@@ -37,7 +36,6 @@ export default function Home() {
           snapshot_id:
             selectedSnapshot === "latest" ? undefined : selectedSnapshot,
           top: topN,
-          rank: rankStrategy,
           force,
         });
         setPicks(result.picks);
@@ -50,7 +48,7 @@ export default function Home() {
         setIsScoring(false);
       }
     },
-    [selectedSnapshot, topN, rankStrategy, picks.length],
+    [selectedSnapshot, topN, picks.length],
   );
 
   const handleRerun = useCallback(() => {
@@ -100,8 +98,6 @@ export default function Home() {
           onStatTypeChange={setStatTypeFilter}
           topN={topN}
           onTopNChange={setTopN}
-          rankStrategy={rankStrategy}
-          onRankStrategyChange={setRankStrategy}
           totalScored={totalScored}
           isLoading={isLoading}
           onRerun={handleRerun}

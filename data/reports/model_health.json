@@ -1,0 +1,48 @@
+{
+  "prediction_log_rows": 424,
+  "outcome_rows": 424,
+  "rolling_window": 50,
+  "expert_metrics": {
+    "p_forecast_cal": {
+      "rolling_accuracy": 0.66,
+      "rolling_logloss": 0.6605,
+      "n": 50,
+      "ensemble_weight": 0.268627,
+      "alert_eligible": true
+    },
+    "p_nn": {
+      "rolling_accuracy": 0.76,
+      "rolling_logloss": 0.6575,
+      "n": 50,
+      "ensemble_weight": 0.426794,
+      "alert_eligible": true
+    },
+    "p_lr": {
+      "rolling_accuracy": 0.64,
+      "rolling_logloss": 0.8339,
+      "n": 50,
+      "ensemble_weight": 0.0,
+      "alert_eligible": false
+    },
+    "p_final": {
+      "rolling_accuracy": 0.66,
+      "rolling_logloss": 0.6572,
+      "n": 50,
+      "ensemble_weight": 1.0,
+      "alert_eligible": true
+    }
+  },
+  "alerts": [],
+  "suppressed_alerts": [
+    {
+      "type": "high_logloss",
+      "expert": "p_lr",
+      "value": 0.8339,
+      "threshold": 0.75,
+      "message": "p_lr rolling logloss 0.834 > 0.75",
+      "suppression_reason": "expert not present in active ensemble"
+    }
+  ],
+  "alert_count": 0,
+  "suppressed_alert_count": 1
+}

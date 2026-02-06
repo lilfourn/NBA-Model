@@ -85,37 +85,60 @@ async def expert_comparison() -> dict:
     return {"experts": experts}
 
 
+CANONICAL_VIEW = "vw_resolved_picks_canonical"
+
+_CANONICAL_SQL = f"""
+select
+    id::text as prediction_id,
+    decision_time, created_at,
+    over_label, outcome, is_correct,
+    p_final, p_raw,
+    p_forecast_cal, p_nn, p_tabdl, p_lr, p_xgb, p_lgbm,
+    stat_type, rank_score, n_eff
+from {CANONICAL_VIEW}
+order by coalesce(decision_time, created_at) asc, created_at asc, id asc
+"""
+
+_FALLBACK_SQL = """
+select
+    id::text as prediction_id,
+    coalesce(decision_time, created_at) as decision_time,
+    created_at,
+    over_label, outcome, is_correct,
+    prob_over as p_final, p_raw,
+    p_forecast_cal, p_nn,
+    coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl,
+    p_lr, p_xgb, p_lgbm,
+    stat_type, rank_score, n_eff
+from projection_predictions
+order by coalesce(decision_time, created_at) asc, created_at asc, id asc
+"""
+
+
 def _load_prediction_records_sync() -> pd.DataFrame | None:
     try:
         engine = get_engine()
-        df = pd.read_sql(
-            text(
-                """
-                select
-                    id::text as prediction_id,
-                    coalesce(decision_time, created_at) as decision_time,
-                    created_at,
-                    over_label,
-                    outcome,
-                    is_correct,
-                    prob_over as p_final,
-                    p_forecast_cal,
-                    p_nn,
-                    coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl,
-                    p_lr,
-                    p_xgb,
-                    p_lgbm
-                from projection_predictions
-                order by coalesce(decision_time, created_at) asc, created_at asc, id asc
-                """
-            ),
-            engine,
-        )
+        try:
+            df = pd.read_sql(text(_CANONICAL_SQL), engine)
+        except Exception:  # noqa: BLE001
+            df = pd.read_sql(text(_FALLBACK_SQL), engine)
         if not df.empty:
             return df
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+def _load_model_health_sync(*, days_back: int, min_alert_weight: float) -> dict:
+    from scripts.ops.monitor_model_health import build_health_report
+
+    engine = get_engine()
+    return build_health_report(
+        engine,
+        days_back=int(max(1, days_back)),
+        ensemble_weights_path=str(ENSEMBLE_WEIGHTS_PATH),
+        min_alert_weight=float(max(0.0, min(1.0, min_alert_weight))),
+    )
 
 
 @router.get("/hit-rate")
@@ -157,9 +180,13 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
         ).astype(float)
         resolved.loc[resolved["p_final"].isna(), "ensemble_correct"] = float("nan")
         if "is_correct" in resolved.columns:
-            resolved["is_correct"] = pd.to_numeric(resolved["is_correct"], errors="coerce")
+            resolved["is_correct"] = pd.to_numeric(
+                resolved["is_correct"], errors="coerce"
+            )
             mask = resolved["is_correct"].notna() & resolved["p_final"].notna()
-            resolved.loc[mask, "ensemble_correct"] = resolved.loc[mask, "is_correct"].astype(float)
+            resolved.loc[mask, "ensemble_correct"] = resolved.loc[
+                mask, "is_correct"
+            ].astype(float)
     else:
         resolved["ensemble_correct"] = float("nan")
 
@@ -174,7 +201,11 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
         else:
             resolved[f"{col}_correct"] = float("nan")
     total_resolved = len(resolved)
-    overall_hit_rate = float(resolved["ensemble_correct"].mean()) if total_resolved > 0 and "ensemble_correct" in resolved.columns else None
+    overall_hit_rate = (
+        float(resolved["ensemble_correct"].mean())
+        if total_resolved > 0 and "ensemble_correct" in resolved.columns
+        else None
+    )
 
     scored = resolved.dropna(subset=["ensemble_correct"]).copy()
     if len(scored) < 2:
@@ -189,13 +220,19 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
     scored = scored.reset_index(drop=True)
 
     rolling_data = []
-    ens_rolling = scored["ensemble_correct"].rolling(window, min_periods=max(5, window // 4)).mean()
+    ens_rolling = (
+        scored["ensemble_correct"]
+        .rolling(window, min_periods=max(5, window // 4))
+        .mean()
+    )
 
     expert_rolling = {}
     for col in EXPERT_COLS:
         c = f"{col}_correct"
         if c in scored.columns:
-            expert_rolling[col] = scored[c].rolling(window, min_periods=max(5, window // 4)).mean()
+            expert_rolling[col] = (
+                scored[c].rolling(window, min_periods=max(5, window // 4)).mean()
+            )
 
     date_col = None
     for candidate in ["decision_time", "created_at"]:
@@ -206,12 +243,21 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
     for i in range(len(scored)):
         if pd.isna(ens_rolling.iloc[i]):
             continue
-        point: dict = {"index": i, "ensemble_hit_rate": _safe_float(ens_rolling.iloc[i])}
+        point: dict = {
+            "index": i,
+            "ensemble_hit_rate": _safe_float(ens_rolling.iloc[i]),
+        }
         for col in EXPERT_COLS:
             val = expert_rolling.get(col)
-            point[f"{col}_hit_rate"] = _safe_float(val.iloc[i]) if val is not None else None
+            point[f"{col}_hit_rate"] = (
+                _safe_float(val.iloc[i]) if val is not None else None
+            )
         if date_col:
-            point["date"] = str(scored[date_col].iloc[i]) if pd.notna(scored[date_col].iloc[i]) else None
+            point["date"] = (
+                str(scored[date_col].iloc[i])
+                if pd.notna(scored[date_col].iloc[i])
+                else None
+            )
         rolling_data.append(point)
 
     # Downsample if too many points
@@ -219,13 +265,50 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
         step = max(1, len(rolling_data) // 200)
         rolling_data = rolling_data[::step]
 
+    # Tier metrics: scored vs actionable
+    import numpy as _np
+
+    actionable_threshold = 0.57
+    p_arr = (
+        scored["p_final"].to_numpy(dtype=float) if "p_final" in scored.columns else None
+    )
+    published_hit_rate = None
+    published_n = 0
+    coverage = 0.0
+    if p_arr is not None and len(p_arr) > 0:
+        p_pick = _np.maximum(p_arr, 1.0 - p_arr)
+        act_mask = p_pick >= actionable_threshold
+        published_n = int(act_mask.sum())
+        if published_n > 0:
+            published_hit_rate = _safe_float(
+                float(scored.loc[act_mask, "ensemble_correct"].mean())
+            )
+        coverage = round(published_n / len(scored), 4)
+
     return {
         "total_predictions": total_predictions,
         "total_resolved": total_resolved,
         "total_scored": int(len(scored)),
         "overall_hit_rate": _safe_float(overall_hit_rate),
+        "published_hit_rate": published_hit_rate,
+        "published_n": published_n,
+        "coverage": coverage,
+        "actionable_threshold": actionable_threshold,
         "rolling": rolling_data,
     }
+
+
+@router.get("/model-health")
+async def model_health(
+    days_back: int = Query(90, ge=7, le=365),
+    min_alert_weight: float = Query(0.03, ge=0.0, le=1.0),
+) -> dict:
+    """Return live model-health metrics computed directly from DB state."""
+    return await asyncio.to_thread(
+        _load_model_health_sync,
+        days_back=days_back,
+        min_alert_weight=min_alert_weight,
+    )
 
 
 @router.get("/calibration")
@@ -233,7 +316,11 @@ async def calibration() -> dict:
     if not CALIBRATION_DIR.exists():
         return {"stat_types": []}
 
-    report_files = sorted(CALIBRATION_DIR.glob("*_report*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    report_files = sorted(
+        CALIBRATION_DIR.glob("*_report*.csv"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not report_files:
         return {"stat_types": []}
 
@@ -246,8 +333,12 @@ async def calibration() -> dict:
         result.append(
             {
                 "stat_type": str(row.get("stat_type", "")),
-                "train_rows": int(row["train_rows"]) if pd.notna(row.get("train_rows")) else None,
-                "val_rows": int(row["val_rows"]) if pd.notna(row.get("val_rows")) else None,
+                "train_rows": int(row["train_rows"])
+                if pd.notna(row.get("train_rows"))
+                else None,
+                "val_rows": int(row["val_rows"])
+                if pd.notna(row.get("val_rows"))
+                else None,
                 "nll_before": _safe_float(row.get("nll_before")),
                 "nll_after": _safe_float(row.get("nll_after_param")),
                 "crps_before": _safe_float(row.get("crps_before")),
@@ -315,19 +406,22 @@ async def confidence_dist(bins: int = Query(20, ge=5, le=50)) -> dict:
         df["over_label"] = pd.to_numeric(df["over_label"], errors="coerce")
         if "outcome" in df.columns:
             df = df[df["outcome"].isin(["over", "under"]) | df["outcome"].isna()].copy()
-        df["hit"] = (
-            ((df["p_final"] >= 0.5) & (df["over_label"] == 1))
-            | ((df["p_final"] < 0.5) & (df["over_label"] == 0))
+        df["hit"] = ((df["p_final"] >= 0.5) & (df["over_label"] == 1)) | (
+            (df["p_final"] < 0.5) & (df["over_label"] == 0)
         )
         if "is_correct" in df.columns:
             df["is_correct"] = pd.to_numeric(df["is_correct"], errors="coerce")
-            df.loc[df["is_correct"].notna(), "hit"] = df.loc[df["is_correct"].notna(), "is_correct"].astype(bool)
+            df.loc[df["is_correct"].notna(), "hit"] = df.loc[
+                df["is_correct"].notna(), "is_correct"
+            ].astype(bool)
 
     bin_edges = [0.5 + i * (0.5 / bins) for i in range(bins + 1)]
     result = []
     for i in range(bins):
         lo, hi = bin_edges[i], bin_edges[i + 1]
-        mask = (df["confidence"] >= lo) & (df["confidence"] < hi if i < bins - 1 else df["confidence"] <= hi)
+        mask = (df["confidence"] >= lo) & (
+            df["confidence"] < hi if i < bins - 1 else df["confidence"] <= hi
+        )
         subset = df[mask]
         entry: dict = {
             "range_start": round(lo, 4),
@@ -337,8 +431,12 @@ async def confidence_dist(bins: int = Query(20, ge=5, le=50)) -> dict:
         if has_outcomes:
             resolved = subset.dropna(subset=["over_label"])
             entry["hits"] = int(resolved["hit"].sum()) if not resolved.empty else 0
-            entry["misses"] = int(len(resolved) - resolved["hit"].sum()) if not resolved.empty else 0
-            entry["hit_rate"] = _safe_float(resolved["hit"].mean()) if not resolved.empty else None
+            entry["misses"] = (
+                int(len(resolved) - resolved["hit"].sum()) if not resolved.empty else 0
+            )
+            entry["hit_rate"] = (
+                _safe_float(resolved["hit"].mean()) if not resolved.empty else None
+            )
         else:
             entry["hits"] = None
             entry["misses"] = None
@@ -412,7 +510,9 @@ async def mixing_weights() -> dict:
 
     latest = entries[-1]
     return {
-        "mixing": latest.get("mixing", {"thompson": 0.34, "gating": 0.33, "meta_learner": 0.33}),
+        "mixing": latest.get(
+            "mixing", {"thompson": 0.34, "gating": 0.33, "meta_learner": 0.33}
+        ),
         "hedge_avg": latest.get("hedge_avg", {}),
         "thompson_avg": latest.get("thompson_avg", {}),
         "timestamp": latest.get("timestamp"),

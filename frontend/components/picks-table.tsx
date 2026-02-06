@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 
 type SortKey =
   | "edge"
-  | "prob_over"
+  | "confidence"
   | "line_score"
   | "player_name"
   | "stat_type";
@@ -173,12 +173,12 @@ export function PicksTable({
               Line
             </HeaderCell>
             <HeaderCell
-              column="prob_over"
+              column="confidence"
               sortKey={sortKey}
               sortDir={sortDir}
               onSort={handleSort}
             >
-              Prediction
+              Confidence
             </HeaderCell>
             <HeaderCell
               column="edge"
@@ -254,7 +254,7 @@ export function PicksTable({
                         {pick.pick}
                       </Badge>
                       <span className="font-mono text-sm text-muted-foreground">
-                        {(pick.prob_over * 100).toFixed(0)}%
+                        {(pick.confidence * 100).toFixed(0)}%
                       </span>
                     </div>
                   </TableCell>

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import scripts.ops.monitor_model_health as monitor
 
 from scripts.ops.monitor_model_health import _check_ensemble_weights
 from scripts.ops.monitor_model_health import _check_rolling_metrics
@@ -21,7 +22,9 @@ def test_check_ensemble_weights_handles_context_nested_format(tmp_path: Path) ->
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     alerts = _check_ensemble_weights(str(path))
-    assert any(a.get("type") == "weight_collapse" and a.get("expert") == "p_nn" for a in alerts)
+    assert any(
+        a.get("type") == "weight_collapse" and a.get("expert") == "p_nn" for a in alerts
+    )
 
 
 def test_check_ensemble_weights_handles_flat_format(tmp_path: Path) -> None:
@@ -57,3 +60,93 @@ def test_check_rolling_metrics_prefers_is_correct_for_p_final() -> None:
     result = _check_rolling_metrics(df)
     p_final_metrics = result["metrics"]["p_final"]
     assert p_final_metrics["rolling_accuracy"] == 1.0
+
+    # Verify new diagnostic fields exist
+    assert "base_rate" in p_final_metrics
+    assert "inversion_test" in p_final_metrics
+    assert "confusion_matrix" in p_final_metrics
+    inv = p_final_metrics["inversion_test"]
+    assert "accuracy" in inv
+    assert "accuracy_inverted" in inv
+    assert "logloss" in inv
+    assert "logloss_inverted" in inv
+    cm = p_final_metrics["confusion_matrix"]
+    assert set(cm.keys()) == {"tp", "fp", "tn", "fn"}
+
+    # Base rate should be returned at the top level of result
+    assert "base_rate" in result
+    assert result["base_rate"] is not None
+
+
+def test_inversion_test_detects_inverted_predictions() -> None:
+    """When p_final is consistently wrong, inversion test should flag it."""
+    rows = []
+    for idx in range(ROLLING_WINDOW):
+        # p_final always predicts OVER (>0.5) but label is always UNDER (0)
+        rows.append(
+            {
+                "p_final": 0.85,
+                "p_forecast_cal": 0.85,
+                "p_nn": 0.85,
+                "p_tabdl": 0.85,
+                "p_lr": 0.85,
+                "p_xgb": 0.85,
+                "p_lgbm": 0.85,
+                "over_label": 0,
+            }
+        )
+    df = pd.DataFrame(rows)
+
+    result = _check_rolling_metrics(df)
+    inv = result["metrics"]["p_final"]["inversion_test"]
+    assert inv["accuracy"] == 0.0
+    assert inv["accuracy_inverted"] == 1.0
+    assert inv["inversion_improves_accuracy"] is True
+    assert inv["inversion_improves_logloss"] is True
+
+
+def test_build_health_report_has_live_metadata(monkeypatch) -> None:
+    now = pd.Timestamp("2026-02-06T12:00:00Z")
+    rows = []
+    for idx in range(ROLLING_WINDOW):
+        rows.append(
+            {
+                "p_final": 0.9,
+                "p_forecast_cal": 0.8,
+                "p_nn": 0.8,
+                "p_tabdl": 0.8,
+                "p_lr": 0.8,
+                "p_xgb": 0.8,
+                "p_lgbm": 0.8,
+                "over_label": 1,
+                "is_correct": 1.0,
+                "event_time": now + pd.Timedelta(minutes=idx),
+            }
+        )
+    df = pd.DataFrame(rows)
+
+    monkeypatch.setattr(
+        monitor,
+        "_load_resolved_predictions",
+        lambda _engine, days_back=90: df,
+    )
+    monkeypatch.setattr(
+        monitor,
+        "_load_ensemble_mean_weights",
+        lambda _path: {"p_forecast_cal": 0.5, "p_nn": 0.5},
+    )
+    monkeypatch.setattr(monitor, "_check_ensemble_weights", lambda _path: [])
+
+    report = monitor.build_health_report(
+        engine=object(),
+        days_back=90,
+        ensemble_weights_path="models/ensemble_weights.json",
+    )
+
+    assert report["data_source"] == "live_db"
+    assert report["generated_at"]
+    assert report["latest_event_time"]
+    assert report["prediction_log_rows"] == ROLLING_WINDOW
+    assert "p_final" in report["expert_metrics"]
+    assert "base_rate" in report
+    assert report["base_rate"] is not None

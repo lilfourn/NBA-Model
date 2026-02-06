@@ -1,6 +1,18 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, LargeBinary, MetaData, Numeric, Text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    MetaData,
+    Numeric,
+    Text,
+)
 from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
@@ -152,7 +164,12 @@ durations = Table(
 projections = Table(
     "projections",
     metadata,
-    Column("snapshot_id", UUID(as_uuid=True), ForeignKey("snapshots.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "snapshot_id",
+        UUID(as_uuid=True),
+        ForeignKey("snapshots.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
     Column("projection_id", Text, primary_key=True),
     Column("league_id", Text, nullable=True),
     Column("player_id", Text, nullable=True),
@@ -296,7 +313,11 @@ projection_predictions = Table(
     "projection_predictions",
     metadata,
     Column("id", UUID(as_uuid=True), primary_key=True),
-    Column("snapshot_id", UUID(as_uuid=True), ForeignKey("snapshots.id", ondelete="CASCADE")),
+    Column(
+        "snapshot_id",
+        UUID(as_uuid=True),
+        ForeignKey("snapshots.id", ondelete="CASCADE"),
+    ),
     Column("projection_id", Text, nullable=False),
     Column("model_version", Text, nullable=False),
     Column("decision_time", DateTime(timezone=True), nullable=True),
@@ -306,6 +327,7 @@ projection_predictions = Table(
     Column("line_score", Numeric, nullable=True),
     Column("pick", Text, nullable=False),
     Column("prob_over", Numeric, nullable=True),
+    Column("p_raw", Numeric, nullable=True),
     Column("confidence", Numeric, nullable=True),
     Column("p_forecast_cal", Numeric, nullable=True),
     Column("p_nn", Numeric, nullable=True),
@@ -348,7 +370,11 @@ Index("idx_player_game_logs_game_date", player_game_logs.c.game_date)
 Index("idx_prediction_snapshot_id", projection_predictions.c.snapshot_id)
 Index("idx_prediction_decision_time", projection_predictions.c.decision_time)
 Index("idx_prediction_resolved_at", projection_predictions.c.resolved_at)
-Index("idx_prediction_player_game", projection_predictions.c.player_id, projection_predictions.c.game_id)
+Index(
+    "idx_prediction_player_game",
+    projection_predictions.c.player_id,
+    projection_predictions.c.game_id,
+)
 Index("idx_players_name_key", players.c.name_key)
 Index("idx_projection_features_snapshot_id", projection_features.c.snapshot_id)
 Index("idx_projection_features_player_id", projection_features.c.player_id)
@@ -356,14 +382,22 @@ Index("idx_projection_features_game_id", projection_features.c.game_id)
 Index("idx_nba_players_name_key", nba_players.c.name_key)
 Index("idx_nba_player_stats_game_id", nba_player_game_stats.c.game_id)
 Index("idx_nba_player_stats_player_id", nba_player_game_stats.c.player_id)
-Index("idx_nba_player_stats_player_game", nba_player_game_stats.c.player_id, nba_player_game_stats.c.game_id)
+Index(
+    "idx_nba_player_stats_player_game",
+    nba_player_game_stats.c.player_id,
+    nba_player_game_stats.c.game_id,
+)
 Index(
     "idx_nba_games_date_home_away",
     nba_games.c.game_date,
     nba_games.c.home_team_abbreviation,
     nba_games.c.away_team_abbreviation,
 )
-Index("idx_projections_snapshot_odds_type", projections.c.snapshot_id, projections.c.odds_type)
+Index(
+    "idx_projections_snapshot_odds_type",
+    projections.c.snapshot_id,
+    projections.c.odds_type,
+)
 
 model_artifacts = Table(
     "model_artifacts",
@@ -375,4 +409,8 @@ model_artifacts = Table(
     Column("artifact_format", Text, nullable=False),
     Column("size_bytes", Integer, nullable=False),
 )
-Index("idx_model_artifacts_name_created", model_artifacts.c.model_name, model_artifacts.c.created_at.desc())
+Index(
+    "idx_model_artifacts_name_created",
+    model_artifacts.c.model_name,
+    model_artifacts.c.created_at.desc(),
+)
