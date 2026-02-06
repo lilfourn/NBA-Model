@@ -30,7 +30,10 @@ FROM base AS prod
 COPY --from=deps /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 COPY app ./app
-COPY gunicorn_conf.py ./
+COPY alembic ./alembic
+COPY alembic.ini gunicorn_conf.py start.sh ./
+COPY data/name_overrides.json data/team_abbrev_overrides.json ./data/
+RUN chmod +x start.sh
 USER app
 EXPOSE 8000
-CMD ["gunicorn", "app.main:app", "--config", "gunicorn_conf.py"]
+CMD ["./start.sh"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -47,15 +48,23 @@ class TrainResult:
 def _load_tuned_params() -> dict[str, Any]:
     """Load Optuna-tuned params merged with required static params."""
     params = dict(XGBOOST_PARAMS)
-    path = Path("data/tuning/best_params_xgb.json")
-    if not path.exists():
-        return params
+    candidates: list[Path] = []
+    tuning_dir = os.getenv("TUNING_DIR", "").strip()
+    if tuning_dir:
+        candidates.append(Path(tuning_dir) / "best_params_xgb.json")
+    candidates.append(Path("data/tuning/best_params_xgb.json"))
+    candidates.append(Path("/state/data/tuning/best_params_xgb.json"))
+
     import json
-    try:
-        tuned = json.loads(path.read_text(encoding="utf-8"))
-        params.update(tuned)
-    except Exception:  # noqa: BLE001
-        pass
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            tuned = json.loads(path.read_text(encoding="utf-8"))
+            params.update(tuned)
+            break
+        except Exception:  # noqa: BLE001
+            continue
     # Ensure required static params are always present
     params.setdefault("eval_metric", "logloss")
     params.setdefault("early_stopping_rounds", 30)
@@ -170,6 +179,12 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
         artifact["isotonic"] = calibrator_data
     joblib.dump(artifact, model_path)
 
+    try:
+        from app.ml.artifact_store import upload_file
+        upload_file(engine, model_name="xgb", file_path=model_path)
+    except Exception:  # noqa: BLE001
+        pass
+
     run_id = uuid4()
     with engine.begin() as conn:
         conn.execute(
@@ -180,7 +195,7 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
                     "model_name": "xgboost",
                     "train_rows": int(len(df_used)),
                     "metrics": metrics,
-                    "params": XGBOOST_PARAMS,
+                    "params": params,
                     "artifact_path": str(model_path),
                 }
             )

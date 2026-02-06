@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -115,14 +116,22 @@ def _temperature_scale(logits: np.ndarray, labels: np.ndarray) -> tuple[float, f
 
 def _load_tuned_params() -> dict[str, Any]:
     """Load Optuna-tuned NN params if available."""
-    path = Path("data/tuning/best_params_nn.json")
-    if not path.exists():
-        return {}
+    candidates: list[Path] = []
+    tuning_dir = os.getenv("TUNING_DIR", "").strip()
+    if tuning_dir:
+        candidates.append(Path(tuning_dir) / "best_params_nn.json")
+    candidates.append(Path("data/tuning/best_params_nn.json"))
+    candidates.append(Path("/state/data/tuning/best_params_nn.json"))
+
     import json
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return {}
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+    return {}
 
 
 def train_nn(
@@ -272,6 +281,12 @@ def train_nn(
     if calibrator_data:
         payload["isotonic"] = calibrator_data
     torch.save(payload, model_path)
+
+    try:
+        from app.ml.artifact_store import upload_file
+        upload_file(engine, model_name="nn_gru_attention", file_path=model_path)
+    except Exception:  # noqa: BLE001
+        pass
 
     run_id = uuid4()
     with engine.begin() as conn:

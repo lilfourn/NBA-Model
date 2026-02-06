@@ -142,6 +142,12 @@ def train_meta_learner(
     )
 
     if engine is not None:
+        try:
+            from app.ml.artifact_store import upload_file
+            upload_file(engine, model_name="meta_learner", file_path=model_path)
+        except Exception:  # noqa: BLE001
+            pass
+
         run_id = uuid4()
         with engine.begin() as conn:
             conn.execute(

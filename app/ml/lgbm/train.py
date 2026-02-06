@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -87,15 +88,23 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
 def _load_tuned_params() -> dict[str, Any]:
     """Load Optuna-tuned params merged with required static params."""
     params = dict(LGBM_PARAMS)
-    path = Path("data/tuning/best_params_lgbm.json")
-    if not path.exists():
-        return params
+    candidates: list[Path] = []
+    tuning_dir = os.getenv("TUNING_DIR", "").strip()
+    if tuning_dir:
+        candidates.append(Path(tuning_dir) / "best_params_lgbm.json")
+    candidates.append(Path("data/tuning/best_params_lgbm.json"))
+    candidates.append(Path("/state/data/tuning/best_params_lgbm.json"))
+
     import json
-    try:
-        tuned = json.loads(path.read_text(encoding="utf-8"))
-        params.update(tuned)
-    except Exception:  # noqa: BLE001
-        pass
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            tuned = json.loads(path.read_text(encoding="utf-8"))
+            params.update(tuned)
+            break
+        except Exception:  # noqa: BLE001
+            continue
     params.setdefault("verbosity", -1)
     params.setdefault("random_state", 42)
     return params
@@ -162,6 +171,12 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
     if calibrator_data:
         artifact["isotonic"] = calibrator_data
     joblib.dump(artifact, model_path)
+
+    try:
+        from app.ml.artifact_store import upload_file
+        upload_file(engine, model_name="lgbm", file_path=model_path)
+    except Exception:  # noqa: BLE001
+        pass
 
     run_id = uuid4()
     with engine.begin() as conn:

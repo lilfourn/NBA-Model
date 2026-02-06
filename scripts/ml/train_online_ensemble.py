@@ -33,6 +33,29 @@ def _parse_timestamp(series: pd.Series) -> pd.Series:
     out = pd.to_datetime(series, errors="coerce", utc=True)
     return out.fillna(pd.NaT)
 
+
+def _nn_weight_cap_for_latest_auc(engine) -> dict[str, float]:
+    """Set NN cap tiers from latest NN ROC AUC to avoid persistent underweighting."""
+    try:
+        auc = pd.read_sql(
+            text(
+                "select (metrics->>'roc_auc')::float as roc_auc "
+                "from model_runs "
+                "where model_name = 'nn_gru_attention' and metrics->>'roc_auc' is not null "
+                "order by created_at desc limit 1"
+            ),
+            engine,
+        )
+        if not auc.empty and pd.notna(auc.iloc[0]["roc_auc"]):
+            value = float(auc.iloc[0]["roc_auc"])
+            if value >= 0.60:
+                return {}
+            if value >= 0.55:
+                return {"p_nn": 0.20}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"p_nn": 0.10}
+
 def _normalize_id(value) -> str | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -409,8 +432,13 @@ def main() -> None:
         return
 
     joined = joined.sort_values("decision_time_parsed")
-    ens = ContextualHedgeEnsembler(experts=list(experts), eta=float(args.eta), shrink_to_uniform=float(args.shrink))
-    nn_cap = {"p_nn": 0.10}
+    nn_cap = _nn_weight_cap_for_latest_auc(engine)
+    ens = ContextualHedgeEnsembler(
+        experts=list(experts),
+        eta=float(args.eta),
+        shrink_to_uniform=float(args.shrink),
+        max_weight=nn_cap,
+    )
     ts = ThompsonSamplingEnsembler(experts=list(experts), max_weight=nn_cap)
 
     losses: dict[str, float] = {name: 0.0 for name in ["ensemble", *experts]}
@@ -490,6 +518,18 @@ def main() -> None:
             print(f"Gating model training failed: {e}")
     else:
         print(f"Not enough data for gating model ({len(gating_labels)} < 30 rows).")
+
+    # Upload ensemble artifacts to DB for Railway API
+    try:
+        from app.ml.artifact_store import upload_file
+        upload_file(engine, model_name="ensemble_weights", file_path=out_path)
+        upload_file(engine, model_name="thompson_weights", file_path=ts_path)
+        gm_path_check = out_path.parent / "gating_model.joblib"
+        if gm_path_check.exists():
+            upload_file(engine, model_name="gating_model", file_path=gm_path_check)
+        print("Uploaded ensemble artifacts to DB.")
+    except Exception as e:  # noqa: BLE001
+        print(f"DB artifact upload failed (non-fatal): {e}")
 
     # Log weight history for visualization
     try:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, MetaData, Numeric, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, LargeBinary, MetaData, Numeric, Text
 from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
@@ -363,3 +363,15 @@ Index(
     nba_games.c.away_team_abbreviation,
 )
 Index("idx_projections_snapshot_odds_type", projections.c.snapshot_id, projections.c.odds_type)
+
+model_artifacts = Table(
+    "model_artifacts",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("model_name", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("artifact_data", LargeBinary, nullable=False),
+    Column("artifact_format", Text, nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+)
+Index("idx_model_artifacts_name_created", model_artifacts.c.model_name, model_artifacts.c.created_at.desc())

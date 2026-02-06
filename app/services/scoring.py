@@ -14,6 +14,8 @@ import torch as _torch
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.core.config import settings
+from app.ml.artifact_store import load_latest_artifact_as_file
 from app.ml.artifacts import load_joblib_artifact, latest_compatible_joblib_path
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs
@@ -315,6 +317,27 @@ def _risk_adjusted_confidence(*, p_over: float, n_eff: float | None, status: str
     return 0.5 + rho * (p_pick - 0.5)
 
 
+def _nn_weight_cap_for_latest_auc(engine: Engine) -> dict[str, float]:
+    try:
+        with engine.connect() as conn:
+            nn_auc = conn.execute(
+                text(
+                    "select (metrics->>'roc_auc')::float from model_runs "
+                    "where model_name = 'nn_gru_attention' and metrics->>'roc_auc' is not null "
+                    "order by created_at desc limit 1"
+                )
+            ).scalar()
+            if nn_auc is not None:
+                value = float(nn_auc)
+                if value >= 0.60:
+                    return {}
+                if value >= 0.55:
+                    return {"p_nn": 0.20}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"p_nn": 0.10}
+
+
 def _is_supported_stat_type(stat_type: str) -> bool:
     if not stat_type:
         return False
@@ -450,12 +473,21 @@ def score_ensemble(
             )
 
     calibration_path = _auto_calibration_path(calibration_path)
-    models_path = Path(models_dir)
-    nn_path = latest_compatible_checkpoint(models_path, "nn_gru_attention_*.pt")
-    lr_path = latest_compatible_joblib_path(models_path, "baseline_logreg_*.joblib")
-    xgb_path = latest_compatible_joblib_path(models_path, "xgb_*.joblib")
-    lgbm_path = latest_compatible_joblib_path(models_path, "lgbm_*.joblib")
-    meta_path = latest_compatible_joblib_path(models_path, "meta_learner_*.joblib")
+
+    _use_db = settings.model_source.lower() == "db"
+    if _use_db:
+        nn_path = load_latest_artifact_as_file(engine, "nn_gru_attention", suffix=".pt")
+        lr_path = load_latest_artifact_as_file(engine, "baseline_logreg", suffix=".joblib")
+        xgb_path = load_latest_artifact_as_file(engine, "xgb", suffix=".joblib")
+        lgbm_path = load_latest_artifact_as_file(engine, "lgbm", suffix=".joblib")
+        meta_path = load_latest_artifact_as_file(engine, "meta_learner", suffix=".joblib")
+    else:
+        models_path = Path(models_dir)
+        nn_path = latest_compatible_checkpoint(models_path, "nn_gru_attention_*.pt")
+        lr_path = latest_compatible_joblib_path(models_path, "baseline_logreg_*.joblib")
+        xgb_path = latest_compatible_joblib_path(models_path, "xgb_*.joblib")
+        lgbm_path = latest_compatible_joblib_path(models_path, "lgbm_*.joblib")
+        meta_path = latest_compatible_joblib_path(models_path, "meta_learner_*.joblib")
 
     # Load conformal calibrators from saved models
     conformal_cals: list[ConformalCalibrator] = []
@@ -598,42 +630,42 @@ def score_ensemble(
                 p_lgbm[str(proj_id)] = prob
 
     experts = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]
-    # Conditional NN cap: uncap if latest NN AUC > 0.55
-    nn_cap = {"p_nn": 0.10}
-    try:
-        with engine.connect() as conn:
-            nn_auc = conn.execute(text(
-                "select (metrics->>'roc_auc')::float from model_runs "
-                "where model_name = 'nn_gru_attention' and metrics->>'roc_auc' is not null "
-                "order by created_at desc limit 1"
-            )).scalar()
-            if nn_auc is not None and nn_auc > 0.55:
-                nn_cap = {}  # Uncap NN
-    except Exception:  # noqa: BLE001
-        pass
-    if Path(ensemble_weights_path).exists():
-        ens = ContextualHedgeEnsembler.load(ensemble_weights_path)
-        # Ensure loaded ensemble respects NN cap even if saved without it
+    nn_cap = _nn_weight_cap_for_latest_auc(engine)
+
+    _ens_path: Path | str | None = None
+    _ts_path: Path | str | None = None
+    _gating_path: Path | str | None = None
+    if _use_db:
+        _ens_path = load_latest_artifact_as_file(engine, "ensemble_weights", suffix=".json")
+        _ts_path = load_latest_artifact_as_file(engine, "thompson_weights", suffix=".json")
+        _gating_path = load_latest_artifact_as_file(engine, "gating_model", suffix=".joblib")
+    else:
+        _ens_path = Path(ensemble_weights_path) if Path(ensemble_weights_path).exists() else None
+        _ts_candidate = Path(models_dir) / "thompson_weights.json"
+        _ts_path = _ts_candidate if _ts_candidate.exists() else None
+        _gating_candidate = Path(models_dir) / "gating_model.joblib"
+        _gating_path = _gating_candidate if _gating_candidate.exists() else None
+
+    if _ens_path:
+        ens = ContextualHedgeEnsembler.load(str(_ens_path))
         if not ens.max_weight:
             ens.max_weight = nn_cap
     else:
         ens = ContextualHedgeEnsembler(experts=experts, eta=0.2, shrink_to_uniform=0.01, max_weight=nn_cap)
 
     # Load Thompson Sampling ensemble (optional)
-    thompson_path = Path(models_dir) / "thompson_weights.json"
     thompson: ThompsonSamplingEnsembler | None = None
-    if thompson_path.exists():
+    if _ts_path:
         try:
-            thompson = ThompsonSamplingEnsembler.load(str(thompson_path))
+            thompson = ThompsonSamplingEnsembler.load(str(_ts_path))
         except Exception:  # noqa: BLE001
             pass
 
     # Load Gating Model (optional)
-    gating_path = Path(models_dir) / "gating_model.joblib"
     gating: GatingModel | None = None
-    if gating_path.exists():
+    if _gating_path:
         try:
-            gating = GatingModel.load(str(gating_path))
+            gating = GatingModel.load(str(_gating_path))
         except Exception:  # noqa: BLE001
             pass
 

@@ -205,6 +205,12 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
         artifact["isotonic"] = calibrator_data
     joblib.dump(artifact, model_path)
 
+    try:
+        from app.ml.artifact_store import upload_file
+        upload_file(engine, model_name="baseline_logreg", file_path=model_path)
+    except Exception:  # noqa: BLE001
+        pass
+
     run_id = uuid4()
     with engine.begin() as conn:
         conn.execute(

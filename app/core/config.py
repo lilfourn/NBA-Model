@@ -116,6 +116,9 @@ class Settings(BaseSettings):
 
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
 
+    # Model artifact source: "fs" for local filesystem (default), "db" for Postgres
+    model_source: str = Field(default="fs", validation_alias="MODEL_SOURCE")
+
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
