@@ -1000,6 +1000,42 @@ def score_ensemble(
             "Ensure context_priors artifact is uploaded to DB."
         )
 
+    # --- Batch-level expert debiasing ---
+    # If all experts systematically lean one direction, shift them toward 0.5
+    # while preserving relative ordering (which IS the real signal).
+    _DEBIAS_THRESHOLD = 0.05  # trigger when batch mean deviates >5pp from 0.5
+    _all_expert_vals: list[float] = []
+    for _row in frame.itertuples(index=False):
+        _pid = str(getattr(_row, "projection_id", ""))
+        _st = str(getattr(_row, "stat_type", "") or "")
+        if not _st or not _pid or _st in EXCLUDED_STAT_TYPES:
+            continue
+        _f = forecast_map.get(_pid) or {}
+        for _v in [
+            _safe_prob(_f.get("p_forecast_cal")),
+            _safe_prob(p_nn.get(_pid)),
+            _safe_prob(p_tabdl.get(_pid)),
+            _safe_prob(p_lr.get(_pid)),
+            _safe_prob(p_xgb.get(_pid)),
+            _safe_prob(p_lgbm.get(_pid)),
+        ]:
+            if _v is not None:
+                _all_expert_vals.append(_v)
+
+    _expert_shift = 0.0
+    if _all_expert_vals:
+        _batch_mean = sum(_all_expert_vals) / len(_all_expert_vals)
+        if abs(_batch_mean - 0.5) > _DEBIAS_THRESHOLD:
+            _expert_shift = 0.5 - _batch_mean
+            logger.info(
+                "Expert debiasing: batch mean P(over)=%.3f, applying shift=%+.3f "
+                "(%d expert values across %d props)",
+                _batch_mean,
+                _expert_shift,
+                len(_all_expert_vals),
+                len(frame),
+            )
+
     scored: list[dict[str, Any]] = []
     for row in frame.itertuples(index=False):
         proj_id = str(getattr(row, "projection_id", ""))
@@ -1020,6 +1056,11 @@ def score_ensemble(
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
+        # Apply batch-level debiasing shift
+        if _expert_shift != 0.0:
+            for _ek in expert_probs:
+                if expert_probs[_ek] is not None:
+                    expert_probs[_ek] = max(0.01, min(0.99, expert_probs[_ek] + _expert_shift))
 
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
@@ -1113,10 +1154,20 @@ def score_ensemble(
 
         conformal_size = _conformal_set_size(conformal_by_expert, expert_probs)
         p_pick = max(p_final, 1.0 - p_final)
+        # Expert diversity: require at least 1 expert on each side of 0.5.
+        # If all experts agree on one direction, the model is just echoing
+        # the base rate, not providing a differentiated signal.
+        _avail_eps = [v for v in expert_probs.values() if v is not None]
+        _n_over_exp = sum(1 for v in _avail_eps if v >= 0.5)
+        _n_under_exp = sum(1 for v in _avail_eps if v < 0.5)
+        _has_diversity = min(_n_over_exp, _n_under_exp) >= 1
         # Publishable: meets confidence threshold, has narrow conformal set,
-        # has minimum edge, and is not a prior-only stat type
+        # has minimum edge, has expert diversity, and is not a prior-only stat type
         is_publishable = bool(
-            p_pick >= PICK_THRESHOLD and conformal_size != 2 and not _is_prior_only
+            p_pick >= PICK_THRESHOLD
+            and conformal_size != 2
+            and not _is_prior_only
+            and _has_diversity
         )
 
         scored.append(
@@ -1159,6 +1210,23 @@ def score_ensemble(
         if item["edge"] < MIN_EDGE:
             is_publishable = False
         item["is_publishable"] = is_publishable
+
+    # --- Spread-based abstention ---
+    # If all p_final values are in a narrow band, the model lacks discrimination
+    # and is just predicting the base rate for every prop. Abstain entirely.
+    _MIN_SPREAD = 0.10
+    if scored:
+        _all_p_final = [item["prob_over"] for item in scored]
+        _p_spread = max(_all_p_final) - min(_all_p_final)
+        if _p_spread < _MIN_SPREAD:
+            logger.warning(
+                "Model discrimination too low: p_final spread=%.3f (min=%.3f). "
+                "Marking all picks non-publishable.",
+                _p_spread,
+                _MIN_SPREAD,
+            )
+            for item in scored:
+                item["is_publishable"] = False
 
     scored.sort(key=lambda item: item["edge"], reverse=True)
     # Enforce abstain policy: only return publishable picks in the top-N

@@ -29,13 +29,13 @@ GLOBAL_FALLBACK_PRIOR = 0.50
 # Clamp priors to prevent extreme bias from dominating model predictions.
 # Without clamping, stat types like Defensive Rebounds (0.21) or 3-PT Made
 # (0.32) pull every prediction heavily toward UNDER via shrinkage.
-PRIOR_FLOOR = 0.35
-PRIOR_CEILING = 0.65
+PRIOR_FLOOR = 0.42
+PRIOR_CEILING = 0.58
 
 # Centering weight: blend empirical priors partially toward 0.5 to reduce
 # directional bias while retaining some market signal.
-# A weight of 0.3 means 30% pull toward 0.5 (e.g. 0.36 -> 0.408).
-PRIOR_CENTER_WEIGHT = 0.3
+# A weight of 0.6 means 60% pull toward 0.5 (e.g. 0.38 -> 0.452).
+PRIOR_CENTER_WEIGHT = 0.6
 
 # Minimum rows per bucket before falling back to parent level
 MIN_BUCKET_ROWS = 30
