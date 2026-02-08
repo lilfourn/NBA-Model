@@ -88,6 +88,11 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
         )
 
     X, y, df_used = prepare_tree_features(df)
+    X, y, df_used = (
+        X.reset_index(drop=True),
+        y.reset_index(drop=True),
+        df_used.reset_index(drop=True),
+    )
     if df_used.empty:
         raise RuntimeError("Not enough training data after cleaning.")
     if y.nunique() < 2:
