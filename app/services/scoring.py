@@ -981,12 +981,21 @@ def score_ensemble(
         _context_priors = load_context_priors()
         _stat_calibrator = StatTypeCalibrator.load()
 
-    # Inversion correction system DISABLED — architecturally unsound.
-    # Flipping expert probs before ensemble components trained on non-inverted
-    # distributions produces unpredictable outputs.  Additionally, the
-    # model_health.json artifact was never uploaded to the DB, so inversions
-    # were silently skipped in production anyway.
-    # See: app/ml/inversion_corrections.py for the module (kept for future redesign).
+    # --- Inversion corrections ---
+    # Some experts are anti-predictive (accuracy < 50%, improves when flipped).
+    # Load flags from model_health report and flip those experts' probabilities.
+    from app.ml.inversion_corrections import load_inversion_flags
+
+    _inversion_flags: dict[str, bool] = {}
+    try:
+        _inversion_flags = load_inversion_flags(engine if _use_db else None)
+        if _inversion_flags:
+            logger.info(
+                "Inversion corrections active for: %s",
+                ", ".join(k for k, v in _inversion_flags.items() if v),
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to load inversion flags", exc_info=True)
 
     # --- Artifact availability diagnostic ---
     _n_stat_cals = len(_stat_calibrator.calibrators) if _stat_calibrator else 0
@@ -1019,6 +1028,15 @@ def score_ensemble(
             "Ensure context_priors artifact is uploaded to DB."
         )
 
+    def _apply_inversions(ep: dict[str, float | None]) -> dict[str, float | None]:
+        """Flip expert probs where inversion flags are set."""
+        if not _inversion_flags:
+            return ep
+        for k in ep:
+            if ep[k] is not None and _inversion_flags.get(k):
+                ep[k] = 1.0 - ep[k]
+        return ep
+
     # --- Batch-level expert debiasing ---
     # If all experts systematically lean one direction, shift them toward 0.5
     # while preserving relative ordering (which IS the real signal).
@@ -1030,14 +1048,16 @@ def score_ensemble(
         if not _st or not _pid or _st in EXCLUDED_STAT_TYPES:
             continue
         _f = forecast_map.get(_pid) or {}
-        for _v in [
-            _safe_prob(_f.get("p_forecast_cal")),
-            _safe_prob(p_nn.get(_pid)),
-            _safe_prob(p_tabdl.get(_pid)),
-            _safe_prob(p_lr.get(_pid)),
-            _safe_prob(p_xgb.get(_pid)),
-            _safe_prob(p_lgbm.get(_pid)),
-        ]:
+        _ep = {
+            "p_forecast_cal": _safe_prob(_f.get("p_forecast_cal")),
+            "p_nn": _safe_prob(p_nn.get(_pid)),
+            "p_tabdl": _safe_prob(p_tabdl.get(_pid)),
+            "p_lr": _safe_prob(p_lr.get(_pid)),
+            "p_xgb": _safe_prob(p_xgb.get(_pid)),
+            "p_lgbm": _safe_prob(p_lgbm.get(_pid)),
+        }
+        _ep = _apply_inversions(_ep)
+        for _v in _ep.values():
             if _v is not None:
                 _all_expert_vals.append(_v)
 
@@ -1075,6 +1095,8 @@ def score_ensemble(
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
+        # Apply inversion corrections for anti-predictive experts
+        expert_probs = _apply_inversions(expert_probs)
         # Apply batch-level debiasing shift
         if _expert_shift != 0.0:
             for _ek in expert_probs:
