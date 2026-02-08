@@ -502,7 +502,7 @@ def _run_train_pipeline() -> None:
             str(REMOTE_MODELS_DIR),
         ]
     )
-    # Await GPU jobs before OOF/Meta (they need all expert models)
+    # Await GPU jobs before OOF generation (needs all expert models)
     print("[modal] Waiting for NN GPU training to complete...")
     try:
         nn_handle.get()
@@ -516,57 +516,12 @@ def _run_train_pipeline() -> None:
     except Exception as exc:
         print(f"[modal] WARNING: TabDL GPU training failed: {exc}")
     oof_path = REMOTE_DATA_DIR / "oof_predictions.csv"
-    oof_rc = _run_cmd(
+    _run_cmd(
         [
             "-m",
             "scripts.ml.generate_oof_predictions",
             "--output",
             str(oof_path),
-        ],
-        allow_fail=True,
-    )
-    if oof_rc != 0:
-        print("[modal] WARNING: OOF generation failed — skipping meta-learner training")
-    else:
-        _run_cmd(
-            [
-                "-m",
-                "scripts.ml.train_meta_learner",
-                "--oof-path",
-                str(oof_path),
-                "--models-dir",
-                str(REMOTE_MODELS_DIR),
-            ],
-            allow_fail=True,
-        )
-    _run_cmd(
-        [
-            "-m",
-            "scripts.ml.train_online_ensemble",
-            "--source",
-            "db",
-            "--days-back",
-            "90",
-            "--log-path",
-            str(REMOTE_MONITORING_LOG),
-            "--out",
-            str(REMOTE_MODELS_DIR / "ensemble_weights.json"),
-        ]
-    )
-    _run_cmd(
-        [
-            "-m",
-            "scripts.ml.optimize_expert_weights",
-            "--days-back",
-            "120",
-            "--report-out",
-            str(REMOTE_DATA_DIR / "reports" / "expert_weights_optimized.json"),
-            "--ensemble-out",
-            str(REMOTE_MODELS_DIR / "ensemble_weights_optimized.json"),
-            "--current-ensemble",
-            str(REMOTE_MODELS_DIR / "ensemble_weights.json"),
-            "--apply",
-            "--upload-db",
         ],
         allow_fail=True,
     )
@@ -580,20 +535,6 @@ def _run_train_pipeline() -> None:
             str(REMOTE_HEALTH_REPORT),
             "--alert-email",
             "--upload-db",
-        ],
-        allow_fail=True,
-    )
-    # Train hybrid ensemble mixing weights
-    _run_cmd(
-        [
-            "-m",
-            "scripts.ml.train_hybrid_mixing",
-            "--days-back",
-            "90",
-            "--models-dir",
-            str(REMOTE_MODELS_DIR),
-            "--output",
-            str(REMOTE_MODELS_DIR / "hybrid_mixing.json"),
         ],
         allow_fail=True,
     )
@@ -765,34 +706,19 @@ def calibrate_weekly() -> None:
     _run_weekly_calibration()
 
 
-@app.function(timeout=60 * 60, max_containers=1, **shared_kwargs)
-def run_collect_now() -> None:
-    _run_collect_pipeline()
-
-
-@app.function(timeout=8 * 60 * 60, max_containers=1, **shared_kwargs)
-def run_train_now() -> None:
-    _run_train_pipeline()
-
-
-@app.function(timeout=4 * 60 * 60, max_containers=1, **shared_kwargs)
-def run_calibrate_now() -> None:
-    _run_weekly_calibration()
-
-
 @app.local_entrypoint()
 def collect_now() -> None:
-    run_collect_now.remote()
+    collect_every_3h.remote()
 
 
 @app.local_entrypoint()
 def train_now() -> None:
-    run_train_now.remote()
+    train_daily.remote()
 
 
 @app.local_entrypoint()
 def calibrate_now() -> None:
-    run_calibrate_now.remote()
+    calibrate_weekly.remote()
 
 
 @app.local_entrypoint()
