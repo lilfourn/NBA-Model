@@ -132,7 +132,7 @@ def _train_lr(X_train, y_train, X_test):
     return pipe.predict_proba(X_test)[:, 1]
 
 
-def _train_xgb(X_train, y_train, X_test):
+def _train_xgb(X_train, y_train, X_test, y_test):
     from xgboost import XGBClassifier
 
     model = XGBClassifier(
@@ -153,12 +153,7 @@ def _train_xgb(X_train, y_train, X_test):
     model.fit(
         X_train,
         y_train,
-        eval_set=[
-            (
-                X_test,
-                y_train.iloc[: len(X_test)] if len(X_test) <= len(y_train) else y_train,
-            )
-        ],
+        eval_set=[(X_test, y_test)],
         verbose=False,
     )
     return model.predict_proba(X_test)[:, 1]
@@ -249,6 +244,7 @@ def main() -> None:
         X_train = X.iloc[train_idx]
         y_train = y.iloc[train_idx]
         X_test = X.iloc[test_idx]
+        y_test = y.iloc[test_idx]
 
         print(
             f"  Fold {fold_idx}/{len(folds)}: train={len(train_idx)} test={len(test_idx)}"
@@ -260,7 +256,7 @@ def main() -> None:
             print(f"    LR failed: {e}")
 
         try:
-            oof_xgb[test_idx] = _train_xgb(X_train, y_train, X_test)
+            oof_xgb[test_idx] = _train_xgb(X_train, y_train, X_test, y_test)
         except Exception as e:
             print(f"    XGB failed: {e}")
 

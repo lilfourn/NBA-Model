@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
@@ -56,6 +55,7 @@ def _load_resolved(engine, days_back: int) -> pd.DataFrame:
                 if table == "vw_resolved_picks_canonical"
                 else "WHERE outcome IN ('over', 'under') AND over_label IS NOT NULL"
             )
+            p_expr = "p_final" if table == "vw_resolved_picks_canonical" else "prob_over"
             df = pd.read_sql(
                 text(
                     f"""
@@ -64,7 +64,7 @@ def _load_resolved(engine, days_back: int) -> pd.DataFrame:
                         p_forecast_cal, p_nn,
                         coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl,
                         p_lr, p_xgb, p_lgbm,
-                        prob_over as p_final_logged,
+                        {p_expr} as p_final_logged,
                         coalesce(details->>'is_live', 'false') as is_live,
                         coalesce(decision_time, created_at) as event_time
                     FROM {table}

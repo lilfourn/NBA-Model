@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Iterable
 
 import numpy as np
@@ -15,9 +15,10 @@ from app.ml.dataset import (
     _load_team_abbrev_overrides,
 )
 from app.ml.feature_engineering import (
+    build_league_means_timeline,
     build_logs_by_player,
     compute_history_features,
-    compute_league_means,
+    league_mean_before_cutoff,
     load_gamelogs_frame,
     prepare_gamelogs,
     slice_player_logs_before_cutoff,
@@ -98,7 +99,7 @@ def _cutoff_time(fetched_at: datetime | None, start_time: datetime | None) -> da
 def build_history_features_for_row(
     row: Any,
     player_logs: pd.DataFrame,
-    league_means: dict[str, float],
+    league_mean: float,
     *,
     L: int = 10,
     min_std: float = 1e-6,
@@ -112,13 +113,12 @@ def build_history_features_for_row(
     if isinstance(cutoff, pd.Timestamp) and cutoff.tz is not None:
         cutoff = cutoff.tz_convert(None)
 
-    stat_key = normalize_stat_type(stat_type)
     stats = compute_history_features(
         stat_type=stat_type,
         line_score=line_score,
         cutoff=cutoff,
         player_logs=player_logs,
-        league_mean=float(league_means.get(str(stat_key or ""), 0.0)),
+        league_mean=float(league_mean),
         logs_prefiltered=logs_prefiltered,
     )
 
@@ -261,7 +261,7 @@ def build_training_data(
         )
 
     frame = frame.copy()
-    frame = frame[frame["combo"].isna() | (frame["combo"] == False)]
+    frame = frame[frame["combo"].isna() | frame["combo"].eq(False)]
     name_overrides = _load_name_overrides()
     frame = _apply_name_overrides(frame, name_overrides)
     frame = _map_nba_player_ids(frame, engine)
@@ -341,7 +341,7 @@ def build_training_data(
     ]
 
     gamelogs = prepare_gamelogs(load_gamelogs(engine))
-    league_means = compute_league_means(gamelogs)
+    league_means_timeline = build_league_means_timeline(gamelogs)
     logs_by_player, log_dates_by_player = build_logs_by_player(gamelogs)
     empty_logs = gamelogs.iloc[0:0]
     empty_dates = np.array([], dtype="datetime64[ns]")
@@ -372,13 +372,20 @@ def build_training_data(
     for row in frame.itertuples(index=False):
         player_key = str(getattr(row, "nba_player_id", ""))
         cutoff = getattr(row, "cutoff_time", None)
+        stat_key = normalize_stat_type(str(getattr(row, "stat_type", "") or ""))
+        league_mean = league_mean_before_cutoff(
+            league_means_timeline,
+            str(stat_key or ""),
+            cutoff,
+            default=0.0,
+        )
         logs = logs_by_player.get(player_key, empty_logs)
         log_dates = log_dates_by_player.get(player_key, empty_dates)
         logs = slice_player_logs_before_cutoff(logs, log_dates, cutoff)
         extras, seq = build_history_features_for_row(
             row,
             logs,
-            league_means,
+            league_mean,
             L=history_len,
             logs_prefiltered=True,
         )
@@ -525,7 +532,7 @@ def build_inference_data(
     ]
 
     gamelogs = prepare_gamelogs(load_gamelogs(engine))
-    league_means = compute_league_means(gamelogs)
+    league_means_timeline = build_league_means_timeline(gamelogs)
     logs_by_player, log_dates_by_player = build_logs_by_player(gamelogs)
     empty_logs = gamelogs.iloc[0:0]
     empty_dates = np.array([], dtype="datetime64[ns]")
@@ -582,13 +589,20 @@ def build_inference_data(
     for row in frame.itertuples(index=False):
         player_key = str(getattr(row, "nba_player_id", ""))
         cutoff = getattr(row, "cutoff_time", None)
+        stat_key = normalize_stat_type(str(getattr(row, "stat_type", "") or ""))
+        league_mean = league_mean_before_cutoff(
+            league_means_timeline,
+            str(stat_key or ""),
+            cutoff,
+            default=0.0,
+        )
         logs = logs_by_player.get(player_key, empty_logs)
         log_dates = log_dates_by_player.get(player_key, empty_dates)
         logs = slice_player_logs_before_cutoff(logs, log_dates, cutoff)
         extras, seq = build_history_features_for_row(
             row,
             logs,
-            league_means,
+            league_mean,
             L=history_len,
             logs_prefiltered=True,
         )

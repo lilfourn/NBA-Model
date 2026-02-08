@@ -24,7 +24,18 @@ import numpy as np
 PRIORS_PATH = Path(os.environ.get("MODELS_DIR", "models")) / "context_priors.json"
 
 # Global fallback when no resolved data is available
-GLOBAL_FALLBACK_PRIOR = 0.42
+GLOBAL_FALLBACK_PRIOR = 0.50
+
+# Clamp priors to prevent extreme bias from dominating model predictions.
+# Without clamping, stat types like Defensive Rebounds (0.21) or 3-PT Made
+# (0.32) pull every prediction heavily toward UNDER via shrinkage.
+PRIOR_FLOOR = 0.35
+PRIOR_CEILING = 0.65
+
+# Centering weight: blend empirical priors partially toward 0.5 to reduce
+# directional bias while retaining some market signal.
+# A weight of 0.3 means 30% pull toward 0.5 (e.g. 0.36 -> 0.408).
+PRIOR_CENTER_WEIGHT = 0.3
 
 # Minimum rows per bucket before falling back to parent level
 MIN_BUCKET_ROWS = 30
@@ -176,6 +187,20 @@ def load_context_priors(path: Path | str | None = None) -> dict[str, Any]:
         return _empty_priors()
 
 
+def _center_prior(raw_prior: float) -> float:
+    """Partially debias a raw empirical prior toward 0.5.
+
+    Softens extreme priors while retaining directional signal.
+    Example: 0.36 (Rebounds) -> ~0.408, 0.48 (Points) -> ~0.494.
+    """
+    return raw_prior + PRIOR_CENTER_WEIGHT * (0.5 - raw_prior)
+
+
+def _clamp_prior(prior: float) -> float:
+    """Clamp a prior to [PRIOR_FLOOR, PRIOR_CEILING] to prevent extreme bias."""
+    return max(PRIOR_FLOOR, min(PRIOR_CEILING, prior))
+
+
 def get_context_prior(
     priors: dict[str, Any],
     stat_type: str | None = None,
@@ -184,21 +209,26 @@ def get_context_prior(
     """Look up the context-aware prior for a given stat_type and line_score.
 
     Falls back: bucket -> stat_type -> global.
+
+    Applies two debiasing steps to prevent extreme priors from overwhelming
+    model predictions:
+      1. Centering: blend the raw prior partially toward 0.5
+      2. Clamping: enforce [PRIOR_FLOOR, PRIOR_CEILING] bounds
     """
     global_prior = priors.get("global_prior", GLOBAL_FALLBACK_PRIOR)
 
     if not stat_type:
-        return global_prior
+        return _clamp_prior(_center_prior(global_prior))
 
     stat_type_prior = priors.get("stat_type_priors", {}).get(stat_type, global_prior)
 
     if line_score is None or line_score != line_score:  # NaN check
-        return stat_type_prior
+        return _clamp_prior(_center_prior(stat_type_prior))
 
     # Determine bucket
     edges = priors.get("bucket_edges", {}).get(stat_type)
     if not edges:
-        return stat_type_prior
+        return _clamp_prior(_center_prior(stat_type_prior))
 
     labels = _bucket_labels(len(edges) + 1)
     bucket_label = labels[-1]  # default to highest bucket
@@ -208,4 +238,5 @@ def get_context_prior(
             break
 
     key = f"{stat_type}__{bucket_label}"
-    return priors.get("bucket_priors", {}).get(key, stat_type_prior)
+    raw = priors.get("bucket_priors", {}).get(key, stat_type_prior)
+    return _clamp_prior(_center_prior(raw))

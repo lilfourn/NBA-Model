@@ -102,12 +102,16 @@ def _temperature_scale(logits: np.ndarray, labels: np.ndarray) -> tuple[float, f
     """
     eps = 1e-6
     # Search a wide but reasonable range; >1 typically reduces overconfidence.
-    candidates = np.concatenate([np.linspace(0.5, 3.0, 26), np.linspace(3.0, 10.0, 15)[1:]])
+    candidates = np.concatenate(
+        [np.linspace(0.5, 3.0, 26), np.linspace(3.0, 10.0, 15)[1:]]
+    )
     best_T = 1.0
     best_loss = float("inf")
     for T in candidates:
         p = 1.0 / (1.0 + np.exp(-(logits / float(T))))
-        loss = -float(np.mean(labels * np.log(p + eps) + (1 - labels) * np.log(1 - p + eps)))
+        loss = -float(
+            np.mean(labels * np.log(p + eps) + (1 - labels) * np.log(1 - p + eps))
+        )
         if loss < best_loss:
             best_loss = loss
             best_T = float(T)
@@ -124,6 +128,7 @@ def _load_tuned_params() -> dict[str, Any]:
     candidates.append(Path("/state/data/tuning/best_params_nn.json"))
 
     import json
+
     for path in candidates:
         if not path.exists():
             continue
@@ -159,7 +164,9 @@ def train_nn(
 
     data: TrainingData = build_training_data(engine=engine, history_len=history_len)
     if data.frame.empty:
-        raise RuntimeError("No training data available. Did you load NBA stats and build features?")
+        raise RuntimeError(
+            "No training data available. Did you load NBA stats and build features?"
+        )
 
     train_idx, test_idx = _time_split(data.frame)
     train_ds = NNDataset(
@@ -196,6 +203,7 @@ def train_nn(
 
     # Warm-start: try to load weights from previous best checkpoint
     from app.ml.nn.infer import latest_compatible_checkpoint as _find_prev
+
     prev_ckpt = _find_prev(model_dir)
     if prev_ckpt is not None:
         try:
@@ -203,14 +211,18 @@ def train_nn(
             model.load_state_dict(prev_payload["state_dict"], strict=False)
             print(f"Warm-start: loaded weights from {prev_ckpt.name}")
         except Exception:  # noqa: BLE001
-            print("Warm-start: previous checkpoint incompatible, training from scratch.")
+            print(
+                "Warm-start: previous checkpoint incompatible, training from scratch."
+            )
 
     model = model.to(device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=1e-6
+    )
 
     best_loss = float("inf")
     best_state = None
@@ -221,11 +233,15 @@ def train_nn(
         scheduler.step()
         probs, labels = _predict(model, test_loader, device)
         eps = 1e-6
-        logloss = -np.mean(labels * np.log(probs + eps) + (1 - labels) * np.log(1 - probs + eps))
+        logloss = -np.mean(
+            labels * np.log(probs + eps) + (1 - labels) * np.log(1 - probs + eps)
+        )
 
         if logloss < best_loss - 1e-4:
             best_loss = logloss
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_state = {
+                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+            }
             bad_epochs = 0
         else:
             bad_epochs += 1
@@ -256,7 +272,9 @@ def train_nn(
 
     metrics = {
         "accuracy": float(accuracy_score(labels, preds)),
-        "roc_auc": float(roc_auc_score(labels, probs)) if len(np.unique(labels)) > 1 else None,
+        "roc_auc": float(roc_auc_score(labels, probs))
+        if len(np.unique(labels)) > 1
+        else None,
         "logloss": float(best_loss),
         "temperature": float(temperature),
         "logloss_cal": float(logloss_cal),
@@ -276,7 +294,15 @@ def train_nn(
         "history_len": history_len,
         "cat_emb_dims": cat_emb_dims,
         "temperature": float(temperature),
-        "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
+        "conformal": {
+            "alpha": conformal.alpha,
+            "q_hat": conformal.q_hat,
+            "n_cal": conformal.n_cal,
+        },
+        # Architecture hyper-parameters so inference can reconstruct the model
+        "mlp_hidden": mlp_hidden,
+        "seq_hidden": seq_hidden,
+        "dropout": dropout,
     }
     if calibrator_data:
         payload["isotonic"] = calibrator_data
@@ -284,6 +310,7 @@ def train_nn(
 
     try:
         from app.ml.artifact_store import upload_file
+
         upload_file(engine, model_name="nn_gru_attention", file_path=model_path)
         print(f"Uploaded nn_gru_attention artifact to DB ({model_path})")
     except Exception as exc:  # noqa: BLE001

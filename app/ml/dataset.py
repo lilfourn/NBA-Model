@@ -13,9 +13,10 @@ from sqlalchemy.engine import Engine
 from app.core.config import settings
 from app.utils.names import normalize_name
 from app.ml.feature_engineering import (
+    build_league_means_timeline,
     build_logs_by_player,
     compute_history_features,
-    compute_league_means,
+    league_mean_before_cutoff,
     load_gamelogs_frame,
     prepare_gamelogs,
     slice_player_logs_before_cutoff,
@@ -354,7 +355,7 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     frame = _map_nba_player_ids(frame, engine)
     frame = _resolve_nba_game_ids(frame, engine)
     gamelogs = prepare_gamelogs(_load_gamelogs(engine))
-    league_means = compute_league_means(gamelogs)
+    league_means_timeline = build_league_means_timeline(gamelogs)
     logs_by_player, log_dates_by_player = build_logs_by_player(gamelogs)
     empty_logs = gamelogs.iloc[0:0]
     empty_dates = np.array([], dtype="datetime64[ns]")
@@ -436,6 +437,12 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         stat_key = normalize_stat_type(stat_type)
         line_score = getattr(row, "line_score", None)
         cutoff = getattr(row, "cutoff_time", None)
+        league_mean = league_mean_before_cutoff(
+            league_means_timeline,
+            str(stat_key or ""),
+            cutoff,
+            default=0.0,
+        )
         player_key = str(nba_player_id)
         logs = logs_by_player.get(player_key, empty_logs)
         log_dates = log_dates_by_player.get(player_key, empty_dates)
@@ -445,7 +452,7 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
             line_score=float(line_score) if line_score is not None else 0.0,
             cutoff=cutoff,
             player_logs=logs,
-            league_mean=float(league_means.get(str(stat_key or ""), 0.0)),
+            league_mean=float(league_mean),
             logs_prefiltered=True,
         )
 

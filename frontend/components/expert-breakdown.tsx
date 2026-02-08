@@ -35,6 +35,7 @@ export function ExpertBreakdown({ pick }: { pick: ScoredPick }) {
           </p>
           <Bar label="Forecast" value={pick.p_forecast_cal} />
           <Bar label="Neural Net" value={pick.p_nn} />
+          <Bar label="TabDL" value={pick.p_tabdl} />
           <Bar label="LogReg" value={pick.p_lr} />
           <Bar label="XGBoost" value={pick.p_xgb} />
           <Bar label="LightGBM" value={pick.p_lgbm} />

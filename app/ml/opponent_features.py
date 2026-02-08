@@ -182,6 +182,30 @@ def build_opponent_defensive_ranks(
     return ranks
 
 
+def _build_rank_map_as_of(
+    *,
+    opp_def_avgs: dict[str, pd.DataFrame],
+    rank_col: str,
+    game_date_ts: pd.Timestamp,
+) -> dict[str, int]:
+    """Build per-team rank map using only rows strictly before game_date."""
+    vals: dict[str, float] = {}
+    for team_abbr, team_df in opp_def_avgs.items():
+        if team_df.empty or rank_col not in team_df.columns:
+            continue
+        hist = team_df[team_df["game_date"] < game_date_ts]
+        if hist.empty:
+            continue
+        latest = hist.iloc[-1]
+        value = latest.get(rank_col)
+        if pd.notna(value):
+            vals[str(team_abbr)] = float(value)
+    if not vals:
+        return {}
+    sorted_teams = sorted(vals.keys(), key=lambda t: vals[t])
+    return {team: idx + 1 for idx, team in enumerate(sorted_teams)}
+
+
 def compute_opponent_features(
     *,
     player_team_abbr: str | None,
@@ -210,6 +234,7 @@ def compute_opponent_features(
         return features
 
     # Find latest available defensive average before game_date
+    game_date_ts = None
     if game_date is not None:
         game_date_ts = pd.to_datetime(game_date, errors="coerce")
         if pd.notna(game_date_ts):
@@ -275,15 +300,24 @@ def compute_opponent_features(
                 features["opp_def_stat_avg"] = total
 
     # Opponent defensive rank for the primary stat component (1=best D, 30=worst D).
-    if opp_def_ranks and opp_team_abbr:
+    if opp_team_abbr:
         key = normalize_stat_type(stat_type)
         if key:
             components = STAT_COMPONENTS.get(key)
             rank_col = f"opp_def_{components[0]}" if components else None
-            if rank_col and rank_col in opp_def_ranks:
-                features["opp_def_rank"] = float(
-                    opp_def_ranks[rank_col].get(opp_team_abbr, 15)
-                )
+            if rank_col:
+                rank_map: dict[str, int] = {}
+                if game_date_ts is not None and pd.notna(game_date_ts):
+                    rank_map = _build_rank_map_as_of(
+                        opp_def_avgs=opp_def_avgs,
+                        rank_col=rank_col,
+                        game_date_ts=game_date_ts,
+                    )
+                elif opp_def_ranks and rank_col in opp_def_ranks:
+                    # Fallback for contexts where game_date is unavailable.
+                    rank_map = opp_def_ranks[rank_col]
+                if rank_map:
+                    features["opp_def_rank"] = float(rank_map.get(opp_team_abbr, 15))
 
     return features
 

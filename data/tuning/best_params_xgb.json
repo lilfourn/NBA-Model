@@ -1,5 +1,5 @@
 {
-  "n_estimators": 700,
+  "n_estimators": 2000,
   "max_depth": 7,
   "learning_rate": 0.031340085397316995,
   "subsample": 0.9282824240896135,

@@ -18,13 +18,13 @@ from app.db.engine import get_engine  # noqa: E402
 from app.ml.dataset import _load_name_overrides  # noqa: E402
 from app.ml.stat_mappings import stat_value_from_row  # noqa: E402
 from app.modeling.gating_model import GatingModel, build_context_features  # noqa: E402
-from app.modeling.online_ensemble import (
+from app.modeling.online_ensemble import (  # noqa: E402
     Context,
     ContextualHedgeEnsembler,
     logloss,
 )  # noqa: E402
 from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler  # noqa: E402
-from app.modeling.weight_history import log_weights  # noqa: E402
+from app.modeling.weight_history import DEFAULT_HISTORY_PATH, log_weights  # noqa: E402
 from app.utils.names import normalize_name  # noqa: E402
 from scripts.ops.log_decisions import PRED_LOG_DEFAULT  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
@@ -49,19 +49,28 @@ def _parse_timestamp(series: pd.Series) -> pd.Series:
 
 
 def _nn_weight_cap_for_latest_auc(engine) -> dict[str, float]:
-    """Set NN cap tiers from latest NN ROC AUC to avoid persistent underweighting."""
+    """Set NN cap tiers from best recent NN ROC AUC.
+
+    Uses MAX AUC from the last 5 NN training runs to avoid penalizing the NN
+    when recursive training uploads multiple rounds (where the last round
+    may not be the best).
+    """
     try:
         auc = pd.read_sql(
             text(
-                "select (metrics->>'roc_auc')::float as roc_auc "
-                "from model_runs "
-                "where model_name = 'nn_gru_attention' and metrics->>'roc_auc' is not null "
-                "order by created_at desc limit 1"
+                "select max(roc_auc) as roc_auc from ("
+                "  select (metrics->>'roc_auc')::float as roc_auc "
+                "  from model_runs "
+                "  where model_name = 'nn_gru_attention' "
+                "    and metrics->>'roc_auc' is not null "
+                "  order by created_at desc limit 5"
+                ") sub"
             ),
             engine,
         )
         if not auc.empty and pd.notna(auc.iloc[0]["roc_auc"]):
             value = float(auc.iloc[0]["roc_auc"])
+            print(f"NN best recent AUC: {value:.4f}")
             if value >= 0.60:
                 return {}
             if value >= 0.55:
@@ -378,6 +387,16 @@ def main() -> None:
         action="store_true",
         help="Disable writing resolved actual_value/over_label back into prediction_log.csv.",
     )
+    ap.add_argument(
+        "--log-weight-history",
+        action="store_true",
+        help="Append a weight snapshot to weight history after training.",
+    )
+    ap.add_argument(
+        "--weight-history-path",
+        default=DEFAULT_HISTORY_PATH,
+        help="JSONL path for weight history snapshots.",
+    )
     args = ap.parse_args()
 
     load_env()
@@ -623,45 +642,55 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print(f"DB artifact upload failed (non-fatal): {e}")
 
-    # Log weight history for visualization
-    try:
-        hedge_weights = ens.to_state_dict().get("weights", {})
-        thompson_avg = None
-        if ts.n_updates > 0:
-            # Get average Thompson weights across all contexts using alpha/beta
-            ts_state = ts.to_state_dict()
-            alpha_dict = ts_state.get("alpha", {})
-            beta_dict = ts_state.get("beta", {})
-            all_experts_set: set[str] = set()
-            for ctx_alpha in alpha_dict.values():
-                all_experts_set.update(ctx_alpha.keys())
-            if all_experts_set:
-                thompson_avg = {}
-                for e in sorted(all_experts_set):
-                    a_vals = []
-                    b_vals = []
-                    for ctx_key in alpha_dict:
-                        a = alpha_dict[ctx_key].get(e)
-                        b = beta_dict.get(ctx_key, {}).get(e)
-                        if a is not None and b is not None:
-                            import math
+    if args.log_weight_history:
+        # Log weight history for visualization.
+        try:
+            hedge_weights = ens.to_state_dict().get("weights", {})
+            thompson_avg = None
+            if ts.n_updates > 0:
+                # Get average Thompson weights across all contexts using alpha/beta.
+                ts_state = ts.to_state_dict()
+                alpha_dict = ts_state.get("alpha", {})
+                beta_dict = ts_state.get("beta", {})
+                all_experts_set: set[str] = set()
+                for ctx_alpha in alpha_dict.values():
+                    all_experts_set.update(ctx_alpha.keys())
+                if all_experts_set:
+                    thompson_avg = {}
+                    for e in sorted(all_experts_set):
+                        a_vals = []
+                        b_vals = []
+                        for ctx_key in alpha_dict:
+                            a = alpha_dict[ctx_key].get(e)
+                            b = beta_dict.get(ctx_key, {}).get(e)
+                            if a is not None and b is not None:
+                                import math
 
-                            if math.isfinite(a) and math.isfinite(b) and (a + b) > 0:
-                                a_vals.append(a)
-                                b_vals.append(b)
-                    if a_vals:
-                        mean_a = sum(a_vals) / len(a_vals)
-                        mean_b = sum(b_vals) / len(b_vals)
-                        thompson_avg[e] = mean_a / (mean_a + mean_b)
+                                if (
+                                    math.isfinite(a)
+                                    and math.isfinite(b)
+                                    and (a + b) > 0
+                                ):
+                                    a_vals.append(a)
+                                    b_vals.append(b)
+                        if a_vals:
+                            mean_a = sum(a_vals) / len(a_vals)
+                            mean_b = sum(b_vals) / len(b_vals)
+                            thompson_avg[e] = mean_a / (mean_a + mean_b)
 
-        log_weights(
-            hedge_weights=hedge_weights if isinstance(hedge_weights, dict) else None,
-            thompson_weights=thompson_avg,
-            n_updates=int(counts.get("ensemble", 0)),
-        )
-        print("Logged weight history snapshot.")
-    except Exception as e:  # noqa: BLE001
-        print(f"Weight history logging failed: {e}")
+            log_weights(
+                hedge_weights=hedge_weights
+                if isinstance(hedge_weights, dict)
+                else None,
+                thompson_weights=thompson_avg,
+                n_updates=int(counts.get("ensemble", 0)),
+                path=str(args.weight_history_path),
+            )
+            print(f"Logged weight history snapshot -> {args.weight_history_path}")
+        except Exception as e:  # noqa: BLE001
+            print(f"Weight history logging failed: {e}")
+    else:
+        print("Weight history logging skipped (pass --log-weight-history to enable).")
 
 
 if __name__ == "__main__":

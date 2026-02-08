@@ -9,8 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 import numpy as np
 import pandas as pd
 import torch as _torch
@@ -51,6 +49,8 @@ from app.ml.stat_mappings import (
     stat_diff_components,
     stat_weighted_components,
 )
+
+logger = logging.getLogger(__name__)
 
 # --- Scoring cache ---
 _CACHE_TTL_SECONDS = 300  # 5 min
@@ -127,10 +127,10 @@ class ScoringResult:
 # With little data, k = SHRINK_MAX (heavy pull toward prior).
 #
 # The prior is loaded from models/context_priors.json (refreshed daily).
-# It adapts per stat_type and line_score bucket.  Fallback: 0.42.
-SHRINK_ANCHOR = 0.42  # Global fallback only -- prefer context prior
+# It adapts per stat_type and line_score bucket.  Fallback: 0.50 (neutral).
+SHRINK_ANCHOR = 0.50  # Neutral fallback — context priors handle empirical rates
 SHRINK_MIN = 0.05  # best-data picks: 5% pull (models are already calibrated)
-SHRINK_MAX = 0.25  # low-data picks: 25% pull toward base rate
+SHRINK_MAX = 0.15  # low-data picks: 15% pull toward prior (was 0.25)
 
 # Abstain policy: only publish picks with p_pick >= threshold
 # p_pick = max(p_final, 1 - p_final)
@@ -195,6 +195,7 @@ def _compute_edge(
     expert_probs: dict[str, float | None],
     conformal_set_size: int | None,
     n_eff: float | None = None,
+    context_prior: float | None = None,
 ) -> float:
     """Composite prediction score 0-100 using SHRUNK probability.
 
@@ -263,11 +264,32 @@ def _compute_edge(
     #    These are almost certainly overfit.
     if available:
         extreme = sum(1 for v in available if v > 0.90 or v < 0.10)
-        penalty = min(10.0, extreme * 5.0)
+        overconf_penalty = min(10.0, extreme * 5.0)
     else:
-        penalty = 0.0
+        overconf_penalty = 0.0
 
-    edge = dir_score + consensus_score + tight_score + data_score + conf_score - penalty
+    # 7. Base-rate following penalty (max -10pts)
+    #    If the pick direction matches the dominant base rate direction
+    #    AND probability is close to the prior, the model isn't adding
+    #    value over simply betting the base rate.
+    base_rate_penalty = 0.0
+    if context_prior is not None:
+        prior_agrees = (pick_over and context_prior >= 0.5) or (
+            not pick_over and context_prior < 0.5
+        )
+        if prior_agrees:
+            proximity = 1.0 - min(1.0, abs(p_shrunk - context_prior) / 0.15)
+            base_rate_penalty = proximity * 10.0
+
+    edge = (
+        dir_score
+        + consensus_score
+        + tight_score
+        + data_score
+        + conf_score
+        - overconf_penalty
+        - base_rate_penalty
+    )
     return round(min(100.0, max(0.0, edge)), 1)
 
 
@@ -286,17 +308,18 @@ def _grade_from_edge(edge: float) -> str:
 
 
 def _conformal_set_size(
-    calibrators: list[ConformalCalibrator], p_over: float
+    calibrators_by_expert: dict[str, ConformalCalibrator],
+    expert_probs: dict[str, float | None],
 ) -> int | None:
-    """Majority-vote conformal set size across available calibrators.
-
-    Returns 1 (confident unique prediction) or 2 (ambiguous).
-    Returns None if no calibrators are available.
-    """
-    if not calibrators:
+    """Majority-vote conformal set size across calibrated expert probabilities."""
+    sizes: list[int] = []
+    for expert, calibrator in calibrators_by_expert.items():
+        p = expert_probs.get(expert)
+        if p is None:
+            continue
+        sizes.append(int(calibrator.predict(float(p)).set_size))
+    if not sizes:
         return None
-    sizes = [cal.predict(p_over).set_size for cal in calibrators]
-    # Majority vote: if most say set_size=1, return 1
     return 1 if sum(1 for s in sizes if s == 1) > len(sizes) / 2 else 2
 
 
@@ -385,17 +408,27 @@ def _risk_adjusted_confidence(
 
 
 def _nn_weight_cap_for_latest_auc(engine: Engine) -> dict[str, float]:
+    """Determine NN weight cap based on best recent AUC.
+
+    Uses MAX AUC from the last 5 NN training runs to avoid penalizing the NN
+    when recursive training uploads multiple rounds (where the last round
+    may not be the best).
+    """
     try:
         with engine.connect() as conn:
             nn_auc = conn.execute(
                 text(
-                    "select (metrics->>'roc_auc')::float from model_runs "
-                    "where model_name = 'nn_gru_attention' and metrics->>'roc_auc' is not null "
-                    "order by created_at desc limit 1"
+                    "select max((metrics->>'roc_auc')::float) from ("
+                    "  select metrics from model_runs "
+                    "  where model_name = 'nn_gru_attention' "
+                    "    and metrics->>'roc_auc' is not null "
+                    "  order by created_at desc limit 5"
+                    ") sub"
                 )
             ).scalar()
             if nn_auc is not None:
                 value = float(nn_auc)
+                logger.info("NN best recent AUC: %.4f", value)
                 if value >= 0.60:
                     return {}
                 if value >= 0.55:
@@ -621,33 +654,43 @@ def score_ensemble(
         meta_path,
     )
 
-    # Load conformal calibrators from saved models
-    conformal_cals: list[ConformalCalibrator] = []
-    for _mp in [lr_path, xgb_path, lgbm_path]:
-        if _mp and _mp.exists():
+    # Load conformal calibrators keyed by expert so each calibrator is applied
+    # to the distribution it was calibrated on.
+    conformal_by_expert: dict[str, ConformalCalibrator] = {}
+    _conformal_joblib_paths = [
+        ("p_lr", lr_path),
+        ("p_xgb", xgb_path),
+        ("p_lgbm", lgbm_path),
+    ]
+    for expert_key, model_path in _conformal_joblib_paths:
+        if model_path and model_path.exists():
             try:
-                _pl = load_joblib_artifact(str(_mp), strict_sklearn_version=False)
-                _cd = _pl.get("conformal")
-                if _cd:
-                    conformal_cals.append(ConformalCalibrator(**_cd))
+                payload = load_joblib_artifact(str(model_path))
+                conformal_data = payload.get("conformal")
+                if conformal_data:
+                    conformal_by_expert[expert_key] = ConformalCalibrator(
+                        **conformal_data
+                    )
             except Exception:  # noqa: BLE001
-                logger.warning("Failed to load conformal from %s", _mp, exc_info=True)
+                logger.warning(
+                    "Failed to load conformal from %s", model_path, exc_info=True
+                )
     if nn_path and nn_path.exists():
         try:
-            _pl = _torch.load(str(nn_path), map_location="cpu")
-            _cd = _pl.get("conformal")
-            if _cd:
-                conformal_cals.append(ConformalCalibrator(**_cd))
+            payload = _torch.load(str(nn_path), map_location="cpu")
+            conformal_data = payload.get("conformal")
+            if conformal_data:
+                conformal_by_expert["p_nn"] = ConformalCalibrator(**conformal_data)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to load conformal from NN %s", nn_path, exc_info=True
             )
     if tabdl_path and tabdl_path.exists():
         try:
-            _pl = _torch.load(str(tabdl_path), map_location="cpu")
-            _cd = _pl.get("conformal")
-            if _cd:
-                conformal_cals.append(ConformalCalibrator(**_cd))
+            payload = _torch.load(str(tabdl_path), map_location="cpu")
+            conformal_data = payload.get("conformal")
+            if conformal_data:
+                conformal_by_expert["p_tabdl"] = ConformalCalibrator(**conformal_data)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to load conformal from TabDL %s", tabdl_path, exc_info=True
@@ -919,13 +962,42 @@ def score_ensemble(
         _context_priors = load_context_priors()
         _stat_calibrator = StatTypeCalibrator.load()
 
-    # Load inversion correction flags from model health report
-    from app.ml.inversion_corrections import load_inversion_flags
+    # Inversion correction system DISABLED — architecturally unsound.
+    # Flipping expert probs before ensemble components trained on non-inverted
+    # distributions produces unpredictable outputs.  Additionally, the
+    # model_health.json artifact was never uploaded to the DB, so inversions
+    # were silently skipped in production anyway.
+    # See: app/ml/inversion_corrections.py for the module (kept for future redesign).
 
-    _inversion_flags = load_inversion_flags(engine if _use_db else None)
-    if _inversion_flags:
-        logger.info(
-            "Inversion auto-correction active for: %s", list(_inversion_flags.keys())
+    # --- Artifact availability diagnostic ---
+    _n_stat_cals = len(_stat_calibrator.calibrators) if _stat_calibrator else 0
+    _n_ctx_stats = len(_context_priors.get("stat_type_priors", {}))
+    _has_hybrid_mix = hybrid is not None
+    _hybrid_info = (
+        f"alpha={hybrid.alpha:.2f} beta={hybrid.beta:.2f} gamma={hybrid.gamma:.2f}"
+        if hybrid
+        else "N/A"
+    )
+    logger.info(
+        "Scoring artifact status: stat_calibrator=%d stat-types, "
+        "context_priors=%d stat-types, hybrid=%s (%s), thompson=%s, gating=%s",
+        _n_stat_cals,
+        _n_ctx_stats,
+        _has_hybrid_mix,
+        _hybrid_info,
+        thompson is not None,
+        gating is not None and gating.is_fitted,
+    )
+    if _n_stat_cals == 0:
+        logger.warning(
+            "StatTypeCalibrator has NO per-stat calibrators — "
+            "isotonic recalibration is pass-through. "
+            "Ensure stat_calibrator artifact is uploaded to DB."
+        )
+    if _n_ctx_stats == 0:
+        logger.warning(
+            "Context priors are EMPTY — shrinkage will use neutral 0.50 fallback. "
+            "Ensure context_priors artifact is uploaded to DB."
         )
 
     scored: list[dict[str, Any]] = []
@@ -948,10 +1020,6 @@ def score_ensemble(
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
-        # Auto-correct inverted experts
-        for _inv_expert, _should_flip in _inversion_flags.items():
-            if _should_flip and expert_probs.get(_inv_expert) is not None:
-                expert_probs[_inv_expert] = 1.0 - expert_probs[_inv_expert]
 
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
@@ -1043,7 +1111,7 @@ def score_ensemble(
         if not math.isfinite(float(score)):
             continue
 
-        conformal_size = _conformal_set_size(conformal_cals, p_final)
+        conformal_size = _conformal_set_size(conformal_by_expert, expert_probs)
         p_pick = max(p_final, 1.0 - p_final)
         # Publishable: meets confidence threshold, has narrow conformal set,
         # has minimum edge, and is not a prior-only stat type
@@ -1083,7 +1151,8 @@ def score_ensemble(
         )
         item = scored[-1]
         item["edge"] = _compute_edge(
-            p_final, expert_probs, item["conformal_set_size"], n_eff=n_eff_val
+            p_final, expert_probs, item["conformal_set_size"],
+            n_eff=n_eff_val, context_prior=_ctx_prior,
         )
         item["grade"] = _grade_from_edge(item["edge"])
         # Apply min_edge filter
@@ -1095,6 +1164,68 @@ def score_ensemble(
     # Enforce abstain policy: only return publishable picks in the top-N
     publishable = [item for item in scored if item.get("is_publishable", False)]
     top_picks = publishable[:top]
+
+    # --- Direction balance guardrail ---
+    # When >75% of picks lean one direction, apply a soft correction:
+    # re-score with a nudged context prior to reduce the imbalance.
+    _IMBALANCE_THRESHOLD = 0.75  # trigger correction above this ratio
+    _IMBALANCE_PRIOR_NUDGE = 0.50  # push context prior toward neutral
+    if top_picks:
+        n_over = sum(1 for item in top_picks if item["pick"] == "OVER")
+        n_under = len(top_picks) - n_over
+        pct_under = n_under / len(top_picks) * 100
+        pct_over = n_over / len(top_picks) * 100
+        logger.info(
+            "Pick direction balance: %d OVER (%.0f%%) / %d UNDER (%.0f%%) out of %d published picks",
+            n_over,
+            pct_over,
+            n_under,
+            pct_under,
+            len(top_picks),
+        )
+        dominant_pct = max(pct_over, pct_under) / 100.0
+        if dominant_pct > _IMBALANCE_THRESHOLD:
+            dominant_dir = "OVER" if pct_over > pct_under else "UNDER"
+            logger.warning(
+                "Direction imbalance guardrail triggered: %.0f%% of picks are %s. "
+                "Demoting edge scores for %s picks that follow the base rate.",
+                dominant_pct * 100,
+                dominant_dir,
+                dominant_dir,
+            )
+            # Demote edge for picks in the over-represented direction whose
+            # probability is close to the context prior (i.e. not adding value).
+            for item in top_picks:
+                if item["pick"] == dominant_dir:
+                    st = item["stat_type"]
+                    ls = item["line_score"]
+                    cp = get_context_prior(
+                        _context_priors, stat_type=st, line_score=ls
+                    )
+                    # Penalize more aggressively during imbalance
+                    item["edge"] = _compute_edge(
+                        item["prob_over"],
+                        {
+                            k: item.get(k)
+                            for k in [
+                                "p_forecast_cal", "p_nn", "p_tabdl",
+                                "p_lr", "p_xgb", "p_lgbm",
+                            ]
+                        },
+                        item["conformal_set_size"],
+                        n_eff=item["n_eff"],
+                        context_prior=_IMBALANCE_PRIOR_NUDGE,
+                    )
+                    item["grade"] = _grade_from_edge(item["edge"])
+                    if item["edge"] < MIN_EDGE:
+                        item["is_publishable"] = False
+            # Re-sort and re-filter after demotion
+            publishable = [
+                item for item in scored if item.get("is_publishable", False)
+            ]
+            top_picks = sorted(
+                publishable, key=lambda x: x["edge"], reverse=True
+            )[:top]
 
     picks = [
         ScoredPick(

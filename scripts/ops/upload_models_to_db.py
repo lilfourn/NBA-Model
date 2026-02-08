@@ -31,18 +31,30 @@ def main() -> None:
     models_dir = Path(args.models_dir)
 
     uploads = [
-        ("baseline_logreg", latest_compatible_joblib_path(models_dir, "baseline_logreg_*.joblib")),
+        (
+            "baseline_logreg",
+            latest_compatible_joblib_path(models_dir, "baseline_logreg_*.joblib"),
+        ),
         ("xgb", latest_compatible_joblib_path(models_dir, "xgb_*.joblib")),
         ("lgbm", latest_compatible_joblib_path(models_dir, "lgbm_*.joblib")),
-        ("nn_gru_attention", latest_compatible_checkpoint(models_dir, "nn_gru_attention_*.pt")),
-        ("meta_learner", latest_compatible_joblib_path(models_dir, "meta_learner_*.joblib")),
+        (
+            "nn_gru_attention",
+            latest_compatible_checkpoint(models_dir, "nn_gru_attention_*.pt"),
+        ),
+        (
+            "meta_learner",
+            latest_compatible_joblib_path(models_dir, "meta_learner_*.joblib"),
+        ),
     ]
 
-    # JSON/joblib ensemble files (not pattern-matched)
+    # JSON/joblib ensemble + calibration files (not pattern-matched)
     for name, filename in [
         ("ensemble_weights", "ensemble_weights.json"),
         ("thompson_weights", "thompson_weights.json"),
         ("gating_model", "gating_model.joblib"),
+        ("hybrid_mixing", "hybrid_mixing.json"),
+        ("context_priors", "context_priors.json"),
+        ("stat_calibrator", "stat_calibrator.joblib"),
     ]:
         p = models_dir / filename
         if p.exists():

@@ -14,6 +14,7 @@ export interface ScoredPick {
   rank_score: number;
   p_forecast_cal: number | null;
   p_nn: number | null;
+  p_tabdl: number | null;
   p_lr: number | null;
   p_xgb: number | null;
   p_lgbm: number | null;

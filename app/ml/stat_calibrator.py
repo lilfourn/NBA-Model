@@ -15,7 +15,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -161,11 +160,12 @@ class StatTypeCalibrator:
                     if table == "vw_resolved_picks_canonical"
                     else "WHERE outcome IN ('over', 'under') AND over_label IS NOT NULL AND actual_value IS NOT NULL"
                 )
+                p_expr = "p_final" if table == "vw_resolved_picks_canonical" else "prob_over"
                 df = pd.read_sql(
                     text(
                         f"""
                         SELECT
-                            prob_over AS p_final,
+                            {p_expr} AS p_final,
                             over_label,
                             stat_type
                         FROM {table}

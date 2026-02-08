@@ -11,12 +11,11 @@ import math
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
-from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
+from sklearn.metrics import log_loss, roc_auc_score
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -71,6 +70,7 @@ def _train_and_predict(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_test: pd.DataFrame,
+    y_test: pd.Series,
     model_type: str,
 ) -> np.ndarray:
     """Train a model and return predicted probabilities on X_test."""
@@ -83,9 +83,9 @@ def _train_and_predict(
             eval_metric="logloss", use_label_encoder=False,
             verbosity=0, random_state=42,
         )
-        model.fit(X_train, y_train, eval_set=[(X_test, y_train.iloc[:len(X_test)] if len(X_test) <= len(y_train) else y_train)], verbose=False)
+        model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
     elif model_type == "lgbm":
-        from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+        from lightgbm import LGBMClassifier
         model = LGBMClassifier(
             n_estimators=600, max_depth=5, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8, min_child_samples=20,
@@ -212,7 +212,9 @@ def main() -> None:
         probs: dict[str, np.ndarray] = {}
         for model_name in args.models:
             try:
-                p = _train_and_predict(X_train_fold, y_train_fold, X_test_fold, model_name)
+                p = _train_and_predict(
+                    X_train_fold, y_train_fold, X_test_fold, y_test_fold, model_name
+                )
                 probs[model_name] = p
             except Exception as exc:  # noqa: BLE001
                 print(f"  Warning: {model_name} failed in fold {fold}: {exc}")

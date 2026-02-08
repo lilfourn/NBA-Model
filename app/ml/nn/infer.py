@@ -44,12 +44,19 @@ def _is_compatible_payload(payload: dict[str, Any]) -> bool:
 
     cat_emb_dims = payload.get("cat_emb_dims", [8, 8, 4])
     cat_cardinalities = [len(mapping) + 1 for mapping in cat_maps.values()]
+    # Recover architecture hyper-parameters to match checkpoint exactly
+    arch_kwargs: dict[str, Any] = {}
+    for key in ("seq_hidden", "attn_dim", "mlp_hidden", "dropout", "seq_d_in"):
+        if key in payload:
+            arch_kwargs[key] = payload[key]
+    if "seq_d_in" not in arch_kwargs:
+        arch_kwargs["seq_d_in"] = 2
     try:
         model = GRUAttentionTabularClassifier(
             num_numeric=num_numeric,
             cat_cardinalities=cat_cardinalities,
             cat_emb_dims=cat_emb_dims,
-            seq_d_in=2,
+            **arch_kwargs,
         )
         model.load_state_dict(state_dict)
     except Exception:  # noqa: BLE001
@@ -57,7 +64,9 @@ def _is_compatible_payload(payload: dict[str, Any]) -> bool:
     return True
 
 
-def latest_compatible_checkpoint(models_dir: Path, pattern: str = "nn_gru_attention_*.pt") -> Path | None:
+def latest_compatible_checkpoint(
+    models_dir: Path, pattern: str = "nn_gru_attention_*.pt"
+) -> Path | None:
     if not models_dir.exists():
         return None
     for candidate in sorted(models_dir.glob(pattern), reverse=True):
@@ -86,15 +95,28 @@ def load_model(
     if temperature <= 0:
         temperature = 1.0
 
+    # Recover architecture hyper-parameters saved during training so the
+    # model skeleton matches the checkpoint weights exactly.
+    arch_kwargs: dict[str, Any] = {}
+    for key in ("seq_hidden", "attn_dim", "mlp_hidden", "dropout", "seq_d_in"):
+        if key in payload:
+            arch_kwargs[key] = payload[key]
+    if "seq_d_in" not in arch_kwargs:
+        arch_kwargs["seq_d_in"] = 2
+
     model = GRUAttentionTabularClassifier(
         num_numeric=num_numeric,
         cat_cardinalities=cat_cardinalities,
         cat_emb_dims=cat_emb_dims,
-        seq_d_in=2,
+        **arch_kwargs,
     )
     model.load_state_dict(payload["state_dict"])
     model.eval()
-    return model, {"cat_maps": cat_maps, "history_len": history_len, "temperature": temperature}
+    return model, {
+        "cat_maps": cat_maps,
+        "history_len": history_len,
+        "temperature": temperature,
+    }
 
 
 @torch.no_grad()

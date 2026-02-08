@@ -24,6 +24,11 @@ def main() -> None:
     parser.add_argument("--database-url", default=None)
     parser.add_argument("--days-back", type=int, default=45)
     parser.add_argument("--output", default="models/stat_calibrator.joblib")
+    parser.add_argument(
+        "--upload-db",
+        action="store_true",
+        help="Upload fitted calibrator to DB artifact store.",
+    )
     args = parser.parse_args()
 
     load_env()
@@ -40,6 +45,17 @@ def main() -> None:
     for st, info in sorted(meta.get("stat_types", {}).items()):
         status = "OK" if info.get("calibrated") else info.get("reason", "skip")
         print(f"    {st:25s} n={info.get('n', 0):>5d} {status}")
+
+    if args.upload_db:
+        try:
+            from app.ml.artifact_store import upload_file
+
+            row_id = upload_file(
+                engine, model_name="stat_calibrator", file_path=Path(path)
+            )
+            print(f"  Uploaded to DB -> {row_id}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  WARNING: DB upload failed: {exc}")
 
 
 if __name__ == "__main__":

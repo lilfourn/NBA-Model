@@ -556,6 +556,11 @@ def main() -> None:
     ap.add_argument(
         "--alert-email", action="store_true", help="Send email if alerts fire."
     )
+    ap.add_argument(
+        "--upload-db",
+        action="store_true",
+        help="Upload health report to DB artifact store.",
+    )
     args = ap.parse_args()
 
     load_env()
@@ -634,6 +639,17 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"\nHealth report -> {output}")
+
+    if args.upload_db:
+        try:
+            from app.ml.artifact_store import upload_file
+
+            row_id = upload_file(
+                engine, model_name="model_health", file_path=output
+            )
+            print(f"  Uploaded to DB -> {row_id}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  WARNING: DB upload failed: {exc}")
 
     if all_alerts:
         print(f"\n{'!'*50}")

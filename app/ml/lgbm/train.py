@@ -47,7 +47,9 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     if "is_combo" in df.columns:
         df = df[df["is_combo"].fillna(False) == False]  # noqa: E712
     if "player_name" in df.columns:
-        df = df[~df["player_name"].fillna("").astype(str).str.contains("+", regex=False)]
+        df = df[
+            ~df["player_name"].fillna("").astype(str).str.contains("+", regex=False)
+        ]
 
     df["actual_value"] = [
         stat_value_from_row(getattr(row, "stat_type", None), row)
@@ -68,7 +70,9 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     # the same prediction leaking across train/test via multiple snapshots.
     dedup_cols = ["player_id", "nba_game_id", "stat_type"]
     if all(c in df.columns for c in dedup_cols):
-        df = df.sort_values("fetched_at").drop_duplicates(subset=dedup_cols, keep="first")
+        df = df.sort_values("fetched_at").drop_duplicates(
+            subset=dedup_cols, keep="first"
+        )
 
     df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].fillna("unknown").astype(str)
     for col in NUMERIC_COLS:
@@ -79,7 +83,9 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     if "trending_count" in df.columns:
         df["trending_count"] = np.log1p(df["trending_count"].clip(lower=0.0))
 
-    cat_dummies = pd.get_dummies(df[CATEGORICAL_COLS], prefix=CATEGORICAL_COLS, dtype=float)
+    cat_dummies = pd.get_dummies(
+        df[CATEGORICAL_COLS], prefix=CATEGORICAL_COLS, dtype=float
+    )
     X = pd.concat([cat_dummies, df[NUMERIC_COLS]], axis=1)
     y = df["over"]
     return X, y, df
@@ -96,6 +102,7 @@ def _load_tuned_params() -> dict[str, Any]:
     candidates.append(Path("/state/data/tuning/best_params_lgbm.json"))
 
     import json
+
     for path in candidates:
         if not path.exists():
             continue
@@ -132,11 +139,13 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
         y_train,
         eval_set=[(X_test, y_test)],
         callbacks=[
-            __import__("lightgbm").early_stopping(30, verbose=False),
+            __import__("lightgbm").early_stopping(50, verbose=False),
             __import__("lightgbm").log_evaluation(0),
         ],
     )
-    print(f"LGBM best iteration: {model.best_iteration_} / {params.get('n_estimators', 600)}")
+    print(
+        f"LGBM best iteration: {model.best_iteration_} / {params.get('n_estimators', 600)}"
+    )
 
     y_proba = model.predict_proba(X_test)[:, 1]
     y_pred = (y_proba >= 0.5).astype(int)
@@ -152,7 +161,9 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
 
     metrics = {
         "accuracy": float(accuracy_score(y_test, y_pred)),
-        "roc_auc": float(roc_auc_score(y_test, y_proba)) if len(np.unique(y_test)) > 1 else None,
+        "roc_auc": float(roc_auc_score(y_test, y_proba))
+        if len(np.unique(y_test)) > 1
+        else None,
         "logloss": float(log_loss(y_test, y_proba)),
         "conformal_q_hat": conformal.q_hat,
         "conformal_n_cal": conformal.n_cal,
@@ -166,7 +177,11 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
         "feature_cols": list(X.columns),
         "categorical_cols": CATEGORICAL_COLS,
         "numeric_cols": NUMERIC_COLS,
-        "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
+        "conformal": {
+            "alpha": conformal.alpha,
+            "q_hat": conformal.q_hat,
+            "n_cal": conformal.n_cal,
+        },
     }
     if calibrator_data:
         artifact["isotonic"] = calibrator_data
@@ -174,6 +189,7 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
 
     try:
         from app.ml.artifact_store import upload_file
+
         upload_file(engine, model_name="lgbm", file_path=model_path)
         print(f"Uploaded lgbm artifact to DB ({model_path})")
     except Exception as exc:  # noqa: BLE001
@@ -195,4 +211,6 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
             )
         )
 
-    return TrainResult(model_path=str(model_path), metrics=metrics, rows=int(len(df_used)))
+    return TrainResult(
+        model_path=str(model_path), metrics=metrics, rows=int(len(df_used))
+    )

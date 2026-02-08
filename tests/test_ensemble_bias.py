@@ -78,5 +78,5 @@ def test_reduced_shrinkage_values() -> None:
     """Verify shrinkage constants use base-rate anchor."""
     from app.services.scoring import SHRINK_MIN, SHRINK_MAX, SHRINK_ANCHOR
     assert SHRINK_MIN == 0.05
-    assert SHRINK_MAX == 0.25
-    assert SHRINK_ANCHOR == 0.42
+    assert SHRINK_MAX == 0.15
+    assert SHRINK_ANCHOR == 0.50

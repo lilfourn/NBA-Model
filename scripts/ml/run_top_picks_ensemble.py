@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 from app.db.engine import get_engine  # noqa: E402
 from app.db.prediction_logs import append_prediction_rows  # noqa: E402
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs  # noqa: E402
-from app.ml.nn.infer import (
+from app.ml.nn.infer import (  # noqa: E402
     infer_over_probs as infer_nn_over_probs,
     latest_compatible_checkpoint,
 )  # noqa: E402
@@ -26,20 +26,20 @@ from app.ml.tabdl.infer import (  # noqa: E402
 )
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs  # noqa: E402
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs  # noqa: E402
-from app.ml.artifacts import (
+from app.ml.artifacts import (  # noqa: E402
     load_joblib_artifact,
     latest_compatible_joblib_path,
 )  # noqa: E402
 from app.ml.meta_learner import infer_meta_learner  # noqa: E402
 from app.modeling.db_logs import load_db_game_logs  # noqa: E402
-from app.modeling.forecast_calibration import (
+from app.modeling.forecast_calibration import (  # noqa: E402
     ForecastDistributionCalibrator,
 )  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler  # noqa: E402
 from app.modeling.conformal import ConformalCalibrator  # noqa: E402
 from app.modeling.probability import confidence_from_probability  # noqa: E402
 from app.services.scoring import _conformal_set_size, shrink_probability  # noqa: E402
-from app.modeling.stat_forecast import (
+from app.modeling.stat_forecast import (  # noqa: E402
     ForecastParams,
     LeaguePriors,
     StatForecastPredictor,
@@ -50,7 +50,7 @@ from app.ml.stat_mappings import (  # noqa: E402
     stat_diff_components,
     stat_weighted_components,
 )
-from scripts.ops.log_decisions import (
+from scripts.ops.log_decisions import (  # noqa: E402
     PRED_LOG_DEFAULT,
     append_prediction_log,
 )  # noqa: E402
@@ -508,35 +508,44 @@ def main() -> None:
                     continue
                 p_lgbm[str(proj_id)] = prob
 
-    # Load conformal calibrators from saved models
-    conformal_cals: list[ConformalCalibrator] = []
-    for _mp in [lr_path, xgb_path, lgbm_path]:
-        if _mp and _mp.exists():
+    # Load conformal calibrators keyed by expert; each calibrator must score
+    # the expert distribution it was fit on.
+    conformal_by_expert: dict[str, ConformalCalibrator] = {}
+    for expert_key, model_path in [
+        ("p_lr", lr_path),
+        ("p_xgb", xgb_path),
+        ("p_lgbm", lgbm_path),
+    ]:
+        if model_path and model_path.exists():
             try:
-                _pl = load_joblib_artifact(str(_mp))
-                _cd = _pl.get("conformal")
-                if _cd:
-                    conformal_cals.append(ConformalCalibrator(**_cd))
+                payload = load_joblib_artifact(str(model_path))
+                conformal_data = payload.get("conformal")
+                if conformal_data:
+                    conformal_by_expert[expert_key] = ConformalCalibrator(
+                        **conformal_data
+                    )
             except Exception:  # noqa: BLE001
                 pass
     if nn_path and nn_path.exists():
         try:
             import torch as _torch
 
-            _pl = _torch.load(str(nn_path), map_location="cpu")
-            _cd = _pl.get("conformal")
-            if _cd:
-                conformal_cals.append(ConformalCalibrator(**_cd))
+            payload = _torch.load(str(nn_path), map_location="cpu")
+            conformal_data = payload.get("conformal")
+            if conformal_data:
+                conformal_by_expert["p_nn"] = ConformalCalibrator(**conformal_data)
         except Exception:  # noqa: BLE001
             pass
     if tabdl_path and tabdl_path.exists():
         try:
             import torch as _torch
 
-            _pl = _torch.load(str(tabdl_path), map_location="cpu")
-            _cd = _pl.get("conformal")
-            if _cd:
-                conformal_cals.append(ConformalCalibrator(**_cd))
+            payload = _torch.load(str(tabdl_path), map_location="cpu")
+            conformal_data = payload.get("conformal")
+            if conformal_data:
+                conformal_by_expert["p_tabdl"] = ConformalCalibrator(
+                    **conformal_data
+                )
         except Exception:  # noqa: BLE001
             pass
 
@@ -690,7 +699,9 @@ def main() -> None:
                 if f
                 else None,
                 "n_eff": n_eff_val,
-                "conformal_set_size": _conformal_set_size(conformal_cals, p_final),
+                "conformal_set_size": _conformal_set_size(
+                    conformal_by_expert, expert_probs
+                ),
             }
         )
 

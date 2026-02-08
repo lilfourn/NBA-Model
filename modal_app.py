@@ -434,7 +434,11 @@ def _run_train_pipeline() -> None:
             (
                 "from app.ml.context_prior import compute_context_priors_from_db, save_context_priors; "
                 "from app.db.engine import get_engine; "
-                f"save_context_priors(compute_context_priors_from_db(get_engine(), days_back=90), '{REMOTE_CONTEXT_PRIORS}')"
+                "from app.ml.artifact_store import upload_file; "
+                "from pathlib import Path; "
+                f"e = get_engine(); "
+                f"save_context_priors(compute_context_priors_from_db(e, days_back=90), '{REMOTE_CONTEXT_PRIORS}'); "
+                f"upload_file(e, model_name='context_priors', file_path=Path('{REMOTE_CONTEXT_PRIORS}'))"
             ),
         ],
         allow_fail=True,
@@ -570,6 +574,7 @@ def _run_train_pipeline() -> None:
             "--output",
             str(REMOTE_HEALTH_REPORT),
             "--alert-email",
+            "--upload-db",
         ],
         allow_fail=True,
     )
@@ -596,6 +601,7 @@ def _run_train_pipeline() -> None:
             "45",
             "--output",
             str(REMOTE_MODELS_DIR / "stat_calibrator.joblib"),
+            "--upload-db",
         ],
         allow_fail=True,
     )

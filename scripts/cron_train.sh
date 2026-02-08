@@ -153,6 +153,11 @@ docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -
   2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"
 ensemble_status=${PIPESTATUS[0]}
 
+# Keep local model directory lean (advisory, non-blocking).
+docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
+  python -m scripts.ml.prune_model_artifacts --keep 2 \
+  2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log" || true
+
 docker compose -f "$COMPOSE_FILE" --project-directory "$PROJECT_ROOT" run --rm -T api \
   python -m scripts.ops.monitor_model_health --alert-email \
   2>&1 | tee -a "$LOG_FILE" | tee -a "$tmp_log"

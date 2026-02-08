@@ -24,8 +24,8 @@ from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore", message=".*encountered in matmul", category=RuntimeWarning)
 
-from app.db import schema
-from app.ml.artifacts import load_joblib_artifact
+from app.db import schema  # noqa: E402
+from app.ml.artifacts import load_joblib_artifact  # noqa: E402
 
 BASE_EXPERT_COLS = ["oof_forecast", "oof_lr", "oof_xgb", "oof_lgbm", "oof_nn"]
 INFER_EXPERT_COLS = ["p_forecast_cal", "p_lr", "p_xgb", "p_lgbm", "p_nn"]
@@ -189,7 +189,7 @@ def infer_meta_learner(
     Returns:
         Meta-learner P(over) or None if too few experts available.
     """
-    payload = load_joblib_artifact(model_path, strict_sklearn_version=False)
+    payload = load_joblib_artifact(model_path)
     model = payload["model"]
     infer_cols = payload.get("infer_expert_cols", INFER_EXPERT_COLS)
     has_context = bool(payload.get("context_cols"))
@@ -222,7 +222,7 @@ def batch_infer_meta_learner(
     n_eff_series: pd.Series | None = None,
 ) -> np.ndarray:
     """Batch inference: expert_df columns must include INFER_EXPERT_COLS."""
-    payload = load_joblib_artifact(model_path, strict_sklearn_version=False)
+    payload = load_joblib_artifact(model_path)
     model = payload["model"]
     infer_cols = payload.get("infer_expert_cols", INFER_EXPERT_COLS)
     has_context = bool(payload.get("context_cols"))

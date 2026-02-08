@@ -31,7 +31,7 @@ XGBOOST_PARAMS = {
     "reg_lambda": 2.0,
     "gamma": 0.1,
     "eval_metric": "logloss",
-    "early_stopping_rounds": 30,
+    "early_stopping_rounds": 50,
     "use_label_encoder": False,
     "verbosity": 0,
     "random_state": 42,
@@ -56,6 +56,7 @@ def _load_tuned_params() -> dict[str, Any]:
     candidates.append(Path("/state/data/tuning/best_params_xgb.json"))
 
     import json
+
     for path in candidates:
         if not path.exists():
             continue
@@ -79,7 +80,9 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     if "is_combo" in df.columns:
         df = df[df["is_combo"].fillna(False) == False]  # noqa: E712
     if "player_name" in df.columns:
-        df = df[~df["player_name"].fillna("").astype(str).str.contains("+", regex=False)]
+        df = df[
+            ~df["player_name"].fillna("").astype(str).str.contains("+", regex=False)
+        ]
 
     df["actual_value"] = [
         stat_value_from_row(getattr(row, "stat_type", None), row)
@@ -100,7 +103,9 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     # the same prediction leaking across train/test via multiple snapshots.
     dedup_cols = ["player_id", "nba_game_id", "stat_type"]
     if all(c in df.columns for c in dedup_cols):
-        df = df.sort_values("fetched_at").drop_duplicates(subset=dedup_cols, keep="first")
+        df = df.sort_values("fetched_at").drop_duplicates(
+            subset=dedup_cols, keep="first"
+        )
 
     # One-hot encode categoricals for XGBoost (native categorical support is fragile
     # across joblib serialization, so we stay consistent with the LR pipeline).
@@ -113,7 +118,9 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     if "trending_count" in df.columns:
         df["trending_count"] = np.log1p(df["trending_count"].clip(lower=0.0))
 
-    cat_dummies = pd.get_dummies(df[CATEGORICAL_COLS], prefix=CATEGORICAL_COLS, dtype=float)
+    cat_dummies = pd.get_dummies(
+        df[CATEGORICAL_COLS], prefix=CATEGORICAL_COLS, dtype=float
+    )
     X = pd.concat([cat_dummies, df[NUMERIC_COLS]], axis=1)
     y = df["over"]
     return X, y, df
@@ -122,7 +129,9 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
 def train_xgboost(engine, model_dir: Path) -> TrainResult:
     df = load_training_data(engine)
     if df.empty:
-        raise RuntimeError("No training data available. Did you load NBA stats and build features?")
+        raise RuntimeError(
+            "No training data available. Did you load NBA stats and build features?"
+        )
 
     X, y, df_used = _prepare_features(df)
     if df_used.empty:
@@ -130,7 +139,9 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
     if y.nunique() < 2:
         raise RuntimeError("Not enough class variety to train yet.")
     if len(df_used) < MIN_TRAIN_ROWS:
-        raise RuntimeError(f"Not enough training data available yet (rows={len(df_used)}).")
+        raise RuntimeError(
+            f"Not enough training data available yet (rows={len(df_used)})."
+        )
 
     X_train, X_test, y_train, y_test = _time_split(df_used, X, y)
 
@@ -159,7 +170,9 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
 
     metrics = {
         "accuracy": float(accuracy_score(y_test, y_pred)),
-        "roc_auc": float(roc_auc_score(y_test, y_proba)) if len(np.unique(y_test)) > 1 else None,
+        "roc_auc": float(roc_auc_score(y_test, y_proba))
+        if len(np.unique(y_test)) > 1
+        else None,
         "logloss": float(log_loss(y_test, y_proba)),
         "conformal_q_hat": conformal.q_hat,
         "conformal_n_cal": conformal.n_cal,
@@ -173,7 +186,11 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
         "feature_cols": list(X.columns),
         "categorical_cols": CATEGORICAL_COLS,
         "numeric_cols": NUMERIC_COLS,
-        "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
+        "conformal": {
+            "alpha": conformal.alpha,
+            "q_hat": conformal.q_hat,
+            "n_cal": conformal.n_cal,
+        },
     }
     if calibrator_data:
         artifact["isotonic"] = calibrator_data
@@ -181,6 +198,7 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
 
     try:
         from app.ml.artifact_store import upload_file
+
         upload_file(engine, model_name="xgb", file_path=model_path)
         print(f"Uploaded xgb artifact to DB ({model_path})")
     except Exception as exc:  # noqa: BLE001
@@ -202,4 +220,6 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
             )
         )
 
-    return TrainResult(model_path=str(model_path), metrics=metrics, rows=int(len(df_used)))
+    return TrainResult(
+        model_path=str(model_path), metrics=metrics, rows=int(len(df_used))
+    )

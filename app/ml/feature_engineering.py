@@ -156,6 +156,112 @@ def compute_league_means(gamelogs: pd.DataFrame) -> dict[str, float]:
     return means
 
 
+def build_league_means_timeline(gamelogs: pd.DataFrame) -> dict[str, Any]:
+    """Build cumulative league means by game_date for leakage-safe lookups.
+
+    Returns:
+        {
+            "dates": np.ndarray[datetime64[ns]],
+            "sums": {stat_key: np.ndarray},
+            "counts": {stat_key: np.ndarray},
+            "global": {stat_key: float},
+        }
+    """
+    logs = gamelogs.copy()
+    logs["game_date"] = pd.to_datetime(logs["game_date"], errors="coerce")
+    logs = logs.dropna(subset=["game_date"]).sort_values("game_date")
+
+    if logs.empty:
+        return {
+            "dates": np.array([], dtype="datetime64[ns]"),
+            "sums": {},
+            "counts": {},
+            "global": {},
+        }
+
+    timeline_dates = np.sort(logs["game_date"].drop_duplicates().to_numpy(dtype="datetime64[ns]"))
+    timeline_index = pd.to_datetime(timeline_dates)
+    sums: dict[str, np.ndarray] = {}
+    counts: dict[str, np.ndarray] = {}
+
+    def _register_stat(stat_key: str, values: pd.Series) -> None:
+        numeric = pd.to_numeric(values, errors="coerce").fillna(0.0).astype(float)
+        tmp = pd.DataFrame(
+            {"game_date": logs["game_date"].values, "value": numeric.values}
+        )
+        daily = (
+            tmp.groupby("game_date", sort=True, observed=False)["value"]
+            .agg(["sum", "count"])
+            .reindex(timeline_index, fill_value=0.0)
+        )
+        sums[stat_key] = daily["sum"].to_numpy(dtype=float).cumsum()
+        counts[stat_key] = daily["count"].to_numpy(dtype=float).cumsum()
+
+    for stat_key, cols in STAT_COMPONENTS.items():
+        if not cols or any(col not in logs.columns for col in cols):
+            continue
+        _register_stat(stat_key, logs[cols].fillna(0).sum(axis=1))
+
+    for stat_key, (base_col, sub_col) in SPECIAL_DIFFS.items():
+        if base_col not in logs.columns or sub_col not in logs.columns:
+            continue
+        _register_stat(
+            stat_key, logs[base_col].fillna(0) - logs[sub_col].fillna(0)
+        )
+
+    for stat_key, weights in WEIGHTED_SUMS.items():
+        if not weights:
+            continue
+        missing = [col for col in weights.keys() if col not in logs.columns]
+        if missing:
+            continue
+        weighted = pd.Series(0.0, index=logs.index, dtype=float)
+        for col, weight in weights.items():
+            weighted = weighted + (logs[col].fillna(0) * float(weight))
+        _register_stat(stat_key, weighted)
+
+    return {
+        "dates": timeline_dates,
+        "sums": sums,
+        "counts": counts,
+        "global": compute_league_means(logs),
+    }
+
+
+def league_mean_before_cutoff(
+    timeline: dict[str, Any],
+    stat_key: str,
+    cutoff: datetime | None,
+    *,
+    default: float = 0.0,
+) -> float:
+    """Lookup league mean strictly before cutoff date (same-day excluded)."""
+    if not stat_key:
+        return float(default)
+
+    dates = timeline.get("dates")
+    sums = timeline.get("sums", {})
+    counts = timeline.get("counts", {})
+    if dates is None or stat_key not in sums or stat_key not in counts:
+        return float(default)
+
+    cutoff_ts = _cutoff_date(cutoff)
+    if cutoff_ts is None or pd.isna(cutoff_ts):
+        global_means = timeline.get("global", {})
+        return float(global_means.get(stat_key, default))
+
+    cutoff_day = cutoff_ts.normalize()
+    cutoff_np = np.datetime64(cutoff_day.to_datetime64())
+    idx = int(np.searchsorted(dates, cutoff_np, side="left")) - 1
+    if idx < 0:
+        return float(default)
+
+    denom = float(counts[stat_key][idx])
+    if denom <= 0:
+        return float(default)
+    return float(sums[stat_key][idx] / denom)
+
+
 def _cutoff_date(cutoff: datetime | None) -> datetime | None:
     if cutoff is None:
         return None
@@ -222,7 +328,8 @@ def compute_history_features(
     cutoff_ts = _cutoff_date(cutoff)
     hist = player_logs
     if cutoff_ts is not None and not logs_prefiltered:
-        hist = hist[hist["game_date"] < cutoff_ts]
+        cutoff_day = cutoff_ts.normalize()
+        hist = hist[hist["game_date"] < cutoff_day]
 
     n = len(hist)
     if n == 0:
