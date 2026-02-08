@@ -25,8 +25,10 @@ from app.ml.opponent_features import (
     build_opponent_defensive_averages,
     build_opponent_defensive_ranks,
     compute_opponent_features,
+    compute_team_pace,
     _load_team_game_stats,
 )
+from app.ml.feature_engineering import compute_player_usage
 from app.ml.stat_mappings import STAT_COLUMNS, normalize_stat_type, stat_value_from_row
 
 COMBO_SPLIT = re.compile(r"\s*\+\s*")
@@ -52,11 +54,16 @@ def _load_team_abbrev_overrides() -> dict[str, str]:
             if not isinstance(item, dict):
                 continue
             source = item.get("source") or item.get("source_abbr")
-            target = item.get("normalized") or item.get("normalized_abbr") or item.get("target")
+            target = (
+                item.get("normalized")
+                or item.get("normalized_abbr")
+                or item.get("target")
+            )
             if source and target:
                 overrides[str(source).upper()] = str(target).upper()
         return overrides
     return {}
+
 
 def _load_name_overrides() -> dict[str, str]:
     path = Path(settings.player_name_overrides_path)
@@ -93,7 +100,11 @@ def _build_team_abbrev_cte(overrides: dict[str, str]) -> tuple[str, dict[str, An
         params[dst_key] = normalized
         values_sql.append(f"(:{src_key}, :{dst_key})")
 
-    cte = "team_abbrev_map as (select * from (values " + ", ".join(values_sql) + ") as m(source_abbr, normalized_abbr))"
+    cte = (
+        "team_abbrev_map as (select * from (values "
+        + ", ".join(values_sql)
+        + ") as m(source_abbr, normalized_abbr))"
+    )
     return cte, params
 
 
@@ -166,7 +177,11 @@ def load_training_data(engine: Engine) -> pd.DataFrame:
     for row in base_df.itertuples(index=False):
         raw_name = row.player_name or ""
         is_combo = bool(row.is_combo) or ("+" in raw_name)
-        parts = [raw_name] if not is_combo else [p for p in COMBO_SPLIT.split(raw_name) if p.strip()]
+        parts = (
+            [raw_name]
+            if not is_combo
+            else [p for p in COMBO_SPLIT.split(raw_name) if p.strip()]
+        )
         if not parts:
             continue
         for part in parts:
@@ -187,7 +202,9 @@ def load_training_data(engine: Engine) -> pd.DataFrame:
     if components_df.empty:
         return base_df
 
-    expected_counts = components_df.groupby(["snapshot_id", "projection_id"])["component_name_key"].count()
+    expected_counts = components_df.groupby(["snapshot_id", "projection_id"])[
+        "component_name_key"
+    ].count()
 
     merged = components_df.merge(
         nba_players,
@@ -244,7 +261,9 @@ def load_training_data(engine: Engine) -> pd.DataFrame:
     if merged.empty:
         return base_df
 
-    matched_counts = merged.groupby(["snapshot_id", "projection_id"])["nba_player_id"].count()
+    matched_counts = merged.groupby(["snapshot_id", "projection_id"])[
+        "nba_player_id"
+    ].count()
     expected_aligned = expected_counts.reindex(matched_counts.index)
     valid_ids = matched_counts[matched_counts == expected_aligned].index
     if valid_ids.empty:
@@ -258,7 +277,9 @@ def load_training_data(engine: Engine) -> pd.DataFrame:
         .sum(min_count=1)
     )
 
-    full_df = base_df.merge(aggregated, on=["snapshot_id", "projection_id"], how="inner")
+    full_df = base_df.merge(
+        aggregated, on=["snapshot_id", "projection_id"], how="inner"
+    )
     full_df = _add_history_features(full_df, engine)
     return full_df
 
@@ -279,6 +300,7 @@ def _map_nba_player_ids(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         if not key:
             return None
         return name_overrides.get(key, key)
+
     frame = frame.copy()
     frame["normalized_name_key"] = frame["player_name"].apply(normalize_component)
     merged = frame.merge(
@@ -364,6 +386,7 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     team_game_stats = _load_team_game_stats(engine)
     opp_def_avgs = build_opponent_defensive_averages(team_game_stats)
     opp_def_ranks = build_opponent_defensive_ranks(opp_def_avgs)
+    team_pace_data = compute_team_pace(team_game_stats)
 
     # Build player -> team abbreviation lookup from nba_players
     nba_player_teams = pd.read_sql(
@@ -386,11 +409,14 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     # Fallback: PrizePicks game_id -> (home_abbr, away_abbr) for upcoming games
     # where nba_game_id is null.
     pp_game_teams: dict[str, tuple[str, str]] = {}
-    pp_game_ids = sorted({
-        str(v) for v in frame["game_id"].dropna().unique()
-        if "nba_game_id" not in frame.columns
-        or frame.loc[frame["game_id"] == v, "nba_game_id"].isna().all()
-    })
+    pp_game_ids = sorted(
+        {
+            str(v)
+            for v in frame["game_id"].dropna().unique()
+            if "nba_game_id" not in frame.columns
+            or frame.loc[frame["game_id"] == v, "nba_game_id"].isna().all()
+        }
+    )
     if pp_game_ids:
         overrides = _load_team_abbrev_overrides()
         override_map = {k.upper(): v.upper() for k, v in overrides.items()}
@@ -408,8 +434,12 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
             params={"game_ids": pp_game_ids},
         )
         for r in pp_games.itertuples(index=False):
-            h = override_map.get(str(r.home_abbr or "").upper(), str(r.home_abbr or "").upper())
-            a = override_map.get(str(r.away_abbr or "").upper(), str(r.away_abbr or "").upper())
+            h = override_map.get(
+                str(r.home_abbr or "").upper(), str(r.home_abbr or "").upper()
+            )
+            a = override_map.get(
+                str(r.away_abbr or "").upper(), str(r.away_abbr or "").upper()
+            )
             if h and a:
                 pp_game_teams[str(r.game_id)] = (h, a)
 
@@ -494,7 +524,77 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
             opp_def_ranks=opp_def_ranks,
         )
 
-        extras_rows.append({**hist_feats, **opp_feats})
+        # Team pace + player usage
+        cutoff_ts = (
+            pd.to_datetime(cutoff, errors="coerce") if cutoff is not None else None
+        )
+        if isinstance(cutoff_ts, pd.Timestamp) and cutoff_ts.tz is not None:
+            cutoff_ts = cutoff_ts.tz_localize(None)
+        if isinstance(cutoff_ts, pd.Timestamp):
+            cutoff_ts = cutoff_ts.normalize()
+
+        def _latest_pace(team_abbr: str | None) -> float:
+            if not team_abbr or team_abbr not in team_pace_data:
+                return 0.0
+            tdf = team_pace_data[team_abbr]
+            if cutoff_ts is not None:
+                tdf = tdf[tdf["game_date"] < cutoff_ts]
+            if tdf.empty:
+                return 0.0
+            val = tdf.iloc[-1]["team_pace"]
+            return float(val) if pd.notna(val) else 0.0
+
+        t_pace = _latest_pace(player_team)
+        o_pace = _latest_pace(opp_team)
+        g_pace = (t_pace + o_pace) / 2.0 if (t_pace and o_pace) else t_pace or o_pace
+
+        # Player usage from recent gamelogs
+        p_usage = 0.0
+        if not logs.empty and player_team:
+            recent = logs.tail(10)
+            p_fga = (
+                float(recent["fga"].fillna(0).mean())
+                if "fga" in recent.columns
+                else 0.0
+            )
+            p_fta = (
+                float(recent["fta"].fillna(0).mean())
+                if "fta" in recent.columns
+                else 0.0
+            )
+            p_to = (
+                float(recent["turnovers"].fillna(0).mean())
+                if "turnovers" in recent.columns
+                else 0.0
+            )
+            tp = team_pace_data.get(player_team)
+            if tp is not None:
+                tp_hist = (
+                    tp[tp["game_date"] < cutoff_ts] if cutoff_ts is not None else tp
+                )
+                if not tp_hist.empty:
+                    tgs = team_game_stats[
+                        team_game_stats["team_abbreviation"] == player_team
+                    ].sort_values("game_date")
+                    if cutoff_ts is not None:
+                        tgs = tgs[tgs["game_date"] < cutoff_ts]
+                    tgs_recent = tgs.tail(10)
+                    if not tgs_recent.empty:
+                        t_fga = float(tgs_recent["fga"].fillna(0).mean())
+                        t_fta = float(tgs_recent["fta"].fillna(0).mean())
+                        t_to = float(tgs_recent["turnovers"].fillna(0).mean())
+                        p_usage = compute_player_usage(
+                            p_fga, p_fta, p_to, t_fga, t_fta, t_to
+                        )
+
+        pace_usage_feats = {
+            "team_pace": t_pace,
+            "opp_pace": o_pace,
+            "game_pace": g_pace,
+            "player_usage": p_usage,
+        }
+
+        extras_rows.append({**hist_feats, **opp_feats, **pace_usage_feats})
 
     extras_df = pd.DataFrame(extras_rows)
     for key in extras_df.columns:
@@ -502,16 +602,26 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
 
     # Derived line movement features
     line_score = pd.to_numeric(frame.get("line_score"), errors="coerce").fillna(0.0)
-    line_delta = pd.to_numeric(frame.get("line_score_delta"), errors="coerce").fillna(0.0)
-    mins_to_start = pd.to_numeric(frame.get("minutes_to_start"), errors="coerce").fillna(360.0)
+    line_delta = pd.to_numeric(frame.get("line_score_delta"), errors="coerce").fillna(
+        0.0
+    )
+    mins_to_start = pd.to_numeric(
+        frame.get("minutes_to_start"), errors="coerce"
+    ).fillna(360.0)
     frame["line_move_pct"] = np.where(line_score > 0, line_delta / line_score, 0.0)
     # Late movement signal: movement magnitude weighted by proximity to game time
     # Closer to game time (lower minutes) = sharper signal
     time_weight = np.clip(1.0 - mins_to_start / 360.0, 0.0, 1.0)
     frame["line_move_late"] = line_delta.abs() * time_weight
 
+    # Differential features derived from history + opponent context
+    opp_def = pd.to_numeric(frame.get("opp_def_stat_avg"), errors="coerce").fillna(0.0)
+    lm = pd.to_numeric(frame.get("league_mean"), errors="coerce").fillna(0.0)
+    ls = pd.to_numeric(frame.get("line_score"), errors="coerce").fillna(0.0)
+    frame["line_vs_opp_def"] = ls - opp_def
+    frame["opp_def_ratio"] = np.where(lm > 0, opp_def / lm, 1.0)
+
     frame = frame.replace([float("inf"), float("-inf")], pd.NA)
-    # Ensure feature columns exist even when we couldn't compute for a row.
     for col in [
         "hist_n",
         "hist_mean",
@@ -540,6 +650,13 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         "hot_streak_count",
         "cold_streak_count",
         "season_game_number",
+        "forecast_edge",
+        "line_vs_opp_def",
+        "opp_def_ratio",
+        "team_pace",
+        "opp_pace",
+        "game_pace",
+        "player_usage",
         *OPPONENT_FEATURE_COLS,
     ]:
         if col not in frame.columns:

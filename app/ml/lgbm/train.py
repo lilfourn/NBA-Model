@@ -16,20 +16,21 @@ from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from app.db import schema
 from app.ml.calibration import best_calibrator
 from app.ml.dataset import load_training_data
-from app.ml.stat_mappings import stat_value_from_row
-from app.ml.train import CATEGORICAL_COLS, MIN_TRAIN_ROWS, NUMERIC_COLS, _time_split
+from app.ml.prepare_features import prepare_tree_features, time_series_cv_split
+from app.ml.prepare_features import CATEGORICAL_COLS, NUMERIC_COLS
+from app.ml.train import MIN_TRAIN_ROWS
 from app.modeling.conformal import ConformalCalibrator
 
 LGBM_PARAMS: dict[str, Any] = {
     "n_estimators": 600,
-    "max_depth": 5,
+    "max_depth": 4,
     "learning_rate": 0.05,
     "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_samples": 20,
+    "colsample_bytree": 0.6,
+    "min_child_samples": 30,
     "reg_alpha": 0.5,
     "reg_lambda": 2.0,
-    "num_leaves": 31,
+    "num_leaves": 15,
     "verbosity": -1,
     "random_state": 42,
 }
@@ -40,55 +41,6 @@ class TrainResult:
     model_path: str
     metrics: dict[str, Any]
     rows: int
-
-
-def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
-    df = df.copy()
-    if "is_combo" in df.columns:
-        df = df[df["is_combo"].fillna(False) == False]  # noqa: E712
-    if "player_name" in df.columns:
-        df = df[
-            ~df["player_name"].fillna("").astype(str).str.contains("+", regex=False)
-        ]
-
-    df["actual_value"] = [
-        stat_value_from_row(getattr(row, "stat_type", None), row)
-        for row in df.itertuples(index=False)
-    ]
-    df = df.dropna(subset=["line_score", "actual_value", "fetched_at"])
-
-    if "minutes_to_start" in df.columns:
-        df = df[df["minutes_to_start"].fillna(0) >= 0]
-    if "is_live" in df.columns:
-        df = df[df["is_live"].fillna(False) == False]  # noqa: E712
-    if "in_game" in df.columns:
-        df = df[df["in_game"].fillna(False) == False]  # noqa: E712
-
-    df["over"] = (df["actual_value"] > df["line_score"]).astype(int)
-
-    # Deduplicate: keep earliest snapshot per player+game+stat to prevent
-    # the same prediction leaking across train/test via multiple snapshots.
-    dedup_cols = ["player_id", "nba_game_id", "stat_type"]
-    if all(c in df.columns for c in dedup_cols):
-        df = df.sort_values("fetched_at").drop_duplicates(
-            subset=dedup_cols, keep="first"
-        )
-
-    df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].fillna("unknown").astype(str)
-    for col in NUMERIC_COLS:
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df[NUMERIC_COLS] = df[NUMERIC_COLS].fillna(0.0).astype(float)
-    if "trending_count" in df.columns:
-        df["trending_count"] = np.log1p(df["trending_count"].clip(lower=0.0))
-
-    cat_dummies = pd.get_dummies(
-        df[CATEGORICAL_COLS], prefix=CATEGORICAL_COLS, dtype=float
-    )
-    X = pd.concat([cat_dummies, df[NUMERIC_COLS]], axis=1)
-    y = df["over"]
-    return X, y, df
 
 
 def _load_tuned_params() -> dict[str, Any]:
@@ -122,7 +74,7 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
     if df.empty:
         raise RuntimeError("No training data available.")
 
-    X, y, df_used = _prepare_features(df)
+    X, y, df_used = prepare_tree_features(df)
     if df_used.empty:
         raise RuntimeError("Not enough training data after cleaning.")
     if y.nunique() < 2:
@@ -130,44 +82,80 @@ def train_lightgbm(engine, model_dir: Path) -> TrainResult:
     if len(df_used) < MIN_TRAIN_ROWS:
         raise RuntimeError(f"Not enough training data (rows={len(df_used)}).")
 
-    X_train, X_test, y_train, y_test = _time_split(df_used, X, y)
+    import lightgbm
 
     params = _load_tuned_params()
-    model = LGBMClassifier(**params)
-    model.fit(
-        X_train,
-        y_train,
-        eval_set=[(X_test, y_test)],
-        callbacks=[
-            __import__("lightgbm").early_stopping(50, verbose=False),
-            __import__("lightgbm").log_evaluation(0),
-        ],
-    )
-    print(
-        f"LGBM best iteration: {model.best_iteration_} / {params.get('n_estimators', 600)}"
-    )
+    folds = time_series_cv_split(df_used, X, y, n_splits=5)
 
-    y_proba = model.predict_proba(X_test)[:, 1]
-    y_pred = (y_proba >= 0.5).astype(int)
+    oof_proba = np.full(len(y), np.nan)
+    oof_pred = np.full(len(y), np.nan)
+    fold_metrics: list[dict[str, Any]] = []
+    last_fold_model: LGBMClassifier | None = None
 
-    conformal = ConformalCalibrator.calibrate(y_proba, y_test.to_numpy(), alpha=0.10)
+    for i, (X_tr, X_te, y_tr, y_te) in enumerate(folds):
+        mdl = LGBMClassifier(**params)
+        mdl.fit(
+            X_tr,
+            y_tr,
+            eval_set=[(X_te, y_te)],
+            callbacks=[
+                lightgbm.early_stopping(50, verbose=False),
+                lightgbm.log_evaluation(0),
+            ],
+        )
+        proba = mdl.predict_proba(X_te)[:, 1]
+        pred = (proba >= 0.5).astype(int)
 
+        oof_proba[X_te.index] = proba
+        oof_pred[X_te.index] = pred
+
+        acc = float(accuracy_score(y_te, pred))
+        auc = float(roc_auc_score(y_te, proba)) if len(np.unique(y_te)) > 1 else None
+        ll = float(log_loss(y_te, proba))
+        fold_metrics.append({"fold": i, "accuracy": acc, "roc_auc": auc, "logloss": ll})
+        last_fold_model = mdl
+
+    oof_mask = ~np.isnan(oof_proba)
+    oof_y = y.values[oof_mask]
+    oof_p = oof_proba[oof_mask]
+    oof_d = oof_pred[oof_mask]
+
+    conformal = ConformalCalibrator.calibrate(oof_p, oof_y, alpha=0.10)
     calibrator_data = None
     try:
-        calibrator = best_calibrator(y_proba, y_test.to_numpy())
+        calibrator = best_calibrator(oof_p, oof_y)
         calibrator_data = calibrator.to_dict()
     except ValueError:
         pass
 
-    metrics = {
-        "accuracy": float(accuracy_score(y_test, y_pred)),
-        "roc_auc": float(roc_auc_score(y_test, y_proba))
-        if len(np.unique(y_test)) > 1
-        else None,
-        "logloss": float(log_loss(y_test, y_proba)),
+    mean_acc = float(np.mean([m["accuracy"] for m in fold_metrics]))
+    auc_vals = [m["roc_auc"] for m in fold_metrics if m["roc_auc"] is not None]
+    mean_auc = float(np.mean(auc_vals)) if auc_vals else None
+    ll_vals = [m["logloss"] for m in fold_metrics]
+    mean_ll = float(np.mean(ll_vals))
+
+    metrics: dict[str, Any] = {
+        "accuracy": mean_acc,
+        "roc_auc": mean_auc,
+        "logloss": mean_ll,
+        "oof_accuracy": float(accuracy_score(oof_y, oof_d)),
+        "oof_roc_auc": (
+            float(roc_auc_score(oof_y, oof_p)) if len(np.unique(oof_y)) > 1 else None
+        ),
+        "n_folds": len(folds),
         "conformal_q_hat": conformal.q_hat,
         "conformal_n_cal": conformal.n_cal,
     }
+
+    # Final model: retrain on ALL data (cap n_estimators from last fold's early stopping)
+    last_best = getattr(last_fold_model, "best_iteration_", None)
+    final_params = dict(params)
+    if last_best:
+        final_params["n_estimators"] = last_best
+    final_params.pop("early_stopping_rounds", None)
+    model = LGBMClassifier(**final_params)
+    model.fit(X, y)
+    print(f"LGBM final model trained on {len(X)} rows")
 
     model_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")

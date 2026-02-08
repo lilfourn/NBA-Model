@@ -179,7 +179,9 @@ def build_league_means_timeline(gamelogs: pd.DataFrame) -> dict[str, Any]:
             "global": {},
         }
 
-    timeline_dates = np.sort(logs["game_date"].drop_duplicates().to_numpy(dtype="datetime64[ns]"))
+    timeline_dates = np.sort(
+        logs["game_date"].drop_duplicates().to_numpy(dtype="datetime64[ns]")
+    )
     timeline_index = pd.to_datetime(timeline_dates)
     sums: dict[str, np.ndarray] = {}
     counts: dict[str, np.ndarray] = {}
@@ -205,9 +207,7 @@ def build_league_means_timeline(gamelogs: pd.DataFrame) -> dict[str, Any]:
     for stat_key, (base_col, sub_col) in SPECIAL_DIFFS.items():
         if base_col not in logs.columns or sub_col not in logs.columns:
             continue
-        _register_stat(
-            stat_key, logs[base_col].fillna(0) - logs[sub_col].fillna(0)
-        )
+        _register_stat(stat_key, logs[base_col].fillna(0) - logs[sub_col].fillna(0))
 
     for stat_key, weights in WEIGHTED_SUMS.items():
         if not weights:
@@ -262,10 +262,33 @@ def league_mean_before_cutoff(
     return float(sums[stat_key][idx] / denom)
 
 
+def compute_player_usage(
+    player_fga: float,
+    player_fta: float,
+    player_to: float,
+    team_fga: float,
+    team_fta: float,
+    team_to: float,
+) -> float:
+    """Player usage rate = share of team possessions used.
+
+    Usage = (player_FGA + 0.44*player_FTA + player_TO) / (team_FGA + 0.44*team_FTA + team_TO)
+    Returns 0.0 if denominator is 0.
+    """
+    denom = team_fga + 0.44 * team_fta + team_to
+    if denom == 0:
+        return 0.0
+    return float((player_fga + 0.44 * player_fta + player_to) / denom)
+
+
 def _cutoff_date(cutoff: datetime | None) -> datetime | None:
     if cutoff is None:
         return None
-    cutoff_ts = cutoff if isinstance(cutoff, pd.Timestamp) else pd.to_datetime(cutoff, errors="coerce")
+    cutoff_ts = (
+        cutoff
+        if isinstance(cutoff, pd.Timestamp)
+        else pd.to_datetime(cutoff, errors="coerce")
+    )
     if isinstance(cutoff_ts, pd.Timestamp) and cutoff_ts.tz is not None:
         cutoff_ts = cutoff_ts.tz_convert(None)
     return cutoff_ts
@@ -305,6 +328,7 @@ def _empty_history(league_mean: float) -> dict[str, float]:
         "hot_streak_count": 0.0,
         "cold_streak_count": 0.0,
         "season_game_number": 0.0,
+        "forecast_edge": 0.0,
     }
 
 
@@ -345,7 +369,9 @@ def compute_history_features(
             base_col, sub_col = diff
             if base_col not in hist.columns or sub_col not in hist.columns:
                 return _empty_history(league_mean)
-            vals = (hist[base_col].fillna(0) - hist[sub_col].fillna(0)).to_numpy(dtype=np.float32)
+            vals = (hist[base_col].fillna(0) - hist[sub_col].fillna(0)).to_numpy(
+                dtype=np.float32
+            )
         elif weights:
             missing = [col for col in weights.keys() if col not in hist.columns]
             if missing:
@@ -395,7 +421,7 @@ def compute_history_features(
     # Trend slope: linear regression slope over last 10 games (positive = improving).
     trend_slope = 0.0
     if vals.size >= 3:
-        recent = vals[-min(10, vals.size):]
+        recent = vals[-min(10, vals.size) :]
         x = np.arange(len(recent), dtype=np.float32)
         x_mean = x.mean()
         denom = ((x - x_mean) ** 2).sum()
@@ -420,7 +446,7 @@ def compute_history_features(
     # Stat variance in last 5 games (raw, not normalized).
     stat_std_5 = 0.0
     if vals.size >= 2:
-        recent5 = vals[-min(5, vals.size):]
+        recent5 = vals[-min(5, vals.size) :]
         stat_std_5 = float(recent5.std(ddof=0))
 
     # Stat rate per minute (efficiency): recent 5-game stat / minutes ratio.
@@ -478,4 +504,5 @@ def compute_history_features(
         "hot_streak_count": float(hot_streak_count),
         "cold_streak_count": float(cold_streak_count),
         "season_game_number": float(season_game_number),
+        "forecast_edge": float(mu_stab - line_score),
     }

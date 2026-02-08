@@ -20,7 +20,6 @@ from app.ml.artifact_store import load_latest_artifact_as_file
 from app.ml.artifacts import load_joblib_artifact, latest_compatible_joblib_path
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs
-from app.ml.meta_learner import infer_meta_learner
 from app.ml.nn.infer import (
     infer_over_probs as infer_nn_over_probs,
     latest_compatible_checkpoint,
@@ -33,16 +32,12 @@ from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs
 from app.modeling.conformal import ConformalCalibrator
 from app.modeling.db_logs import load_db_game_logs
 from app.modeling.forecast_calibration import ForecastDistributionCalibrator
-from app.modeling.gating_model import GatingModel, build_context_features
-from app.modeling.hybrid_ensemble import HybridEnsembleCombiner
-from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler
 from app.modeling.probability import confidence_from_probability
 from app.modeling.stat_forecast import (
     ForecastParams,
     LeaguePriors,
     StatForecastPredictor,
 )
-from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler
 from app.modeling.types import Projection
 from app.ml.stat_mappings import (
     stat_components,
@@ -134,10 +129,10 @@ SHRINK_MAX = 0.15  # low-data picks: 15% pull toward prior (was 0.25)
 
 # Abstain policy: only publish picks with p_pick >= threshold
 # p_pick = max(p_final, 1 - p_final)
-PICK_THRESHOLD = 0.57
+PICK_THRESHOLD = 0.60
 
 # Minimum edge score for a pick to be publishable
-MIN_EDGE = 2.0
+MIN_EDGE = 5.0
 
 # Minimum effective sample size for publishability.
 # n_eff < 10 has 30-47% accuracy — guaranteed losers.
@@ -154,11 +149,17 @@ EXCLUDED_STAT_TYPES: set[str] = {"Dunks", "Blocked Shots"}
 # Stat types with too few samples or skewed base rates.
 # We score them with the context prior only and never publish.
 PRIOR_ONLY_STAT_TYPES: set[str] = {
-    "Blks+Stls",
     "Offensive Rebounds",
-    "Personal Fouls",
+    "Two Pointers Made",
+    "Two Pointers Attempted",
+    "Turnovers",
+    "Free Throws Attempted",
     "Steals",
+    "Blks+Stls",
+    "Defensive Rebounds",
 }
+
+TOP3_EXPERTS = ("p_lgbm", "p_xgb", "p_nn")
 
 
 def _logit(p: float) -> float:
@@ -443,73 +444,6 @@ def _risk_adjusted_confidence(
     return 0.5 + rho * (p_pick - 0.5)
 
 
-def _nn_weight_cap_for_latest_auc(engine: Engine) -> dict[str, float]:
-    """Determine NN weight cap based on best recent AUC.
-
-    Uses MAX AUC from the last 5 NN training runs to avoid penalizing the NN
-    when recursive training uploads multiple rounds (where the last round
-    may not be the best).
-    """
-    try:
-        with engine.connect() as conn:
-            nn_auc = conn.execute(
-                text(
-                    "select max((metrics->>'roc_auc')::float) from ("
-                    "  select metrics from model_runs "
-                    "  where model_name = 'nn_gru_attention' "
-                    "    and metrics->>'roc_auc' is not null "
-                    "  order by created_at desc limit 5"
-                    ") sub"
-                )
-            ).scalar()
-            if nn_auc is not None:
-                value = float(nn_auc)
-                logger.info("NN best recent AUC: %.4f", value)
-                if value >= 0.60:
-                    return {}
-                if value >= 0.55:
-                    return {"p_nn": 0.20}
-    except Exception:  # noqa: BLE001
-        pass
-    return {"p_nn": 0.10}
-
-
-def _ensure_ensemble_experts(
-    ens: ContextualHedgeEnsembler, experts: list[str]
-) -> ContextualHedgeEnsembler:
-    if ens.experts == experts:
-        return ens
-    ens.experts = list(experts)
-    seed = ens._init_weights()  # noqa: SLF001
-    for ctx_key, weights in ens.weights.items():
-        for expert in experts:
-            if expert not in weights:
-                weights[expert] = float(seed.get(expert, 0.0))
-        total = sum(max(0.0, float(weights.get(expert, 0.0))) for expert in experts)
-        if not math.isfinite(total) or total <= 0:
-            ens.weights[ctx_key] = dict(seed)
-            continue
-        for expert in experts:
-            weights[expert] = max(0.0, float(weights.get(expert, 0.0))) / total
-    return ens
-
-
-def _ensure_thompson_experts(
-    ts: ThompsonSamplingEnsembler, experts: list[str]
-) -> ThompsonSamplingEnsembler:
-    if ts.experts == experts:
-        return ts
-    ts.experts = list(experts)
-    ctx_keys = set(ts.alpha.keys()) | set(ts.beta.keys())
-    for ctx_key in ctx_keys:
-        alpha = ts.alpha.setdefault(ctx_key, {})
-        beta = ts.beta.setdefault(ctx_key, {})
-        for expert in experts:
-            alpha.setdefault(expert, float(ts.prior_alpha))
-            beta.setdefault(expert, float(ts.prior_beta))
-    return ts
-
-
 def _is_supported_stat_type(stat_type: str) -> bool:
     if not stat_type:
         return False
@@ -580,9 +514,9 @@ def _to_projection(row: object) -> Projection:
         event_type=None,
         projection_type=_row_get(row, "projection_type"),
         trending_count=_row_get(row, "trending_count"),
-        is_today=bool(_row_get(row, "today"))
-        if _row_get(row, "today") is not None
-        else None,
+        is_today=(
+            bool(_row_get(row, "today")) if _row_get(row, "today") is not None else None
+        ),
         is_combo=bool(_row_get(row, "combo") or False),
     )
 
@@ -667,9 +601,6 @@ def score_ensemble(
         )
         xgb_path = load_latest_artifact_as_file(engine, "xgb", suffix=".joblib")
         lgbm_path = load_latest_artifact_as_file(engine, "lgbm", suffix=".joblib")
-        meta_path = load_latest_artifact_as_file(
-            engine, "meta_learner", suffix=".joblib"
-        )
     else:
         models_path = Path(models_dir)
         nn_path = latest_compatible_checkpoint(models_path, "nn_gru_attention_*.pt")
@@ -677,17 +608,37 @@ def score_ensemble(
         lr_path = latest_compatible_joblib_path(models_path, "baseline_logreg_*.joblib")
         xgb_path = latest_compatible_joblib_path(models_path, "xgb_*.joblib")
         lgbm_path = latest_compatible_joblib_path(models_path, "lgbm_*.joblib")
-        meta_path = latest_compatible_joblib_path(models_path, "meta_learner_*.joblib")
+
+    # Stacking meta-learner (optional)
+    _stacking_model = None
+    try:
+        from app.ml.stacking import predict_stacking
+
+        if _use_db:
+            _stacking_path = load_latest_artifact_as_file(
+                engine, "stacking_meta", suffix=".joblib"
+            )
+        else:
+            _stacking_path = latest_compatible_joblib_path(
+                models_path, "stacking_meta_*.joblib"
+            )
+        if _stacking_path and _stacking_path.exists():
+            _stacking_payload = load_joblib_artifact(str(_stacking_path))
+            _stacking_model = _stacking_payload.get("model")
+    except Exception:
+        logger.warning(
+            "Stacking meta-model not available, using logit average fallback"
+        )
 
     logger.info(
-        "Model paths resolved (db=%s): nn=%s tabdl=%s lr=%s xgb=%s lgbm=%s meta=%s",
+        "Model paths resolved (db=%s): nn=%s tabdl=%s lr=%s xgb=%s lgbm=%s stacking=%s",
         _use_db,
         nn_path,
         tabdl_path,
         lr_path,
         xgb_path,
         lgbm_path,
-        meta_path,
+        _stacking_model is not None,
     )
 
     # Load conformal calibrators keyed by expert so each calibrator is applied
@@ -891,90 +842,6 @@ def score_ensemble(
                     continue
                 p_lgbm[str(proj_id)] = prob
 
-    experts = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
-    nn_cap = _nn_weight_cap_for_latest_auc(engine)
-
-    _ens_path: Path | str | None = None
-    _ts_path: Path | str | None = None
-    _gating_path: Path | str | None = None
-    if _use_db:
-        _ens_path = load_latest_artifact_as_file(
-            engine, "ensemble_weights", suffix=".json"
-        )
-        _ts_path = load_latest_artifact_as_file(
-            engine, "thompson_weights", suffix=".json"
-        )
-        _gating_path = load_latest_artifact_as_file(
-            engine, "gating_model", suffix=".joblib"
-        )
-    else:
-        _ens_path = (
-            Path(ensemble_weights_path)
-            if Path(ensemble_weights_path).exists()
-            else None
-        )
-        _ts_candidate = Path(models_dir) / "thompson_weights.json"
-        _ts_path = _ts_candidate if _ts_candidate.exists() else None
-        _gating_candidate = Path(models_dir) / "gating_model.joblib"
-        _gating_path = _gating_candidate if _gating_candidate.exists() else None
-
-    if _ens_path:
-        ens = _ensure_ensemble_experts(
-            ContextualHedgeEnsembler.load(str(_ens_path)), experts
-        )
-        if not ens.max_weight:
-            ens.max_weight = nn_cap
-    else:
-        ens = ContextualHedgeEnsembler(
-            experts=experts, eta=0.2, shrink_to_uniform=0.01, max_weight=nn_cap
-        )
-
-    # Load Thompson Sampling ensemble (optional)
-    thompson: ThompsonSamplingEnsembler | None = None
-    if _ts_path:
-        try:
-            thompson = _ensure_thompson_experts(
-                ThompsonSamplingEnsembler.load(str(_ts_path)), experts
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("Failed to load Thompson ensemble", exc_info=True)
-
-    # Load Gating Model (optional)
-    gating: GatingModel | None = None
-    if _gating_path:
-        try:
-            gating = GatingModel.load(str(_gating_path))
-        except Exception:  # noqa: BLE001
-            logger.warning("Failed to load Gating model", exc_info=True)
-
-    # Build hybrid combiner if Thompson or Gating available
-    hybrid: HybridEnsembleCombiner | None = None
-    if thompson is not None or gating is not None:
-        hybrid = HybridEnsembleCombiner.from_components(
-            thompson=thompson,
-            gating=gating,
-            experts=experts,
-        )
-        # Load optimized mixing weights if available
-        if _use_db:
-            _mix_path = load_latest_artifact_as_file(
-                engine, "hybrid_mixing", suffix=".json"
-            )
-        else:
-            _mix_candidate = Path(models_dir) / "hybrid_mixing.json"
-            _mix_path = _mix_candidate if _mix_candidate.exists() else None
-        if _mix_path:
-            try:
-                hybrid.load_mixing(str(_mix_path))
-                logger.info(
-                    "Hybrid mixing: alpha=%.2f beta=%.2f gamma=%.2f",
-                    hybrid.alpha,
-                    hybrid.beta,
-                    hybrid.gamma,
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to load hybrid mixing weights", exc_info=True)
-
     # Load context-aware priors for shrinkage (daily-refreshed from resolved data)
     from app.ml.context_prior import get_context_prior, load_context_priors
     from app.ml.stat_calibrator import StatTypeCalibrator
@@ -1012,9 +879,11 @@ def score_ensemble(
                 _routing_path = Path(str(_routing_artifact))
         if _routing_path.exists():
             import json as _json
+
             _routing_raw = _json.loads(_routing_path.read_text(encoding="utf-8"))
             _expert_routing = {
-                k: v for k, v in _routing_raw.items()
+                k: v
+                for k, v in _routing_raw.items()
                 if not k.startswith("_") and isinstance(v, str)
             }
             if _expert_routing:
@@ -1026,40 +895,14 @@ def score_ensemble(
     except Exception:  # noqa: BLE001
         logger.warning("Failed to load expert routing", exc_info=True)
 
-    # --- Inversion corrections ---
-    # Some experts are anti-predictive (accuracy < 50%, improves when flipped).
-    # Load flags from model_health report and flip those experts' probabilities.
-    from app.ml.inversion_corrections import load_inversion_flags
-
-    _inversion_flags: dict[str, bool] = {}
-    try:
-        _inversion_flags = load_inversion_flags(engine if _use_db else None)
-        if _inversion_flags:
-            logger.info(
-                "Inversion corrections active for: %s",
-                ", ".join(k for k, v in _inversion_flags.items() if v),
-            )
-    except Exception:  # noqa: BLE001
-        logger.warning("Failed to load inversion flags", exc_info=True)
-
     # --- Artifact availability diagnostic ---
     _n_stat_cals = len(_stat_calibrator.calibrators) if _stat_calibrator else 0
     _n_ctx_stats = len(_context_priors.get("stat_type_priors", {}))
-    _has_hybrid_mix = hybrid is not None
-    _hybrid_info = (
-        f"alpha={hybrid.alpha:.2f} beta={hybrid.beta:.2f} gamma={hybrid.gamma:.2f}"
-        if hybrid
-        else "N/A"
-    )
     logger.info(
         "Scoring artifact status: stat_calibrator=%d stat-types, "
-        "context_priors=%d stat-types, hybrid=%s (%s), thompson=%s, gating=%s",
+        "context_priors=%d stat-types",
         _n_stat_cals,
         _n_ctx_stats,
-        _has_hybrid_mix,
-        _hybrid_info,
-        thompson is not None,
-        gating is not None and gating.is_fitted,
     )
     if _n_stat_cals == 0:
         logger.warning(
@@ -1074,51 +917,8 @@ def score_ensemble(
         )
 
     def _apply_inversions(ep: dict[str, float | None]) -> dict[str, float | None]:
-        """Flip expert probs where inversion flags are set."""
-        if not _inversion_flags:
-            return ep
-        for k in ep:
-            if ep[k] is not None and _inversion_flags.get(k):
-                ep[k] = 1.0 - ep[k]
+        """Disabled: systemic inversion signals indicate calibration issues, not individual expert problems."""
         return ep
-
-    # --- Batch-level expert debiasing ---
-    # If all experts systematically lean one direction, shift them toward 0.5
-    # while preserving relative ordering (which IS the real signal).
-    _DEBIAS_THRESHOLD = 0.05  # trigger when batch mean deviates >5pp from 0.5
-    _all_expert_vals: list[float] = []
-    for _row in frame.itertuples(index=False):
-        _pid = str(getattr(_row, "projection_id", ""))
-        _st = str(getattr(_row, "stat_type", "") or "")
-        if not _st or not _pid or _st in EXCLUDED_STAT_TYPES:
-            continue
-        _f = forecast_map.get(_pid) or {}
-        _ep = {
-            "p_forecast_cal": _safe_prob(_f.get("p_forecast_cal")),
-            "p_nn": _safe_prob(p_nn.get(_pid)),
-            "p_tabdl": _safe_prob(p_tabdl.get(_pid)),
-            "p_lr": _safe_prob(p_lr.get(_pid)),
-            "p_xgb": _safe_prob(p_xgb.get(_pid)),
-            "p_lgbm": _safe_prob(p_lgbm.get(_pid)),
-        }
-        _ep = _apply_inversions(_ep)
-        for _v in _ep.values():
-            if _v is not None:
-                _all_expert_vals.append(_v)
-
-    _expert_shift = 0.0
-    if _all_expert_vals:
-        _batch_mean = sum(_all_expert_vals) / len(_all_expert_vals)
-        if abs(_batch_mean - 0.5) > _DEBIAS_THRESHOLD:
-            _expert_shift = 0.5 - _batch_mean
-            logger.info(
-                "Expert debiasing: batch mean P(over)=%.3f, applying shift=%+.3f "
-                "(%d expert values across %d props)",
-                _batch_mean,
-                _expert_shift,
-                len(_all_expert_vals),
-                len(frame),
-            )
 
     scored: list[dict[str, Any]] = []
     for row in frame.itertuples(index=False):
@@ -1140,13 +940,7 @@ def score_ensemble(
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
-        # Apply inversion corrections for anti-predictive experts
         expert_probs = _apply_inversions(expert_probs)
-        # Apply batch-level debiasing shift
-        if _expert_shift != 0.0:
-            for _ek in expert_probs:
-                if expert_probs[_ek] is not None:
-                    expert_probs[_ek] = max(0.01, min(0.99, expert_probs[_ek] + _expert_shift))
         # Clip to prevent logit-space outlier domination (e.g. TabDL at 8%)
         expert_probs = _clip_expert_probs(expert_probs)
 
@@ -1156,63 +950,26 @@ def score_ensemble(
             n_eff_val = float(n_eff) if n_eff is not None else None
         except (TypeError, ValueError):
             n_eff_val = None
-        # Meta-learner: blends base experts with context
-        p_meta_val: float | None = None
-        if meta_path:
-            try:
-                p_meta_val = infer_meta_learner(
-                    model_path=str(meta_path),
-                    expert_probs=expert_probs,
-                    n_eff=n_eff_val,
-                )
-            except Exception:  # noqa: BLE001
-                if not hasattr(score_ensemble, "_meta_warned"):
-                    logger.warning("Meta-learner inference failed", exc_info=True)
-                    score_ensemble._meta_warned = True  # type: ignore[attr-defined]
-        ctx = Context(stat_type=stat_type, is_live=is_live, n_eff=n_eff_val)
-        # Stat-type expert routing: if a preferred expert exists for this stat
-        # type and has a valid probability, use it directly as p_raw.
-        p_raw = None
-        _routed_expert = _expert_routing.get(stat_type)
-        if _routed_expert and expert_probs.get(_routed_expert) is not None:
-            p_raw = expert_probs[_routed_expert]
+        # Ensemble: stacking meta-model or logit average fallback
+        if _stacking_model is not None:
+            from app.ml.stacking import predict_stacking
 
-        # Primary: hybrid combiner (Thompson + Gating + Meta)
-        # Fallback chain: routing → hybrid → meta-learner → Hedge
-        if p_raw is None and hybrid is not None:
-            try:
-                # Build context features for gating model
-                avail = {k: v for k, v in expert_probs.items() if v is not None}
-                ctx_feats = None
-                if avail and gating is not None and gating.is_fitted:
-                    ctx_feats = build_context_features(
-                        {k: np.array([v]) for k, v in avail.items()},
-                        n_eff=np.array([n_eff_val or 0.0]),
-                    )[0]
-                ctx_tuple = (
-                    stat_type,
-                    "live" if is_live else "pregame",
-                    "high" if (n_eff_val or 0) >= 15 else "low",
+            p_raw = predict_stacking(
+                _stacking_model, {e: expert_probs.get(e) for e in TOP3_EXPERTS}
+            )
+        else:
+            top3_probs = [
+                expert_probs[e] for e in TOP3_EXPERTS if expert_probs.get(e) is not None
+            ]
+            if top3_probs:
+                p_raw = _sigmoid(sum(_logit(p) for p in top3_probs) / len(top3_probs))
+            else:
+                any_probs = [v for v in expert_probs.values() if v is not None]
+                p_raw = (
+                    _sigmoid(sum(_logit(p) for p in any_probs) / len(any_probs))
+                    if any_probs
+                    else 0.5
                 )
-                p_hybrid = hybrid.predict(
-                    expert_probs,
-                    ctx_tuple,
-                    context_features=ctx_feats,
-                    p_meta=p_meta_val
-                    if p_meta_val is not None and math.isfinite(p_meta_val)
-                    else None,
-                    n_eff=n_eff_val,
-                )
-                if math.isfinite(p_hybrid):
-                    p_raw = p_hybrid
-            except Exception:  # noqa: BLE001
-                if not hasattr(score_ensemble, "_hybrid_warned"):
-                    logger.warning("Hybrid ensemble prediction failed", exc_info=True)
-                    score_ensemble._hybrid_warned = True  # type: ignore[attr-defined]
-        if p_raw is None and p_meta_val is not None and math.isfinite(p_meta_val):
-            p_raw = p_meta_val
-        if p_raw is None:
-            p_raw = float(ens.predict(expert_probs, ctx))
         if not math.isfinite(p_raw):
             continue
         # Shrink toward context-aware prior in logit space.
@@ -1294,7 +1051,7 @@ def score_ensemble(
                 "p_lr": expert_probs["p_lr"],
                 "p_xgb": expert_probs["p_xgb"],
                 "p_lgbm": expert_probs["p_lgbm"],
-                "p_meta": _safe_prob(p_meta_val),
+                "p_meta": None,
                 "mu_hat": float(f.get("mu_hat") or 0.0) if f else None,
                 "sigma_hat": float(f.get("sigma_hat") or 0.0) if f else None,
                 "calibration_status": status,
@@ -1304,9 +1061,13 @@ def score_ensemble(
         )
         item = scored[-1]
         item["edge"] = _compute_edge(
-            p_final, expert_probs, item["conformal_set_size"],
-            n_eff=n_eff_val, context_prior=_ctx_prior,
-            mu_hat=_mu_hat_val, line_score=_line_score,
+            p_final,
+            expert_probs,
+            item["conformal_set_size"],
+            n_eff=n_eff_val,
+            context_prior=_ctx_prior,
+            mu_hat=_mu_hat_val,
+            line_score=_line_score,
             sigma_hat=_sigma_hat_val,
         )
         item["grade"] = _grade_from_edge(item["edge"])
@@ -1371,17 +1132,19 @@ def score_ensemble(
                 if item["pick"] == dominant_dir:
                     st = item["stat_type"]
                     ls = item["line_score"]
-                    cp = get_context_prior(
-                        _context_priors, stat_type=st, line_score=ls
-                    )
+                    cp = get_context_prior(_context_priors, stat_type=st, line_score=ls)
                     # Penalize more aggressively during imbalance
                     item["edge"] = _compute_edge(
                         item["prob_over"],
                         {
                             k: item.get(k)
                             for k in [
-                                "p_forecast_cal", "p_nn", "p_tabdl",
-                                "p_lr", "p_xgb", "p_lgbm",
+                                "p_forecast_cal",
+                                "p_nn",
+                                "p_tabdl",
+                                "p_lr",
+                                "p_xgb",
+                                "p_lgbm",
                             ]
                         },
                         item["conformal_set_size"],
@@ -1395,12 +1158,8 @@ def score_ensemble(
                     if item["edge"] < MIN_EDGE:
                         item["is_publishable"] = False
             # Re-sort and re-filter after demotion
-            publishable = [
-                item for item in scored if item.get("is_publishable", False)
-            ]
-            top_picks = sorted(
-                publishable, key=lambda x: x["edge"], reverse=True
-            )[:top]
+            publishable = [item for item in scored if item.get("is_publishable", False)]
+            top_picks = sorted(publishable, key=lambda x: x["edge"], reverse=True)[:top]
 
     picks = [
         ScoredPick(

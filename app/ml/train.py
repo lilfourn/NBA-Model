@@ -15,56 +15,20 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, PolynomialFeatures, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from app.db import schema
 from app.ml.calibration import best_calibrator
 from app.ml.dataset import load_training_data
-from app.ml.stat_mappings import stat_value_from_row
+from app.ml.prepare_features import (
+    CATEGORICAL_COLS,
+    NUMERIC_COLS,
+    prepare_lr_features,
+    time_series_cv_split,
+)
 from app.modeling.conformal import ConformalCalibrator
 
 MIN_TRAIN_ROWS = 50
-
-
-CATEGORICAL_COLS = ["stat_type", "projection_type", "line_movement"]
-NUMERIC_COLS = [
-    "line_score",
-    "line_score_prev",
-    "line_score_delta",
-    "minutes_to_start",
-    "odds_type",
-    "trending_count",
-    "is_promo",
-    "is_live",
-    "in_game",
-    "today",
-    "hist_n",
-    "hist_mean",
-    "hist_std",
-    "p_hist_over",
-    "rest_days",
-    "is_back_to_back",
-    "stat_mean_3",
-    "stat_mean_10",
-    "minutes_mean_3",
-    "minutes_mean_10",
-    "is_home",
-    "opp_def_stat_avg",
-    "opp_def_points_avg",
-    "opp_def_rebounds_avg",
-    "opp_def_assists_avg",
-    "trend_slope",
-    "stat_cv",
-    "recent_vs_season",
-    "minutes_trend",
-    "stat_std_5",
-    "line_move_pct",
-    "line_move_late",
-    "opp_def_rank",
-    "line_vs_mean_ratio",
-    "hot_streak_count",
-    "cold_streak_count",
-]
 
 
 @dataclass
@@ -74,53 +38,9 @@ class TrainResult:
     rows: int
 
 
-def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
-    df = df.copy()
-    # Keep training aligned with inference: exclude PrizePicks combo players and "+" names.
-    if "is_combo" in df.columns:
-        df = df[df["is_combo"].fillna(False) == False]  # noqa: E712
-    if "player_name" in df.columns:
-        df = df[~df["player_name"].fillna("").astype(str).str.contains("+", regex=False)]
-
-    df["actual_value"] = [
-        stat_value_from_row(getattr(row, "stat_type", None), row)
-        for row in df.itertuples(index=False)
-    ]
-    df = df.dropna(subset=["line_score", "actual_value", "fetched_at"])
-
-    # Avoid training on in-game lines (different regime + leakage risk).
-    if "minutes_to_start" in df.columns:
-        df = df[df["minutes_to_start"].fillna(0) >= 0]
-    if "is_live" in df.columns:
-        df = df[df["is_live"].fillna(False) == False]  # noqa: E712
-    if "in_game" in df.columns:
-        df = df[df["in_game"].fillna(False) == False]  # noqa: E712
-
-    df["over"] = (df["actual_value"] > df["line_score"]).astype(int)
-
-    # Deduplicate: keep earliest snapshot per player+game+stat to prevent
-    # the same prediction leaking across train/test via multiple snapshots.
-    dedup_cols = ["player_id", "nba_game_id", "stat_type"]
-    if all(c in df.columns for c in dedup_cols):
-        df = df.sort_values("fetched_at").drop_duplicates(subset=dedup_cols, keep="first")
-
-    df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].fillna("unknown").astype(str)
-    # Coerce numerics to float to avoid object dtypes (Decimals) breaking sklearn.
-    for col in NUMERIC_COLS:
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df[NUMERIC_COLS] = df[NUMERIC_COLS].fillna(0.0).astype(float)
-    # Stabilize very large-count features.
-    if "trending_count" in df.columns:
-        df["trending_count"] = np.log1p(df["trending_count"].clip(lower=0.0))
-
-    X = df[CATEGORICAL_COLS + NUMERIC_COLS].copy()
-    y = df["over"]
-    return X, y, df
-
-
-def _time_split(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, holdout_ratio: float = 0.2):
+def _time_split(
+    df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, holdout_ratio: float = 0.2
+):
     df_sorted = df.sort_values("fetched_at")
     cutoff = int(len(df_sorted) * (1 - holdout_ratio))
     train_idx = df_sorted.index[:cutoff]
@@ -132,28 +52,14 @@ def _time_split(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series, holdout_ratio: 
     return X_train, X_test, y_train, y_test
 
 
-def train_baseline(engine, model_dir: Path) -> TrainResult:
-    df = load_training_data(engine)
-    if df.empty:
-        raise RuntimeError("No training data available. Did you load NBA stats and build features?")
-
-    X, y, df_used = _prepare_features(df)
-    if df_used.empty:
-        raise RuntimeError("Not enough training data after cleaning. Did you load NBA stats?")
-    if df_used.empty:
-        raise RuntimeError("Not enough training data available yet.")
-    if y.nunique() < 2:
-        raise RuntimeError("Not enough class variety to train yet.")
-    if len(df_used) < MIN_TRAIN_ROWS:
-        raise RuntimeError(f"Not enough training data available yet (rows={len(df_used)}).")
-    X_train, X_test, y_train, y_test = _time_split(df_used, X, y)
-
-    # Numeric sub-pipeline: impute → polynomial interactions → scale
-    numeric_pipe = Pipeline([
-        ("impute", SimpleImputer(strategy="constant", fill_value=0.0)),
-        ("poly", PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)),
-        ("scale", StandardScaler()),
-    ])
+def _build_lr_pipeline() -> Pipeline:
+    """Build the LR preprocessing + model pipeline."""
+    numeric_pipe = Pipeline(
+        [
+            ("impute", SimpleImputer(strategy="constant", fill_value=0.0)),
+            ("scale", StandardScaler()),
+        ]
+    )
     preprocess = ColumnTransformer(
         transformers=[
             (
@@ -165,33 +71,91 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
         ],
     )
     model = LogisticRegression(max_iter=5000, solver="lbfgs", C=0.05)
-    pipeline = Pipeline(steps=[("preprocess", preprocess), ("model", model)])
+    return Pipeline(steps=[("preprocess", preprocess), ("model", model)])
+
+
+def train_baseline(engine, model_dir: Path) -> TrainResult:
+    df = load_training_data(engine)
+    if df.empty:
+        raise RuntimeError(
+            "No training data available. Did you load NBA stats and build features?"
+        )
+
+    X, y, df_used = prepare_lr_features(df)
+    if df_used.empty:
+        raise RuntimeError(
+            "Not enough training data after cleaning. Did you load NBA stats?"
+        )
+    if y.nunique() < 2:
+        raise RuntimeError("Not enough class variety to train yet.")
+    if len(df_used) < MIN_TRAIN_ROWS:
+        raise RuntimeError(
+            f"Not enough training data available yet (rows={len(df_used)})."
+        )
+
+    folds = time_series_cv_split(df_used, X, y, n_splits=5)
+
+    oof_proba = np.full(len(y), np.nan)
+    oof_pred = np.full(len(y), np.nan)
+    fold_metrics: list[dict[str, Any]] = []
+
     with warnings.catch_warnings():
-        # Numpy/sklearn can emit noisy RuntimeWarnings during BLAS matmul on some builds
-        # (even when outputs are finite). Suppress to keep training output actionable.
-        warnings.filterwarnings("ignore", message=".*encountered in matmul", category=RuntimeWarning)
-        pipeline.fit(X_train, y_train)
+        warnings.filterwarnings(
+            "ignore", message=".*encountered in matmul", category=RuntimeWarning
+        )
+        for i, (X_tr, X_te, y_tr, y_te) in enumerate(folds):
+            pipe = _build_lr_pipeline()
+            pipe.fit(X_tr, y_tr)
+            proba = pipe.predict_proba(X_te)[:, 1]
+            pred = pipe.predict(X_te)
 
-        y_pred = pipeline.predict(X_test)
-        y_proba = pipeline.predict_proba(X_test)[:, 1]
+            oof_proba[X_te.index] = proba
+            oof_pred[X_te.index] = pred
 
-    # Conformal calibration on holdout
-    conformal = ConformalCalibrator.calibrate(y_proba, y_test.to_numpy(), alpha=0.10)
+            acc = float(accuracy_score(y_te, pred))
+            auc = (
+                float(roc_auc_score(y_te, proba)) if len(np.unique(y_te)) > 1 else None
+            )
+            fold_metrics.append({"fold": i, "accuracy": acc, "roc_auc": auc})
 
-    # Probability calibration on holdout (auto-selects isotonic vs Platt)
+    # OOF metrics (only on rows that were in test folds)
+    oof_mask = ~np.isnan(oof_proba)
+    oof_y = y.values[oof_mask]
+    oof_p = oof_proba[oof_mask]
+    oof_d = oof_pred[oof_mask]
+
+    # Calibration on OOF predictions (more data = better calibration)
+    conformal = ConformalCalibrator.calibrate(oof_p, oof_y, alpha=0.10)
     calibrator_data = None
     try:
-        calibrator = best_calibrator(y_proba, y_test.to_numpy())
+        calibrator = best_calibrator(oof_p, oof_y)
         calibrator_data = calibrator.to_dict()
     except ValueError:
         pass
 
-    metrics = {
-        "accuracy": float(accuracy_score(y_test, y_pred)),
-        "roc_auc": float(roc_auc_score(y_test, y_proba)) if len(np.unique(y_test)) > 1 else None,
+    mean_acc = float(np.mean([m["accuracy"] for m in fold_metrics]))
+    auc_vals = [m["roc_auc"] for m in fold_metrics if m["roc_auc"] is not None]
+    mean_auc = float(np.mean(auc_vals)) if auc_vals else None
+
+    metrics: dict[str, Any] = {
+        "accuracy": mean_acc,
+        "roc_auc": mean_auc,
+        "oof_accuracy": float(accuracy_score(oof_y, oof_d)),
+        "oof_roc_auc": (
+            float(roc_auc_score(oof_y, oof_p)) if len(np.unique(oof_y)) > 1 else None
+        ),
+        "n_folds": len(folds),
         "conformal_q_hat": conformal.q_hat,
         "conformal_n_cal": conformal.n_cal,
     }
+
+    # Final model: retrain on ALL data
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=".*encountered in matmul", category=RuntimeWarning
+        )
+        pipeline = _build_lr_pipeline()
+        pipeline.fit(X, y)
 
     model_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
@@ -199,7 +163,11 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
     artifact = {
         "model": pipeline,
         "feature_cols": {"categorical": CATEGORICAL_COLS, "numeric": NUMERIC_COLS},
-        "conformal": {"alpha": conformal.alpha, "q_hat": conformal.q_hat, "n_cal": conformal.n_cal},
+        "conformal": {
+            "alpha": conformal.alpha,
+            "q_hat": conformal.q_hat,
+            "n_cal": conformal.n_cal,
+        },
     }
     if calibrator_data:
         artifact["isotonic"] = calibrator_data
@@ -207,6 +175,7 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
 
     try:
         from app.ml.artifact_store import upload_file
+
         upload_file(engine, model_name="baseline_logreg", file_path=model_path)
         print(f"Uploaded baseline_logreg artifact to DB ({model_path})")
     except Exception as exc:  # noqa: BLE001
@@ -222,10 +191,17 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
                     "model_name": "baseline_logreg",
                     "train_rows": int(len(df_used)),
                     "metrics": metrics,
-                    "params": {"model": "logistic_regression", "max_iter": 5000, "preprocess": "onehot+standardize"},
+                    "params": {
+                        "model": "logistic_regression",
+                        "max_iter": 5000,
+                        "preprocess": "onehot+standardize",
+                        "cv_folds": len(folds),
+                    },
                     "artifact_path": str(model_path),
                 }
             )
         )
 
-    return TrainResult(model_path=str(model_path), metrics=metrics, rows=int(len(df_used)))
+    return TrainResult(
+        model_path=str(model_path), metrics=metrics, rows=int(len(df_used))
+    )

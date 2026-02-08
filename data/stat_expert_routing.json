@@ -1,6 +1,3 @@
 {
-  "_comment": "Maps stat_type -> preferred expert when that expert has >5% accuracy edge over ensemble. p_forecast_cal is the only expert NOT inverted, so it's the only one we can confidently route pre-inversion-data. Update after collecting post-inversion performance data.",
-  "Fantasy Score": "p_forecast_cal",
-  "Assists": "p_forecast_cal",
-  "Rebounds": "p_forecast_cal"
+  "_comment": "Maps stat_type -> preferred expert. Currently disabled — ensemble outperforms individual routing."
 }

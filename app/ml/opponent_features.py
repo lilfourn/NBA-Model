@@ -63,8 +63,13 @@ def _load_team_game_stats(engine: Engine) -> pd.DataFrame:
     frame = pd.read_sql(query, engine)
     frame["game_date"] = pd.to_datetime(frame["game_date"], errors="coerce")
     for col in frame.columns:
-        if col in {"game_id", "game_date", "team_abbreviation",
-                    "home_team_abbreviation", "away_team_abbreviation"}:
+        if col in {
+            "game_id",
+            "game_date",
+            "team_abbreviation",
+            "home_team_abbreviation",
+            "away_team_abbreviation",
+        }:
             continue
         frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0)
 
@@ -115,6 +120,33 @@ def _stat_value_series(frame: pd.DataFrame, stat_type: str) -> pd.Series | None:
     return None
 
 
+def compute_team_pace(team_game_stats: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Compute rolling team pace (possessions per game) for each team.
+
+    Possessions = FGA - OREB + TO + 0.44 * FTA
+    Uses rolling window of OPP_DEF_WINDOW (15) games, min_periods=3.
+    Returns dict: team_abbr -> DataFrame with game_date, game_id, team_pace.
+    """
+    result: dict[str, pd.DataFrame] = {}
+    for team_abbr, group in team_game_stats.groupby("team_abbreviation", sort=False):
+        sorted_g = group.sort_values("game_date")
+        poss = (
+            sorted_g["fga"].fillna(0)
+            - sorted_g["oreb"].fillna(0)
+            + sorted_g["turnovers"].fillna(0)
+            + 0.44 * sorted_g["fta"].fillna(0)
+        )
+        pace = poss.rolling(window=OPP_DEF_WINDOW, min_periods=3).mean()
+        result[str(team_abbr)] = pd.DataFrame(
+            {
+                "game_date": sorted_g["game_date"].values,
+                "game_id": sorted_g["game_id"].values,
+                "team_pace": pace.values,
+            }
+        )
+    return result
+
+
 def build_opponent_defensive_averages(
     team_game_stats: pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
@@ -125,8 +157,18 @@ def build_opponent_defensive_averages(
     Returns dict: opp_abbreviation -> DataFrame with game_date and rolling means.
     """
     stat_cols = [
-        "points", "rebounds", "assists", "steals", "blocks", "turnovers",
-        "fg3m", "fg3a", "fgm", "fga", "ftm", "fta",
+        "points",
+        "rebounds",
+        "assists",
+        "steals",
+        "blocks",
+        "turnovers",
+        "fg3m",
+        "fg3a",
+        "fgm",
+        "fga",
+        "ftm",
+        "fta",
     ]
 
     # Group by opponent: "what did teams score AGAINST this opponent?"
@@ -138,9 +180,7 @@ def build_opponent_defensive_averages(
         if not avail_cols:
             continue
         rolling = (
-            sorted_g[avail_cols]
-            .rolling(window=OPP_DEF_WINDOW, min_periods=3)
-            .mean()
+            sorted_g[avail_cols].rolling(window=OPP_DEF_WINDOW, min_periods=3).mean()
         )
         rolling.columns = [f"opp_def_{c}" for c in avail_cols]
         rolling["game_date"] = sorted_g["game_date"].values
@@ -159,9 +199,14 @@ def build_opponent_defensive_ranks(
     Returns: {stat_col: {team_abbr: rank}}
     """
     stat_cols = [
-        "opp_def_points", "opp_def_rebounds", "opp_def_assists",
-        "opp_def_steals", "opp_def_blocks", "opp_def_turnovers",
-        "opp_def_fg3m", "opp_def_fgm",
+        "opp_def_points",
+        "opp_def_rebounds",
+        "opp_def_assists",
+        "opp_def_steals",
+        "opp_def_blocks",
+        "opp_def_turnovers",
+        "opp_def_fg3m",
+        "opp_def_fgm",
     ]
     team_latest: dict[str, pd.Series] = {}
     for team_abbr, df in opp_def_avgs.items():

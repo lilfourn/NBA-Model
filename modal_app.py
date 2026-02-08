@@ -88,6 +88,11 @@ image = (
         copy=True,
     )
     .add_local_file(
+        str(REPO_ROOT / "data" / "stat_expert_routing.json"),
+        remote_path=str(REMOTE_PROJECT_ROOT / "data" / "stat_expert_routing.json"),
+        copy=True,
+    )
+    .add_local_file(
         str(REPO_ROOT / "alembic.ini"),
         remote_path=str(REMOTE_PROJECT_ROOT / "alembic.ini"),
         copy=True,
