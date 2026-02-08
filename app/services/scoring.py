@@ -139,6 +139,14 @@ PICK_THRESHOLD = 0.57
 # Minimum edge score for a pick to be publishable
 MIN_EDGE = 2.0
 
+# Minimum effective sample size for publishability.
+# n_eff < 10 has 30-47% accuracy — guaranteed losers.
+MIN_NEFF = 10.0
+
+# Maximum |mu_hat - line| for publishability.
+# Forecast edges > 4 points have 47% accuracy — overconfident.
+MAX_FORECAST_EDGE = 4.0
+
 # Stat types with degenerate base rates where no model can add value.
 # These are completely excluded from scoring.
 EXCLUDED_STAT_TYPES: set[str] = {"Dunks", "Blocked Shots"}
@@ -196,99 +204,108 @@ def _compute_edge(
     conformal_set_size: int | None,
     n_eff: float | None = None,
     context_prior: float | None = None,
+    mu_hat: float | None = None,
+    line_score: float | None = None,
+    sigma_hat: float | None = None,
 ) -> float:
-    """Composite prediction score 0-100 using SHRUNK probability.
+    """Composite prediction score 0-100 (v2: data-driven).
 
-    Strict: A+ ≈ top 2%, A ≈ top 10%.  Requires multiple conditions
-    to be true simultaneously to score high.
+    Redesigned based on analysis of 9,952 resolved predictions:
+    - Expert split decisions (34-50% agreement) had 61.3% accuracy
+    - Full consensus (84%+) had only 51.8%
+    - |mu-line| 2-3 was the sweet spot (55.4%)
+    - n_eff 10-20 was best (53%)
+    - Confidence 60-65% was best (55.2%)
+    - Higher confidence was WORSE (75%+ → 45.9%)
     """
     available = [v for v in expert_probs.values() if v is not None]
     n_experts = len(available)
     pick_over = p_shrunk >= 0.5
 
-    # 1. Directional edge (max 20pts)
-    #    Based on shrunk probability distance from 50%.
-    #    Power scaling so it's hard to max out.
-    raw_pct = abs(p_shrunk - 0.5)  # 0..~0.25
-    dir_score = min(20.0, (raw_pct / 0.20) ** 0.6 * 20.0)
-
-    # 2. Qualified expert consensus (max 30pts)
-    #    Experts must BOTH agree on direction AND output moderate probs.
-    #    An expert at 0.01 agreeing on UNDER gets zero credit — that's
-    #    overfit noise, not real signal.
-    if n_experts >= 2:
-        # "Qualified" = agrees on direction AND prob is in [0.25, 0.75]
-        qualified = sum(
-            1 for v in available if (v >= 0.5) == pick_over and 0.25 <= v <= 0.75
-        )
-        # Unqualified dissenters are a red flag
-        dissenters = sum(1 for v in available if (v >= 0.5) != pick_over)
-        # Need at least 2 qualified experts; penalize heavily for dissenters
-        q_ratio = max(0.0, qualified - dissenters * 2.0) / n_experts
-        # Require ≥ 3 experts for full marks
-        coverage = min(1.0, n_experts / 3.0)
-        consensus_score = q_ratio * coverage * 30.0
-    else:
-        consensus_score = 0.0
-
-    # 3. Expert tightness (max 15pts)
-    #    How tightly clustered are the qualified experts?
-    #    Uses only experts in the pick direction with moderate outputs.
-    if n_experts >= 2:
-        qualified_probs = [
-            v for v in available if (v >= 0.5) == pick_over and 0.25 <= v <= 0.75
-        ]
-        if len(qualified_probs) >= 2:
-            spread = max(qualified_probs) - min(qualified_probs)
-            tightness = max(0.0, 1.0 - spread / 0.20)  # 0.20 spread → 0
-            tight_score = tightness * 15.0
+    # 1. Forecast edge sweet spot (max 25pts)
+    #    |mu-line| of 2-3 is peak accuracy.  Below 1: weak signal.
+    #    Above 4: overconfident and unreliable.
+    fc_edge_score = 0.0
+    if mu_hat is not None and line_score is not None:
+        abs_edge = abs(float(mu_hat) - float(line_score))
+        if abs_edge <= 1.0:
+            fc_edge_score = abs_edge * 8.0  # 0→8
+        elif abs_edge <= 3.0:
+            fc_edge_score = 8.0 + (abs_edge - 1.0) / 2.0 * 17.0  # 8→25
+        elif abs_edge <= 4.0:
+            fc_edge_score = 25.0 - (abs_edge - 3.0) * 15.0  # 25→10
         else:
-            tight_score = 0.0
+            fc_edge_score = max(0.0, 10.0 - (abs_edge - 4.0) * 5.0)  # 10→0
+
+    # 2. Data quality sweet spot (max 20pts)
+    #    n_eff 10-20 is peak.  Below 10: unreliable.  Above 25: slight drop.
+    data_score = 0.0
+    if n_eff is not None:
+        if n_eff < 5:
+            data_score = 0.0
+        elif n_eff < 10:
+            data_score = (n_eff - 5) / 5.0 * 8.0  # 0→8
+        elif n_eff <= 20:
+            data_score = 20.0  # full marks
+        elif n_eff <= 30:
+            data_score = 20.0 - (n_eff - 20) / 10.0 * 5.0  # 20→15
+        else:
+            data_score = 15.0
+
+    # 3. Expert disagreement signal (max 25pts)
+    #    Empirically, split decisions (34-50% agreement) have 61.3% accuracy
+    #    while full consensus (84%+) has only 51.8%.  This rewards picks
+    #    where the minority disagrees — suggesting the model found a genuine
+    #    edge that not all models see.
+    disagree_score = 0.0
+    if n_experts >= 2:
+        agree_count = sum(1 for v in available if (v >= 0.5) == pick_over)
+        agree_pct = agree_count / n_experts
+        if agree_pct <= 0.5:
+            disagree_score = 25.0  # split or minority pick → max
+        elif agree_pct <= 0.67:
+            disagree_score = 25.0 - (agree_pct - 0.5) / 0.17 * 10.0  # 25→15
+        elif agree_pct <= 0.84:
+            disagree_score = 15.0 - (agree_pct - 0.67) / 0.17 * 5.0  # 15→10
+        else:
+            disagree_score = 10.0 - (agree_pct - 0.84) / 0.16 * 5.0  # 10→5
+
+    # 4. Confidence sweet spot (max 15pts)
+    #    60-65% is peak (55.2% accuracy).  Higher is worse, not better.
+    conf_val = max(p_shrunk, 1.0 - p_shrunk)
+    if conf_val <= 0.55:
+        conf_score = (conf_val - 0.50) / 0.05 * 5.0  # 0→5
+    elif conf_val <= 0.65:
+        conf_score = 5.0 + (conf_val - 0.55) / 0.10 * 10.0  # 5→15
+    elif conf_val <= 0.75:
+        conf_score = 15.0 - (conf_val - 0.65) / 0.10 * 10.0  # 15→5
     else:
-        tight_score = 0.0
+        conf_score = max(0.0, 5.0 - (conf_val - 0.75) / 0.25 * 5.0)  # 5→0
 
-    # 4. Data quality (max 15pts) — log scaling on n_eff
-    if n_eff is not None and n_eff > 0:
-        import math as _math
+    # 5. Uncertainty sweet spot (max 10pts)
+    #    sigma 4-6 is peak (54.6%).  Very low or high uncertainty = worse.
+    sigma_score = 0.0
+    if sigma_hat is not None:
+        s = float(sigma_hat)
+        if s <= 2.0:
+            sigma_score = s / 2.0 * 4.0  # 0→4
+        elif s <= 6.0:
+            sigma_score = 4.0 + (s - 2.0) / 4.0 * 6.0  # 4→10
+        elif s <= 8.0:
+            sigma_score = 10.0 - (s - 6.0) / 2.0 * 4.0  # 10→6
+        else:
+            sigma_score = max(0.0, 6.0 - (s - 8.0))  # 6→0
 
-        data_q = min(1.0, _math.log1p(n_eff) / _math.log1p(30.0))
-    else:
-        data_q = 0.0
-    data_score = data_q * 15.0
-
-    # 5. Conformal (max 10pts)
-    conf_score = 10.0 if conformal_set_size == 1 else 0.0
-
-    # 6. Anti-overconfidence penalty (max -10pts)
-    #    Penalize when ANY expert outputs extreme prob (>90% or <10%).
-    #    These are almost certainly overfit.
-    if available:
-        extreme = sum(1 for v in available if v > 0.90 or v < 0.10)
-        overconf_penalty = min(10.0, extreme * 5.0)
-    else:
-        overconf_penalty = 0.0
-
-    # 7. Base-rate following penalty (max -10pts)
-    #    If the pick direction matches the dominant base rate direction
-    #    AND probability is close to the prior, the model isn't adding
-    #    value over simply betting the base rate.
-    base_rate_penalty = 0.0
-    if context_prior is not None:
-        prior_agrees = (pick_over and context_prior >= 0.5) or (
-            not pick_over and context_prior < 0.5
-        )
-        if prior_agrees:
-            proximity = 1.0 - min(1.0, abs(p_shrunk - context_prior) / 0.15)
-            base_rate_penalty = proximity * 10.0
+    # 6. Conformal (bonus 5pts)
+    conf_bonus = 5.0 if conformal_set_size == 1 else 0.0
 
     edge = (
-        dir_score
-        + consensus_score
-        + tight_score
+        fc_edge_score
         + data_score
+        + disagree_score
         + conf_score
-        - overconf_penalty
-        - base_rate_penalty
+        + sigma_score
+        + conf_bonus
     )
     return round(min(100.0, max(0.0, edge)), 1)
 
@@ -981,6 +998,34 @@ def score_ensemble(
         _context_priors = load_context_priors()
         _stat_calibrator = StatTypeCalibrator.load()
 
+    # --- Stat-type expert routing ---
+    # For stat types where one expert clearly outperforms the ensemble,
+    # use that expert's probability directly instead of ensembling.
+    _expert_routing: dict[str, str] = {}
+    try:
+        _routing_path = Path("data/stat_expert_routing.json")
+        if _use_db:
+            _routing_artifact = load_latest_artifact_as_file(
+                engine, "stat_expert_routing", suffix=".json"
+            )
+            if _routing_artifact:
+                _routing_path = Path(str(_routing_artifact))
+        if _routing_path.exists():
+            import json as _json
+            _routing_raw = _json.loads(_routing_path.read_text(encoding="utf-8"))
+            _expert_routing = {
+                k: v for k, v in _routing_raw.items()
+                if not k.startswith("_") and isinstance(v, str)
+            }
+            if _expert_routing:
+                logger.info(
+                    "Stat-type expert routing active for %d stat types: %s",
+                    len(_expert_routing),
+                    ", ".join(f"{k}->{v}" for k, v in _expert_routing.items()),
+                )
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to load expert routing", exc_info=True)
+
     # --- Inversion corrections ---
     # Some experts are anti-predictive (accuracy < 50%, improves when flipped).
     # Load flags from model_health report and flip those experts' probabilities.
@@ -1125,10 +1170,16 @@ def score_ensemble(
                     logger.warning("Meta-learner inference failed", exc_info=True)
                     score_ensemble._meta_warned = True  # type: ignore[attr-defined]
         ctx = Context(stat_type=stat_type, is_live=is_live, n_eff=n_eff_val)
-        # Primary: hybrid combiner (Thompson + Gating + Meta)
-        # Fallback chain: hybrid → meta-learner → Hedge
+        # Stat-type expert routing: if a preferred expert exists for this stat
+        # type and has a valid probability, use it directly as p_raw.
         p_raw = None
-        if hybrid is not None:
+        _routed_expert = _expert_routing.get(stat_type)
+        if _routed_expert and expert_probs.get(_routed_expert) is not None:
+            p_raw = expert_probs[_routed_expert]
+
+        # Primary: hybrid combiner (Thompson + Gating + Meta)
+        # Fallback chain: routing → hybrid → meta-learner → Hedge
+        if p_raw is None and hybrid is not None:
             try:
                 # Build context features for gating model
                 avail = {k: v for k, v in expert_probs.items() if v is not None}
@@ -1204,13 +1255,21 @@ def score_ensemble(
         _n_over_exp = sum(1 for v in _avail_eps if v >= 0.5)
         _n_under_exp = sum(1 for v in _avail_eps if v < 0.5)
         _has_diversity = min(_n_over_exp, _n_under_exp) >= 1
-        # Publishable: meets confidence threshold, has narrow conformal set,
-        # has minimum edge, has expert diversity, and is not a prior-only stat type
+        # Data quality filters
+        _has_min_neff = n_eff_val is not None and n_eff_val >= MIN_NEFF
+        _mu_hat_val = float(f.get("mu_hat") or 0.0) if f else None
+        _sigma_hat_val = float(f.get("sigma_hat") or 0.0) if f else None
+        _forecast_edge_ok = True
+        if _mu_hat_val is not None and _line_score > 0:
+            _forecast_edge_ok = abs(_mu_hat_val - _line_score) <= MAX_FORECAST_EDGE
+        # Publishable: meets all quality gates
         is_publishable = bool(
             p_pick >= PICK_THRESHOLD
             and conformal_size != 2
             and not _is_prior_only
             and _has_diversity
+            and _has_min_neff
+            and _forecast_edge_ok
         )
 
         scored.append(
@@ -1247,6 +1306,8 @@ def score_ensemble(
         item["edge"] = _compute_edge(
             p_final, expert_probs, item["conformal_set_size"],
             n_eff=n_eff_val, context_prior=_ctx_prior,
+            mu_hat=_mu_hat_val, line_score=_line_score,
+            sigma_hat=_sigma_hat_val,
         )
         item["grade"] = _grade_from_edge(item["edge"])
         # Apply min_edge filter
@@ -1326,6 +1387,9 @@ def score_ensemble(
                         item["conformal_set_size"],
                         n_eff=item["n_eff"],
                         context_prior=_IMBALANCE_PRIOR_NUDGE,
+                        mu_hat=item.get("mu_hat"),
+                        line_score=item.get("line_score"),
+                        sigma_hat=item.get("sigma_hat"),
                     )
                     item["grade"] = _grade_from_edge(item["edge"])
                     if item["edge"] < MIN_EDGE:
