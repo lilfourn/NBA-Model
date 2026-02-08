@@ -379,6 +379,25 @@ def _safe_prob(value: object) -> float | None:
     return value_f
 
 
+# Clip expert probabilities to prevent logit-space outlier domination.
+# In logit space, extreme values (e.g. 0.08 → logit=-2.44) have outsized
+# influence vs moderate values (0.54 → logit=+0.16).  A single degenerate
+# expert at 8% can outweigh three reasonable experts at 54%.
+# Clipping to [0.15, 0.85] bounds any expert's logit influence to ±1.73.
+_EXPERT_PROB_FLOOR = 0.15
+_EXPERT_PROB_CEIL = 0.85
+
+
+def _clip_expert_probs(
+    expert_probs: dict[str, float | None],
+) -> dict[str, float | None]:
+    """Clip expert probabilities to a sane range before ensemble combination."""
+    return {
+        k: max(_EXPERT_PROB_FLOOR, min(_EXPERT_PROB_CEIL, v)) if v is not None else None
+        for k, v in expert_probs.items()
+    }
+
+
 def _row_get(row: object, key: str) -> object:
     getter = getattr(row, "get", None)
     if callable(getter):
@@ -1061,6 +1080,8 @@ def score_ensemble(
             for _ek in expert_probs:
                 if expert_probs[_ek] is not None:
                     expert_probs[_ek] = max(0.01, min(0.99, expert_probs[_ek] + _expert_shift))
+        # Clip to prevent logit-space outlier domination (e.g. TabDL at 8%)
+        expert_probs = _clip_expert_probs(expert_probs)
 
         is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
