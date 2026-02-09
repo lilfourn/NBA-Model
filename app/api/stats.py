@@ -320,11 +320,14 @@ async def model_health(
     min_alert_weight: float = Query(0.03, ge=0.0, le=1.0),
 ) -> dict:
     """Return live model-health metrics computed directly from DB state."""
-    return await asyncio.to_thread(
-        _load_model_health_sync,
-        days_back=days_back,
-        min_alert_weight=min_alert_weight,
-    )
+    try:
+        return await asyncio.to_thread(
+            _load_model_health_sync,
+            days_back=days_back,
+            min_alert_weight=min_alert_weight,
+        )
+    except Exception as exc:
+        return {"error": str(exc), "experts": [], "alerts": []}
 
 
 @router.get("/calibration")
@@ -349,12 +352,12 @@ async def calibration() -> dict:
         result.append(
             {
                 "stat_type": str(row.get("stat_type", "")),
-                "train_rows": int(row["train_rows"])
-                if pd.notna(row.get("train_rows"))
-                else None,
-                "val_rows": int(row["val_rows"])
-                if pd.notna(row.get("val_rows"))
-                else None,
+                "train_rows": (
+                    int(row["train_rows"]) if pd.notna(row.get("train_rows")) else None
+                ),
+                "val_rows": (
+                    int(row["val_rows"]) if pd.notna(row.get("val_rows")) else None
+                ),
                 "nll_before": _safe_float(row.get("nll_before")),
                 "nll_after": _safe_float(row.get("nll_after_param")),
                 "crps_before": _safe_float(row.get("crps_before")),
