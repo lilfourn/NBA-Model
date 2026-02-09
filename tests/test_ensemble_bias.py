@@ -1,4 +1,5 @@
 """Tests for ensemble bias fixes: NN weight cap, shrinkage direction, balanced output."""
+
 from __future__ import annotations
 
 import math
@@ -51,16 +52,21 @@ def test_shrinkage_preserves_direction() -> None:
     # Strong OVER predictions stay above anchor
     for p_raw in [0.60, 0.70, 0.80, 0.90, 0.99]:
         p_shrunk = shrink_probability(p_raw, n_eff=None)
-        assert p_shrunk > 0.42, f"Strong OVER p={p_raw} pulled below anchor to {p_shrunk}"
+        assert (
+            p_shrunk > 0.42
+        ), f"Strong OVER p={p_raw} pulled below anchor to {p_shrunk}"
     # Strong UNDER predictions stay below anchor
     for p_raw in [0.30, 0.20, 0.10, 0.01]:
         p_shrunk = shrink_probability(p_raw, n_eff=None)
-        assert p_shrunk < 0.42, f"Strong UNDER p={p_raw} pulled above anchor to {p_shrunk}"
+        assert (
+            p_shrunk < 0.42
+        ), f"Strong UNDER p={p_raw} pulled above anchor to {p_shrunk}"
 
 
 def test_shrinkage_at_anchor_stays_at_anchor() -> None:
     """Shrinking the anchor value should return the anchor itself."""
     from app.services.scoring import SHRINK_ANCHOR
+
     p = shrink_probability(SHRINK_ANCHOR, n_eff=10.0)
     assert abs(p - SHRINK_ANCHOR) < 1e-9
 
@@ -77,6 +83,7 @@ def test_uniform_weights_balanced_output() -> None:
 def test_reduced_shrinkage_values() -> None:
     """Verify shrinkage constants use base-rate anchor."""
     from app.services.scoring import SHRINK_MIN, SHRINK_MAX, SHRINK_ANCHOR
+
     assert SHRINK_MIN == 0.05
-    assert SHRINK_MAX == 0.15
+    assert SHRINK_MAX == 0.25
     assert SHRINK_ANCHOR == 0.50

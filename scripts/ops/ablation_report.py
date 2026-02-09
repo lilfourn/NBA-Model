@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,59 +20,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db.engine import get_engine  # noqa: E402
+from app.ml.ensemble_strategies import (
+    ROLLING_WINDOWS,
+    multi_window_metrics,
+)  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
-ROLLING_WINDOWS = [50, 100, 200]
-
-
-def _logloss(y: int, p: float) -> float:
-    eps = 1e-7
-    p = max(eps, min(1.0 - eps, p))
-    return -(y * math.log(p) + (1 - y) * math.log(1.0 - p))
-
-
-def _rolling_metrics(probs: np.ndarray, labels: np.ndarray, window: int = 50) -> dict:
-    """Compute rolling accuracy and logloss over the last `window` rows."""
-    if len(probs) < window:
-        return {}
-    recent_p = probs[-window:]
-    recent_y = labels[-window:]
-    picks = (recent_p >= 0.5).astype(int)
-    accuracy = float((picks == recent_y).mean())
-    avg_ll = float(
-        np.mean([_logloss(int(y), float(p)) for y, p in zip(recent_y, recent_p)])
-    )
-    brier = float(np.mean((recent_p - recent_y) ** 2))
-    return {
-        "rolling_accuracy": round(accuracy, 4),
-        "rolling_logloss": round(avg_ll, 4),
-        "rolling_brier": round(brier, 4),
-        "n": int(len(recent_p)),
-    }
-
-
-def _multi_window_metrics(probs: np.ndarray, labels: np.ndarray) -> dict:
-    """Compute metrics at multiple rolling windows + all-time."""
-    result: dict = {}
-    for w in ROLLING_WINDOWS:
-        m = _rolling_metrics(probs, labels, window=w)
-        if m:
-            result[f"last_{w}"] = m
-    if len(probs) > 0:
-        picks = (probs >= 0.5).astype(int)
-        result["all_time"] = {
-            "rolling_accuracy": round(float((picks == labels).mean()), 4),
-            "rolling_logloss": round(
-                float(
-                    np.mean([_logloss(int(y), float(p)) for y, p in zip(labels, probs)])
-                ),
-                4,
-            ),
-            "rolling_brier": round(float(np.mean((probs - labels) ** 2)), 4),
-            "n": int(len(probs)),
-        }
-    return result
 
 
 def _load_data(engine, *, days_back: int = 90) -> pd.DataFrame:
@@ -126,7 +78,7 @@ def build_ablation_report(engine, *, days_back: int = 90) -> dict:
             continue
         probs = df.loc[valid_mask, col].to_numpy(dtype=float)
         labels = df.loc[valid_mask, "over_label"].to_numpy(dtype=float)
-        components[col] = _multi_window_metrics(probs, labels)
+        components[col] = multi_window_metrics(probs, labels)
 
     for col in ("p_final", "p_raw"):
         if col not in df.columns:
@@ -136,7 +88,7 @@ def build_ablation_report(engine, *, days_back: int = 90) -> dict:
             continue
         probs = df.loc[valid_mask, col].to_numpy(dtype=float)
         labels = df.loc[valid_mask, "over_label"].to_numpy(dtype=float)
-        components[col] = _multi_window_metrics(probs, labels)
+        components[col] = multi_window_metrics(probs, labels)
 
     warnings: list[str] = []
     p_final_data = components.get("p_final", {})

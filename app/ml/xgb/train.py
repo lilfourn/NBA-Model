@@ -108,7 +108,7 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
     oof_proba = np.full(len(y), np.nan)
     oof_pred = np.full(len(y), np.nan)
     fold_metrics: list[dict[str, Any]] = []
-    last_fold_model: XGBClassifier | None = None
+    best_iterations: list[int] = []
 
     for i, (X_tr, X_te, y_tr, y_te) in enumerate(folds):
         mdl = XGBClassifier(**params)
@@ -123,7 +123,9 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
         auc = float(roc_auc_score(y_te, proba)) if len(np.unique(y_te)) > 1 else None
         ll = float(log_loss(y_te, proba))
         fold_metrics.append({"fold": i, "accuracy": acc, "roc_auc": auc, "logloss": ll})
-        last_fold_model = mdl
+        bi = getattr(mdl, "best_iteration", None)
+        if bi is not None:
+            best_iterations.append(bi)
 
     oof_mask = ~np.isnan(oof_proba)
     oof_y = y.values[oof_mask]
@@ -157,8 +159,8 @@ def train_xgboost(engine, model_dir: Path) -> TrainResult:
         "conformal_n_cal": conformal.n_cal,
     }
 
-    # Final model: retrain on ALL data (cap n_estimators from last fold's early stopping)
-    last_best = getattr(last_fold_model, "best_iteration", None)
+    # Final model: retrain on ALL data (cap n_estimators from median fold early stopping)
+    last_best = int(np.median(best_iterations)) if best_iterations else None
     final_params = dict(params)
     if last_best:
         final_params["n_estimators"] = last_best

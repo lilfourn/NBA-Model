@@ -176,6 +176,10 @@ class TestPriorOnlyStatTypes:
         "Steals",
         "Blks+Stls",
         "Defensive Rebounds",
+        "Fantasy Score",
+        "Pts+Rebs",
+        "Pts+Asts",
+        "Pts+Rebs+Asts",
     }
 
     def test_contains_all_expected(self) -> None:

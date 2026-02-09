@@ -125,7 +125,7 @@ class ScoringResult:
 # It adapts per stat_type and line_score bucket.  Fallback: 0.50 (neutral).
 SHRINK_ANCHOR = 0.50  # Neutral fallback — context priors handle empirical rates
 SHRINK_MIN = 0.05  # best-data picks: 5% pull (models are already calibrated)
-SHRINK_MAX = 0.15  # low-data picks: 15% pull toward prior (was 0.25)
+SHRINK_MAX = 0.25  # low-data picks: 25% pull toward prior
 
 # Abstain policy: only publish picks with p_pick >= threshold
 # p_pick = max(p_final, 1 - p_final)
@@ -157,6 +157,10 @@ PRIOR_ONLY_STAT_TYPES: set[str] = {
     "Steals",
     "Blks+Stls",
     "Defensive Rebounds",
+    "Fantasy Score",
+    "Pts+Rebs",
+    "Pts+Asts",
+    "Pts+Rebs+Asts",
 }
 
 ENSEMBLE_EXPERTS = ("p_lr", "p_xgb", "p_lgbm", "p_nn", "p_forecast_cal", "p_tabdl")
@@ -401,9 +405,9 @@ def _safe_prob(value: object) -> float | None:
 # In logit space, extreme values (e.g. 0.08 → logit=-2.44) have outsized
 # influence vs moderate values (0.54 → logit=+0.16).  A single degenerate
 # expert at 8% can outweigh three reasonable experts at 54%.
-# Clipping to [0.15, 0.85] bounds any expert's logit influence to ±1.73.
-_EXPERT_PROB_FLOOR = 0.15
-_EXPERT_PROB_CEIL = 0.85
+# Clipping to [0.25, 0.75] bounds any expert's logit influence to ±1.10.
+_EXPERT_PROB_FLOOR = 0.25
+_EXPERT_PROB_CEIL = 0.75
 
 
 def _clip_expert_probs(
