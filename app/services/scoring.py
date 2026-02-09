@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import logging
 import math
 import threading
@@ -101,12 +102,18 @@ class ScoringResult:
     scored_at: str
     total_scored: int
     picks: list[ScoredPick]
+    publishable_count: int = 0
+    fallback_used: bool = False
+    fallback_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "snapshot_id": self.snapshot_id,
             "scored_at": self.scored_at,
             "total_scored": self.total_scored,
+            "publishable_count": self.publishable_count,
+            "fallback_used": self.fallback_used,
+            "fallback_reason": self.fallback_reason,
             "picks": [p.to_dict() for p in self.picks],
         }
 
@@ -327,6 +334,76 @@ def _grade_from_edge(edge: float) -> str:
     if edge >= 18:
         return "D"
     return "F"
+
+
+def _select_empty_publishable_fallback(
+    scored: list[dict[str, Any]],
+    *,
+    top: int,
+) -> list[dict[str, Any]]:
+    """Return best-effort picks when strict publishable set is empty."""
+
+    def _passes_soft_quality(
+        item: dict[str, Any],
+        *,
+        min_pick: float,
+        min_edge: float,
+        require_non_ambiguous_conformal: bool,
+    ) -> bool:
+        if bool(item.get("is_prior_only")):
+            return False
+        try:
+            p_pick = float(item.get("p_pick"))
+            edge = float(item.get("edge"))
+        except (TypeError, ValueError):
+            return False
+        if p_pick < min_pick or edge < min_edge:
+            return False
+        if require_non_ambiguous_conformal and item.get("conformal_set_size") == 2:
+            return False
+        if not bool(item.get("forecast_edge_ok", True)):
+            return False
+        n_eff = item.get("n_eff")
+        if n_eff is not None:
+            try:
+                if float(n_eff) < 5.0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    strict_soft = [
+        item
+        for item in scored
+        if _passes_soft_quality(
+            item,
+            min_pick=0.58,
+            min_edge=max(2.5, MIN_EDGE * 0.5),
+            require_non_ambiguous_conformal=True,
+        )
+    ]
+    if strict_soft:
+        return strict_soft[:top]
+
+    relaxed_soft = [
+        item
+        for item in scored
+        if _passes_soft_quality(
+            item,
+            min_pick=0.55,
+            min_edge=1.0,
+            require_non_ambiguous_conformal=False,
+        )
+    ]
+    if relaxed_soft:
+        return relaxed_soft[:top]
+
+    non_prior_only = [item for item in scored if not bool(item.get("is_prior_only"))]
+    if non_prior_only:
+        return non_prior_only[:top]
+
+    # Last-resort guarantee for non-empty UX if any rows were scored.
+    return scored[:top]
 
 
 def _conformal_set_size(
@@ -563,6 +640,9 @@ def score_ensemble(
                     scored_at=cached_dict["scored_at"],
                     total_scored=cached_dict["total_scored"],
                     picks=[ScoredPick(**p) for p in cached_dict["picks"]],
+                    publishable_count=int(cached_dict.get("publishable_count") or 0),
+                    fallback_used=bool(cached_dict.get("fallback_used", False)),
+                    fallback_reason=cached_dict.get("fallback_reason"),
                 )
 
     frame = _load_projection_frame(
@@ -1082,6 +1162,19 @@ def score_ensemble(
             and _has_min_neff
             and _forecast_edge_ok
         )
+        reject_reasons: list[str] = []
+        if p_pick < PICK_THRESHOLD:
+            reject_reasons.append("low_pick_confidence")
+        if conformal_size == 2:
+            reject_reasons.append("conformal_ambiguous")
+        if _is_prior_only:
+            reject_reasons.append("prior_only_stat")
+        if not _has_diversity:
+            reject_reasons.append("no_expert_diversity")
+        if not _has_min_neff:
+            reject_reasons.append("low_n_eff")
+        if not _forecast_edge_ok:
+            reject_reasons.append("forecast_edge_too_large")
 
         scored.append(
             {
@@ -1111,6 +1204,12 @@ def score_ensemble(
                 "calibration_status": status,
                 "n_eff": n_eff_val,
                 "conformal_set_size": conformal_size,
+                "p_pick": p_pick,
+                "is_prior_only": _is_prior_only,
+                "has_diversity": _has_diversity,
+                "has_min_neff": _has_min_neff,
+                "forecast_edge_ok": _forecast_edge_ok,
+                "reject_reasons": reject_reasons,
             }
         )
         item = scored[-1]
@@ -1128,6 +1227,7 @@ def score_ensemble(
         # Apply min_edge filter
         if item["edge"] < MIN_EDGE:
             is_publishable = False
+            item["reject_reasons"].append("edge_below_min")
         item["is_publishable"] = is_publishable
 
     # --- Spread-based abstention ---
@@ -1146,6 +1246,9 @@ def score_ensemble(
             )
             for item in scored:
                 item["is_publishable"] = False
+                reasons = item.setdefault("reject_reasons", [])
+                if "low_model_discrimination" not in reasons:
+                    reasons.append("low_model_discrimination")
 
     scored.sort(key=lambda item: item["edge"], reverse=True)
     # Enforce abstain policy: only return publishable picks in the top-N
@@ -1211,9 +1314,35 @@ def score_ensemble(
                     item["grade"] = _grade_from_edge(item["edge"])
                     if item["edge"] < MIN_EDGE:
                         item["is_publishable"] = False
+                        reasons = item.setdefault("reject_reasons", [])
+                        if "edge_below_min" not in reasons:
+                            reasons.append("edge_below_min")
             # Re-sort and re-filter after demotion
             publishable = [item for item in scored if item.get("is_publishable", False)]
             top_picks = sorted(publishable, key=lambda x: x["edge"], reverse=True)[:top]
+
+    fallback_used = False
+    fallback_reason: str | None = None
+    if not top_picks and scored:
+        reject_counts: Counter[str] = Counter()
+        for item in scored:
+            for reason in item.get("reject_reasons", []):
+                reject_counts[str(reason)] += 1
+        logger.warning(
+            "No publishable picks for snapshot %s. Rejection breakdown=%s",
+            resolved_snapshot,
+            dict(reject_counts.most_common(8)),
+        )
+        top_picks = _select_empty_publishable_fallback(scored, top=top)
+        if top_picks:
+            fallback_used = True
+            fallback_reason = "soft_fallback_no_publishable"
+            logger.warning(
+                "Soft fallback active: returning %d ranked non-publishable picks "
+                "for snapshot %s",
+                len(top_picks),
+                resolved_snapshot,
+            )
 
     picks = [
         ScoredPick(
@@ -1251,6 +1380,9 @@ def score_ensemble(
         scored_at=datetime.now(timezone.utc).isoformat(),
         total_scored=len(scored),
         picks=picks,
+        publishable_count=len(publishable),
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
     )
     with _scoring_cache_lock:
         _scoring_cache[ck] = (_time.monotonic(), result.to_dict())

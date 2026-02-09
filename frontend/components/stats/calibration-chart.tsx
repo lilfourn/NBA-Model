@@ -2,8 +2,8 @@
 
 import { usePolling } from "@/lib/use-polling";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid } from "recharts";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DataCard } from "@/components/ui/data-card";
+import { CHART_MARGINS, CHART_GRID } from "@/lib/constants";
 import {
   type ChartConfig,
   ChartContainer,
@@ -27,26 +27,7 @@ const covConfig = {
 export function CalibrationChart() {
   const { data: resp, loading } = usePolling(fetchCalibration);
   const entries = resp?.stat_types ?? [];
-
-  if (loading) {
-    return (
-      <Card>
-        <CardHeader><CardTitle>Calibration Quality</CardTitle></CardHeader>
-        <CardContent><Skeleton className="h-72 w-full" /></CardContent>
-      </Card>
-    );
-  }
-
-  if (entries.length === 0) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Calibration Quality</CardTitle>
-          <CardDescription>No calibration reports found. Run the calibration job first.</CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
+  const noData = entries.length === 0;
 
   const nllData = entries.map((e) => ({
     stat_type: e.stat_type === "__global__" ? "Global" : e.stat_type,
@@ -61,20 +42,21 @@ export function CalibrationChart() {
   }));
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Calibration Quality</CardTitle>
-        <CardDescription>Before vs. after — lower NLL is better, coverage target is 90%</CardDescription>
-      </CardHeader>
-      <CardContent>
+    <DataCard
+      title="Calibration Quality"
+      description="Before vs. after — lower NLL is better, coverage target is 90%"
+      loading={loading}
+      noData={noData}
+      noDataDescription="No calibration reports found. Run the calibration job first."
+    >
         <div className="space-y-8">
           <div>
             <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Negative Log-Likelihood
             </p>
             <ChartContainer config={nllConfig} className="min-h-[220px] w-full">
-              <BarChart data={nllData} accessibilityLayer margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} strokeOpacity={0.06} />
+              <BarChart data={nllData} accessibilityLayer margin={CHART_MARGINS}>
+              <CartesianGrid {...CHART_GRID} />
                 <XAxis dataKey="stat_type" tickLine={false} axisLine={false} tickMargin={8} angle={-35} textAnchor="end" height={70} interval={0} />
                 <YAxis tickLine={false} axisLine={false} tickMargin={4} />
                 <ChartTooltip content={<ChartTooltipContent />} />
@@ -90,8 +72,8 @@ export function CalibrationChart() {
               90% Interval Coverage
             </p>
             <ChartContainer config={covConfig} className="min-h-[220px] w-full">
-              <BarChart data={coverageData} accessibilityLayer margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} strokeOpacity={0.06} />
+              <BarChart data={coverageData} accessibilityLayer margin={CHART_MARGINS}>
+              <CartesianGrid {...CHART_GRID} />
                 <XAxis dataKey="stat_type" tickLine={false} axisLine={false} tickMargin={8} angle={-35} textAnchor="end" height={70} interval={0} />
                 <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tickMargin={4} tickFormatter={(v: number) => `${v}%`} />
                 <ChartTooltip content={<ChartTooltipContent />} />
@@ -134,7 +116,6 @@ export function CalibrationChart() {
             </table>
           </div>
         </div>
-      </CardContent>
-    </Card>
+    </DataCard>
   );
 }

@@ -1,14 +1,7 @@
 "use client";
 
 import { usePolling } from "@/lib/use-polling";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DataCard } from "@/components/ui/data-card";
 import { fetchDriftReport } from "@/lib/api";
 import type { DriftCheck } from "@/lib/api";
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
@@ -55,55 +48,37 @@ function DriftCheckRow({ check }: { check: DriftCheck }) {
 
 export function DriftStatusCard() {
   const { data, loading } = usePolling(fetchDriftReport);
-
-  if (loading) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Drift Detection</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Skeleton className="h-32 w-full" />
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (!data || data.checks.length === 0) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Drift Detection</CardTitle>
-          <CardDescription>
-            No drift checks available yet. Run the drift detection job.
-          </CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
+  const noData = !data || data.checks.length === 0;
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
+    <DataCard
+      title={
+        <span className="flex items-center gap-2">
           Drift Detection
-          {data.any_drift && (
+          {data?.any_drift && (
             <span className="rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-500">
               Drift Detected
             </span>
           )}
-        </CardTitle>
-        <CardDescription>
-          {data.recent_rows} recent / {data.baseline_rows} baseline predictions
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
+        </span>
+      }
+      description={
+        data
+          ? `${data.recent_rows} recent / ${data.baseline_rows} baseline predictions`
+          : undefined
+      }
+      loading={loading}
+      noData={noData}
+      noDataDescription="No drift checks available yet. Run the drift detection job."
+      skeletonHeight="h-32"
+    >
+      {!loading && !noData && (
         <div className="space-y-2">
-          {data.checks.map((check) => (
+          {data?.checks.map((check) => (
             <DriftCheckRow key={check.check_type} check={check} />
           ))}
         </div>
-      </CardContent>
-    </Card>
+      )}
+    </DataCard>
   );
 }

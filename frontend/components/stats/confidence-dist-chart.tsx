@@ -1,10 +1,9 @@
 "use client";
 
-import { useCallback } from "react";
 import { usePolling } from "@/lib/use-polling";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line } from "recharts";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DataCard } from "@/components/ui/data-card";
+import { CHART_MARGINS, CHART_GRID } from "@/lib/constants";
 import {
   type ChartConfig,
   ChartContainer,
@@ -26,59 +25,37 @@ const curveConfig = {
 } satisfies ChartConfig;
 
 export function ConfidenceDistChart() {
-  const fetcher = useCallback(() => fetchConfidenceDist(20), []);
-  const { data, loading } = usePolling(fetcher);
+  const { data, loading } = usePolling(() => fetchConfidenceDist(20));
+  const noData = !data || data.bins.length === 0;
+  const hasOutcomes = data?.bins.some((b) => b.hits != null) ?? false;
 
-  if (loading) {
-    return (
-      <Card>
-        <CardHeader><CardTitle>Confidence Distribution</CardTitle></CardHeader>
-        <CardContent><Skeleton className="h-72 w-full" /></CardContent>
-      </Card>
-    );
-  }
-
-  if (!data || data.bins.length === 0) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Confidence Distribution</CardTitle>
-          <CardDescription>No prediction data available yet.</CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
-
-  const hasOutcomes = data.bins.some((b) => b.hits != null);
-
-  const chartData = data.bins.map((b) => ({
+  const chartData = data?.bins.map((b) => ({
     label: `${(b.range_start * 100).toFixed(0)}–${(b.range_end * 100).toFixed(0)}%`,
     hits: b.hits ?? 0,
     misses: b.misses ?? 0,
     count: b.count,
     hit_rate: b.hit_rate != null ? +(b.hit_rate * 100).toFixed(1) : null,
     midpoint: +((b.range_start + b.range_end) / 2 * 100).toFixed(1),
-  }));
+  })) ?? [];
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Confidence Distribution</CardTitle>
-        <CardDescription>
-          {hasOutcomes
-            ? "Stacked by hits/misses with per-bin calibration curve"
-            : "Distribution of prediction confidence levels"}
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
+    <DataCard
+      title="Confidence Distribution"
+      description={hasOutcomes
+        ? "Stacked by hits/misses with per-bin calibration curve"
+        : "Distribution of prediction confidence levels"}
+      loading={loading}
+      noData={noData}
+      noDataDescription="No prediction data available yet."
+    >
         <div className="space-y-8">
           <div>
             <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Count by confidence bin
             </p>
             <ChartContainer config={histConfig} className="min-h-[240px] w-full">
-              <BarChart data={chartData} accessibilityLayer margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
-                <CartesianGrid vertical={false} strokeOpacity={0.06} />
+              <BarChart data={chartData} accessibilityLayer margin={CHART_MARGINS}>
+              <CartesianGrid {...CHART_GRID} />
                 <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} angle={-30} textAnchor="end" height={50} interval={0} />
                 <YAxis tickLine={false} axisLine={false} tickMargin={4} />
                 <ChartTooltip content={<ChartTooltipContent />} />
@@ -101,8 +78,8 @@ export function ConfidenceDistChart() {
                 Calibration curve
               </p>
               <ChartContainer config={curveConfig} className="min-h-[220px] w-full">
-                <LineChart data={chartData} accessibilityLayer margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
-                  <CartesianGrid vertical={false} strokeOpacity={0.06} />
+                <LineChart data={chartData} accessibilityLayer margin={CHART_MARGINS}>
+                <CartesianGrid {...CHART_GRID} />
                   <XAxis dataKey="midpoint" tickLine={false} axisLine={false} tickMargin={8} tickFormatter={(v: number) => `${v}%`} />
                   <YAxis domain={[30, 100]} tickLine={false} axisLine={false} tickMargin={8} tickFormatter={(v: number) => `${v}%`} />
                   <ChartTooltip content={<ChartTooltipContent />} />
@@ -120,7 +97,6 @@ export function ConfidenceDistChart() {
             </div>
           )}
         </div>
-      </CardContent>
-    </Card>
+    </DataCard>
   );
 }

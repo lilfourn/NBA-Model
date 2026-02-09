@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 interface UsePollingResult<T> {
   data: T | null;
@@ -15,13 +15,10 @@ export function usePolling<T>(
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-  const fetcherRef = useRef(fetcher);
-  fetcherRef.current = fetcher;
-
   const doFetch = useCallback(async (isInitial: boolean) => {
     if (isInitial) setLoading(true);
     try {
-      const result = await fetcherRef.current();
+      const result = await fetcher();
       setData(result);
       setError(null);
     } catch (e) {
@@ -29,7 +26,7 @@ export function usePolling<T>(
     } finally {
       if (isInitial) setLoading(false);
     }
-  }, []);
+  }, [fetcher]);
 
   useEffect(() => {
     doFetch(true);
