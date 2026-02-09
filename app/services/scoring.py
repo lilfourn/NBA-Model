@@ -159,7 +159,7 @@ PRIOR_ONLY_STAT_TYPES: set[str] = {
     "Defensive Rebounds",
 }
 
-TOP3_EXPERTS = ("p_lgbm", "p_xgb", "p_nn")
+ENSEMBLE_EXPERTS = ("p_lr", "p_xgb", "p_lgbm", "p_nn", "p_forecast_cal", "p_tabdl")
 
 
 def _logit(p: float) -> float:
@@ -955,21 +955,17 @@ def score_ensemble(
             from app.ml.stacking import predict_stacking
 
             p_raw = predict_stacking(
-                _stacking_model, {e: expert_probs.get(e) for e in TOP3_EXPERTS}
+                _stacking_model, {e: expert_probs.get(e) for e in ENSEMBLE_EXPERTS}
             )
         else:
-            top3_probs = [
-                expert_probs[e] for e in TOP3_EXPERTS if expert_probs.get(e) is not None
+            avail = [
+                expert_probs[e]
+                for e in ENSEMBLE_EXPERTS
+                if expert_probs.get(e) is not None
             ]
-            if top3_probs:
-                p_raw = _sigmoid(sum(_logit(p) for p in top3_probs) / len(top3_probs))
-            else:
-                any_probs = [v for v in expert_probs.values() if v is not None]
-                p_raw = (
-                    _sigmoid(sum(_logit(p) for p in any_probs) / len(any_probs))
-                    if any_probs
-                    else 0.5
-                )
+            p_raw = (
+                _sigmoid(sum(_logit(p) for p in avail) / len(avail)) if avail else 0.5
+            )
         if not math.isfinite(p_raw):
             continue
         # Shrink toward context-aware prior in logit space.

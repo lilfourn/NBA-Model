@@ -5,6 +5,7 @@ training portion and predicts on the held-out portion. The result is a CSV
 where every row has the true label + each base expert's OOF probability,
 plus context columns for the upgraded meta-learner.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -69,15 +70,19 @@ def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Dat
     if "game_date" in df.columns:
         gd = pd.to_datetime(df["game_date"], errors="coerce")
         df["season_id"] = gd.apply(
-            lambda d: f"{d.year}-{d.year + 1}"
-            if pd.notna(d) and d.month >= 10
-            else (f"{d.year - 1}-{d.year}" if pd.notna(d) else None)
+            lambda d: (
+                f"{d.year}-{d.year + 1}"
+                if pd.notna(d) and d.month >= 10
+                else (f"{d.year - 1}-{d.year}" if pd.notna(d) else None)
+            )
         )
     elif "_sort_ts" in df.columns:
         df["season_id"] = df["_sort_ts"].apply(
-            lambda d: f"{d.year}-{d.year + 1}"
-            if pd.notna(d) and d.month >= 10
-            else (f"{d.year - 1}-{d.year}" if pd.notna(d) else None)
+            lambda d: (
+                f"{d.year}-{d.year + 1}"
+                if pd.notna(d) and d.month >= 10
+                else (f"{d.year - 1}-{d.year}" if pd.notna(d) else None)
+            )
         )
 
     df[CATEGORICAL_COLS] = df[CATEGORICAL_COLS].fillna("unknown").astype(str)
@@ -137,14 +142,14 @@ def _train_xgb(X_train, y_train, X_test, y_test):
 
     model = XGBClassifier(
         n_estimators=600,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_weight=10,
-        reg_alpha=0.5,
-        reg_lambda=2.0,
-        gamma=0.1,
+        max_depth=2,
+        learning_rate=0.03,
+        subsample=0.7,
+        colsample_bytree=0.5,
+        min_child_weight=30,
+        reg_alpha=1.0,
+        reg_lambda=3.0,
+        gamma=0.2,
         eval_metric="logloss",
         use_label_encoder=False,
         verbosity=0,
@@ -164,14 +169,14 @@ def _train_lgbm(X_train, y_train, X_test):
 
     model = LGBMClassifier(
         n_estimators=600,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_samples=20,
-        reg_alpha=0.5,
-        reg_lambda=2.0,
-        num_leaves=31,
+        max_depth=3,
+        learning_rate=0.03,
+        subsample=0.7,
+        colsample_bytree=0.5,
+        min_child_samples=50,
+        reg_alpha=1.0,
+        reg_lambda=3.0,
+        num_leaves=10,
         verbosity=-1,
         random_state=42,
     )
@@ -290,9 +295,9 @@ def main() -> None:
 
     result_dict = {
         "over": y.values,
-        "stat_type": df_used["stat_type"].values
-        if "stat_type" in df_used.columns
-        else "",
+        "stat_type": (
+            df_used["stat_type"].values if "stat_type" in df_used.columns else ""
+        ),
         "n_eff": n_eff_vals,
         "line_vs_mean_ratio": line_vs_mean,
         "oof_forecast": oof_forecast,

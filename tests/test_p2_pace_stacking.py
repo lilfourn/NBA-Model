@@ -176,16 +176,22 @@ class TestOOFStacking:
     @staticmethod
     def _synthetic_oof(n: int = 200) -> pd.DataFrame:
         rng = np.random.RandomState(42)
-        p_lgbm = rng.uniform(0.3, 0.7, n)
+        p_lr = rng.uniform(0.3, 0.7, n)
         p_xgb = rng.uniform(0.3, 0.7, n)
+        p_lgbm = rng.uniform(0.3, 0.7, n)
         p_nn = rng.uniform(0.3, 0.7, n)
-        avg = (p_lgbm + p_xgb + p_nn) / 3
+        p_forecast_cal = rng.uniform(0.3, 0.7, n)
+        p_tabdl = rng.uniform(0.3, 0.7, n)
+        avg = (p_lr + p_xgb + p_lgbm + p_nn + p_forecast_cal + p_tabdl) / 6
         over = (avg + rng.normal(0, 0.1, n) > 0.5).astype(int)
         return pd.DataFrame(
             {
-                "p_lgbm": p_lgbm,
+                "p_lr": p_lr,
                 "p_xgb": p_xgb,
+                "p_lgbm": p_lgbm,
                 "p_nn": p_nn,
+                "p_forecast_cal": p_forecast_cal,
+                "p_tabdl": p_tabdl,
                 "over": over,
             }
         )
@@ -196,7 +202,15 @@ class TestOOFStacking:
         oof = self._synthetic_oof()
         result = train_stacking_meta(oof)
         prob = predict_stacking(
-            result.model, {"p_lgbm": 0.6, "p_xgb": 0.55, "p_nn": 0.58}
+            result.model,
+            {
+                "p_lr": 0.6,
+                "p_xgb": 0.55,
+                "p_lgbm": 0.58,
+                "p_nn": 0.6,
+                "p_forecast_cal": 0.57,
+                "p_tabdl": 0.59,
+            },
         )
         assert 0.0 < prob < 1.0
 
@@ -206,7 +220,7 @@ class TestOOFStacking:
         oof = self._synthetic_oof()
         result = train_stacking_meta(oof)
         prob = predict_stacking(
-            result.model, {"p_lgbm": 0.6, "p_xgb": None, "p_nn": 0.55}
+            result.model, {"p_lr": 0.6, "p_xgb": None, "p_lgbm": 0.55, "p_nn": 0.58}
         )
         assert 0.0 < prob < 1.0
 
@@ -216,7 +230,15 @@ class TestOOFStacking:
         oof = self._synthetic_oof()
         result = train_stacking_meta(oof)
         prob = predict_stacking(
-            result.model, {"p_lgbm": 0.7, "p_xgb": 0.65, "p_nn": 0.68}
+            result.model,
+            {
+                "p_lr": 0.7,
+                "p_xgb": 0.65,
+                "p_lgbm": 0.68,
+                "p_nn": 0.7,
+                "p_forecast_cal": 0.66,
+                "p_tabdl": 0.72,
+            },
         )
         assert prob > 0.5
 
@@ -226,7 +248,15 @@ class TestOOFStacking:
         oof = self._synthetic_oof()
         result = train_stacking_meta(oof)
         prob = predict_stacking(
-            result.model, {"p_lgbm": 0.3, "p_xgb": 0.35, "p_nn": 0.32}
+            result.model,
+            {
+                "p_lr": 0.3,
+                "p_xgb": 0.35,
+                "p_lgbm": 0.32,
+                "p_nn": 0.3,
+                "p_forecast_cal": 0.34,
+                "p_tabdl": 0.28,
+            },
         )
         assert prob < 0.5
 
@@ -247,7 +277,18 @@ class TestOOFStacking:
         result = train_stacking_meta(oof)
         p_val = 0.6
         prob = predict_stacking(
-            result.model, {"p_lgbm": p_val, "p_xgb": p_val, "p_nn": p_val}
+            result.model,
+            {
+                col: p_val
+                for col in [
+                    "p_lr",
+                    "p_xgb",
+                    "p_lgbm",
+                    "p_nn",
+                    "p_forecast_cal",
+                    "p_tabdl",
+                ]
+            },
         )
         # Meta-learner intercept shifts output — just verify it's > 0.5 and in range
         assert prob > 0.5

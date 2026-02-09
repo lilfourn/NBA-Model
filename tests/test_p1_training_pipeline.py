@@ -265,16 +265,23 @@ class TestScoringDeadCodeCleanup:
 
     def test_scoring_module_imports(self) -> None:
         """Core scoring exports are importable."""
-        from app.services.scoring import TOP3_EXPERTS, score_ensemble
+        from app.services.scoring import ENSEMBLE_EXPERTS, score_ensemble
 
         assert callable(score_ensemble)
-        assert TOP3_EXPERTS is not None
+        assert ENSEMBLE_EXPERTS is not None
 
-    def test_top3_experts_constant(self) -> None:
-        """TOP3_EXPERTS matches expected tuple."""
-        from app.services.scoring import TOP3_EXPERTS
+    def test_ensemble_experts_constant(self) -> None:
+        """ENSEMBLE_EXPERTS includes all 6 expert models."""
+        from app.services.scoring import ENSEMBLE_EXPERTS
 
-        assert TOP3_EXPERTS == ("p_lgbm", "p_xgb", "p_nn")
+        assert ENSEMBLE_EXPERTS == (
+            "p_lr",
+            "p_xgb",
+            "p_lgbm",
+            "p_nn",
+            "p_forecast_cal",
+            "p_tabdl",
+        )
 
     def test_no_hybrid_imports(self) -> None:
         """HybridEnsembleCombiner should not be importable from scoring after cleanup."""

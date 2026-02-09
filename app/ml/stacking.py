@@ -9,7 +9,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-EXPERT_COLS = ["p_lgbm", "p_xgb", "p_nn"]
+EXPERT_COLS = ["p_lr", "p_xgb", "p_lgbm", "p_nn", "p_forecast_cal", "p_tabdl"]
 
 
 def _logit(p: float) -> float:

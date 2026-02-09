@@ -23,14 +23,14 @@ from app.modeling.conformal import ConformalCalibrator
 
 LGBM_PARAMS: dict[str, Any] = {
     "n_estimators": 600,
-    "max_depth": 4,
-    "learning_rate": 0.05,
-    "subsample": 0.8,
-    "colsample_bytree": 0.6,
-    "min_child_samples": 30,
-    "reg_alpha": 0.5,
-    "reg_lambda": 2.0,
-    "num_leaves": 15,
+    "max_depth": 3,
+    "learning_rate": 0.03,
+    "subsample": 0.7,
+    "colsample_bytree": 0.5,
+    "min_child_samples": 50,
+    "reg_alpha": 1.0,
+    "reg_lambda": 3.0,
+    "num_leaves": 10,
     "verbosity": -1,
     "random_state": 42,
 }

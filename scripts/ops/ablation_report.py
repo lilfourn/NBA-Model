@@ -4,6 +4,7 @@ Outputs rolling metrics for each expert alone, meta-learner, online ensemble,
 hybrid final, and p_final (post-shrink).  Flags when simpler components
 outperform the full hybrid pipeline.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,7 +25,7 @@ from app.db.engine import get_engine  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
-ROLLING_WINDOW = 50
+ROLLING_WINDOWS = [50, 100, 200]
 
 
 def _logloss(y: int, p: float) -> float:
@@ -33,9 +34,7 @@ def _logloss(y: int, p: float) -> float:
     return -(y * math.log(p) + (1 - y) * math.log(1.0 - p))
 
 
-def _rolling_metrics(
-    probs: np.ndarray, labels: np.ndarray, window: int = ROLLING_WINDOW
-) -> dict:
+def _rolling_metrics(probs: np.ndarray, labels: np.ndarray, window: int = 50) -> dict:
     """Compute rolling accuracy and logloss over the last `window` rows."""
     if len(probs) < window:
         return {}
@@ -53,6 +52,29 @@ def _rolling_metrics(
         "rolling_brier": round(brier, 4),
         "n": int(len(recent_p)),
     }
+
+
+def _multi_window_metrics(probs: np.ndarray, labels: np.ndarray) -> dict:
+    """Compute metrics at multiple rolling windows + all-time."""
+    result: dict = {}
+    for w in ROLLING_WINDOWS:
+        m = _rolling_metrics(probs, labels, window=w)
+        if m:
+            result[f"last_{w}"] = m
+    if len(probs) > 0:
+        picks = (probs >= 0.5).astype(int)
+        result["all_time"] = {
+            "rolling_accuracy": round(float((picks == labels).mean()), 4),
+            "rolling_logloss": round(
+                float(
+                    np.mean([_logloss(int(y), float(p)) for y, p in zip(labels, probs)])
+                ),
+                4,
+            ),
+            "rolling_brier": round(float(np.mean((probs - labels) ** 2)), 4),
+            "n": int(len(probs)),
+        }
+    return result
 
 
 def _load_data(engine, *, days_back: int = 90) -> pd.DataFrame:
@@ -93,54 +115,49 @@ def build_ablation_report(engine, *, days_back: int = 90) -> dict:
             "components": {},
         }
 
-    labels_all = df["over_label"].to_numpy(dtype=float)
     components: dict[str, dict] = {}
+    min_window = min(ROLLING_WINDOWS)
 
-    # Each expert alone
     for col in EXPERT_COLS:
         if col not in df.columns:
             continue
         valid_mask = df[col].notna() & df["over_label"].notna()
-        if valid_mask.sum() < ROLLING_WINDOW:
+        if valid_mask.sum() < min_window:
             continue
         probs = df.loc[valid_mask, col].to_numpy(dtype=float)
         labels = df.loc[valid_mask, "over_label"].to_numpy(dtype=float)
-        components[col] = _rolling_metrics(probs, labels)
+        components[col] = _multi_window_metrics(probs, labels)
 
-    # p_final (post-shrink hybrid)
-    if "p_final" in df.columns:
-        valid_mask = df["p_final"].notna() & df["over_label"].notna()
-        if valid_mask.sum() >= ROLLING_WINDOW:
-            probs = df.loc[valid_mask, "p_final"].to_numpy(dtype=float)
-            labels = df.loc[valid_mask, "over_label"].to_numpy(dtype=float)
-            components["p_final"] = _rolling_metrics(probs, labels)
+    for col in ("p_final", "p_raw"):
+        if col not in df.columns:
+            continue
+        valid_mask = df[col].notna() & df["over_label"].notna()
+        if valid_mask.sum() < min_window:
+            continue
+        probs = df.loc[valid_mask, col].to_numpy(dtype=float)
+        labels = df.loc[valid_mask, "over_label"].to_numpy(dtype=float)
+        components[col] = _multi_window_metrics(probs, labels)
 
-    # p_raw (pre-shrink hybrid)
-    if "p_raw" in df.columns:
-        valid_mask = df["p_raw"].notna() & df["over_label"].notna()
-        if valid_mask.sum() >= ROLLING_WINDOW:
-            probs = df.loc[valid_mask, "p_raw"].to_numpy(dtype=float)
-            labels = df.loc[valid_mask, "over_label"].to_numpy(dtype=float)
-            components["p_raw"] = _rolling_metrics(probs, labels)
-
-    # Check if hybrid underperforms simpler components
-    p_final_acc = components.get("p_final", {}).get("rolling_accuracy")
     warnings: list[str] = []
-    if p_final_acc is not None:
+    p_final_data = components.get("p_final", {})
+    for window_key in [f"last_{w}" for w in ROLLING_WINDOWS]:
+        p_final_acc = p_final_data.get(window_key, {}).get("rolling_accuracy")
+        if p_final_acc is None:
+            continue
         for name, m in components.items():
             if name in ("p_final", "p_raw"):
                 continue
-            comp_acc = m.get("rolling_accuracy")
+            comp_acc = m.get(window_key, {}).get("rolling_accuracy")
             if comp_acc is not None and comp_acc > p_final_acc + 0.03:
                 warnings.append(
-                    f"{name} (acc={comp_acc:.1%}) outperforms p_final (acc={p_final_acc:.1%}) "
-                    f"by {comp_acc - p_final_acc:.1%} -- possible integration bug"
+                    f"{name} ({window_key} acc={comp_acc:.1%}) outperforms p_final ({p_final_acc:.1%}) "
+                    f"by {comp_acc - p_final_acc:.1%}"
                 )
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "days_back": days_back,
-        "rolling_window": ROLLING_WINDOW,
+        "rolling_windows": ROLLING_WINDOWS,
         "total_rows": len(df),
         "components": components,
         "warnings": warnings,
@@ -165,15 +182,21 @@ def main() -> None:
 
     components = report.get("components", {})
     if components:
-        print(f"\nRolling {ROLLING_WINDOW}-bet ablation:")
-        for name, m in sorted(
-            components.items(),
-            key=lambda x: x[1].get("rolling_accuracy", 0),
-            reverse=True,
-        ):
-            print(
-                f"  {name:<20} acc={m.get('rolling_accuracy', 'N/A')} ll={m.get('rolling_logloss', 'N/A')} brier={m.get('rolling_brier', 'N/A')}"
+        for window_key in [f"last_{w}" for w in ROLLING_WINDOWS] + ["all_time"]:
+            print(f"\n{window_key} ablation:")
+            ranked = sorted(
+                components.items(),
+                key=lambda x: x[1].get(window_key, {}).get("rolling_accuracy", 0),
+                reverse=True,
             )
+            for name, m in ranked:
+                wm = m.get(window_key, {})
+                if not wm:
+                    continue
+                print(
+                    f"  {name:<20} acc={wm.get('rolling_accuracy', 'N/A')} "
+                    f"ll={wm.get('rolling_logloss', 'N/A')} brier={wm.get('rolling_brier', 'N/A')}"
+                )
 
     warnings = report.get("warnings", [])
     if warnings:

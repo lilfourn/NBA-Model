@@ -528,6 +528,18 @@ def _run_train_pipeline() -> None:
     _run_cmd(
         [
             "-m",
+            "scripts.ml.train_stacking_model",
+            "--oof-path",
+            str(oof_path),
+            "--models-dir",
+            str(REMOTE_MODELS_DIR),
+            "--upload-db",
+        ],
+        allow_fail=True,
+    )
+    _run_cmd(
+        [
+            "-m",
             "scripts.ops.monitor_model_health",
             "--ensemble-weights",
             str(REMOTE_MODELS_DIR / "ensemble_weights.json"),
