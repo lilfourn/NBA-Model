@@ -596,7 +596,9 @@ def score_ensemble(
 
     calibration_path = _auto_calibration_path(calibration_path)
 
-    _use_db = settings.model_source.lower() == "db"
+    _configured_model_source = (settings.model_source or "fs").strip().lower()
+    _use_db = _configured_model_source == "db"
+    models_path = Path(models_dir)
     if _use_db:
         nn_path = load_latest_artifact_as_file(engine, "nn_gru_attention", suffix=".pt")
         tabdl_path = load_latest_artifact_as_file(engine, "tabdl_mlp", suffix=".pt")
@@ -606,12 +608,44 @@ def score_ensemble(
         xgb_path = load_latest_artifact_as_file(engine, "xgb", suffix=".joblib")
         lgbm_path = load_latest_artifact_as_file(engine, "lgbm", suffix=".joblib")
     else:
-        models_path = Path(models_dir)
+        if not models_path.exists():
+            logger.warning(
+                "MODELS_DIR=%s does not exist. Local learned experts are unavailable.",
+                models_path,
+            )
         nn_path = latest_compatible_checkpoint(models_path, "nn_gru_attention_*.pt")
         tabdl_path = latest_compatible_tabdl_checkpoint(models_path, "tabdl_*.pt")
         lr_path = latest_compatible_joblib_path(models_path, "baseline_logreg_*.joblib")
         xgb_path = latest_compatible_joblib_path(models_path, "xgb_*.joblib")
         lgbm_path = latest_compatible_joblib_path(models_path, "lgbm_*.joblib")
+        if not any((nn_path, tabdl_path, lr_path, xgb_path, lgbm_path)):
+            logger.warning(
+                "No local learned expert artifacts found in %s. "
+                "Falling back to DB model_artifacts.",
+                models_path,
+            )
+            try:
+                nn_path = load_latest_artifact_as_file(
+                    engine, "nn_gru_attention", suffix=".pt"
+                )
+                tabdl_path = load_latest_artifact_as_file(
+                    engine, "tabdl_mlp", suffix=".pt"
+                )
+                lr_path = load_latest_artifact_as_file(
+                    engine, "baseline_logreg", suffix=".joblib"
+                )
+                xgb_path = load_latest_artifact_as_file(
+                    engine, "xgb", suffix=".joblib"
+                )
+                lgbm_path = load_latest_artifact_as_file(
+                    engine, "lgbm", suffix=".joblib"
+                )
+                _use_db = True
+            except Exception:
+                logger.warning(
+                    "DB artifact fallback failed; continuing without learned experts.",
+                    exc_info=True,
+                )
 
     # Stacking meta-learner (optional)
     _stacking_model = None
@@ -635,7 +669,9 @@ def score_ensemble(
         )
 
     logger.info(
-        "Model paths resolved (db=%s): nn=%s tabdl=%s lr=%s xgb=%s lgbm=%s stacking=%s",
+        "Model paths resolved (configured_source=%s effective_db=%s): "
+        "nn=%s tabdl=%s lr=%s xgb=%s lgbm=%s stacking=%s",
+        _configured_model_source,
         _use_db,
         nn_path,
         tabdl_path,
@@ -845,6 +881,24 @@ def score_ensemble(
                 if not math.isfinite(prob):
                     continue
                 p_lgbm[str(proj_id)] = prob
+
+    logger.info(
+        "Expert coverage for snapshot %s: forecast=%d nn=%d tabdl=%d lr=%d xgb=%d lgbm=%d",
+        resolved_snapshot,
+        len(forecast_map),
+        len(p_nn),
+        len(p_tabdl),
+        len(p_lr),
+        len(p_xgb),
+        len(p_lgbm),
+    )
+    if not any((p_nn, p_tabdl, p_lr, p_xgb, p_lgbm)):
+        logger.warning(
+            "No learned experts produced predictions for snapshot %s. "
+            "This usually indicates missing or incompatible model artifacts and "
+            "can result in zero publishable picks.",
+            resolved_snapshot,
+        )
 
     # Load context-aware priors for shrinkage (daily-refreshed from resolved data)
     from app.ml.context_prior import get_context_prior, load_context_priors

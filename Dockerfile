@@ -36,7 +36,9 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload
 
 FROM base AS prod
 COPY --from=deps-prod /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+ENV PATH="/opt/venv/bin:$PATH" \
+    MODEL_SOURCE="db" \
+    MPLCONFIGDIR="/tmp/matplotlib"
 COPY app ./app
 COPY scripts ./scripts
 COPY alembic ./alembic
