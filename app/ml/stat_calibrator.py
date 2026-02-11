@@ -29,7 +29,9 @@ MIN_SAMPLES_PER_STAT = 100  # Minimum resolved rows before we calibrate
 CALIBRATOR_PATH = (
     Path(os.environ.get("MODELS_DIR", "models")) / "stat_calibrator.joblib"
 )
-CALIBRATOR_VERSION = "2.1.0"
+CALIBRATOR_VERSION = "2.2.0"
+MIN_UNIQUE_OUTPUTS = 4
+MIN_OUTPUT_RANGE = 0.04
 
 # Stat types excluded from calibration (degenerate base rates)
 EXCLUDED_STAT_TYPES: set[str] = {
@@ -57,17 +59,43 @@ class StatTypeCalibrator:
 
     def transform(self, p_final: float, stat_type: str) -> float:
         """Apply isotonic recalibration. Falls back to global or uncalibrated."""
-        cal = self.calibrators.get(stat_type)
-        if cal is None:
+        result, _, _ = self.transform_with_info(p_final, stat_type)
+        return result
+
+    def transform_with_info(
+        self, p_final: float, stat_type: str
+    ) -> tuple[float, str, str]:
+        """Apply isotonic recalibration with source/mode diagnostics."""
+        degenerate_stats = set(self.meta.get("degenerate_stats") or [])
+        cal: IsotonicRegression | None
+        source = "identity"
+        mode = "none"
+        if stat_type in degenerate_stats:
             cal = self.global_calibrator
+            if cal is not None:
+                source = "global"
+                mode = "degenerate_fallback"
+            else:
+                cal = None
+                mode = "degenerate_identity"
+        else:
+            cal = self.calibrators.get(stat_type)
+            if cal is not None:
+                source = "per_stat"
+                mode = "active"
+            else:
+                cal = self.global_calibrator
+                if cal is not None:
+                    source = "global"
+                    mode = "fallback_global"
         if cal is None:
-            return p_final
+            return p_final, source, mode
         try:
             result = float(cal.predict([p_final])[0])
             # Clamp to avoid extreme values
-            return max(0.01, min(0.99, result))
+            return max(0.01, min(0.99, result)), source, mode
         except Exception:  # noqa: BLE001
-            return p_final
+            return p_final, "identity", "error_fallback"
 
     def save(self, path: Path | str | None = None) -> Path:
         out = Path(path or CALIBRATOR_PATH)
@@ -100,18 +128,25 @@ class StatTypeCalibrator:
             return cls()
 
     @classmethod
-    def fit_from_dataframe(cls, df: pd.DataFrame) -> StatTypeCalibrator:
-        """Fit calibrators from a DataFrame with p_final, over_label, stat_type columns."""
-        required = {"p_final", "over_label", "stat_type"}
+    def fit_from_dataframe(
+        cls,
+        df: pd.DataFrame,
+        *,
+        input_col: str = "p_final",
+        input_source: str = "p_final",
+        fit_window_days: int | None = None,
+    ) -> StatTypeCalibrator:
+        """Fit calibrators from a DataFrame with probability, over_label, stat_type columns."""
+        required = {input_col, "over_label", "stat_type"}
         if not required.issubset(df.columns):
             raise ValueError(f"DataFrame missing columns: {required - set(df.columns)}")
 
-        valid = df.dropna(subset=["p_final", "over_label"]).copy()
+        valid = df.dropna(subset=[input_col, "over_label"]).copy()
         valid = valid[~valid["stat_type"].isin(EXCLUDED_STAT_TYPES)]
         if valid.empty:
             return cls()
 
-        probs = valid["p_final"].to_numpy(dtype=float)
+        probs = valid[input_col].to_numpy(dtype=float)
         labels = valid["over_label"].to_numpy(dtype=int)
 
         # Fit global calibrator
@@ -125,6 +160,9 @@ class StatTypeCalibrator:
         # Fit per-stat-type calibrators
         calibrators: dict[str, IsotonicRegression] = {}
         stat_meta: dict[str, dict[str, Any]] = {}
+        degenerate_stats: list[str] = []
+        degenerate_reason: dict[str, str] = {}
+        probe_grid = np.linspace(0.35, 0.65, 7, dtype=float)
         for st, group in valid.groupby("stat_type"):
             st = str(st)
             n = len(group)
@@ -135,7 +173,7 @@ class StatTypeCalibrator:
                     "reason": "insufficient_samples",
                 }
                 continue
-            st_probs = group["p_final"].to_numpy(dtype=float)
+            st_probs = group[input_col].to_numpy(dtype=float)
             st_labels = group["over_label"].to_numpy(dtype=int)
             # Need at least 2 unique labels
             if len(np.unique(st_labels)) < 2:
@@ -143,8 +181,39 @@ class StatTypeCalibrator:
                 continue
             cal = IsotonicRegression(y_min=0.01, y_max=0.99, out_of_bounds="clip")
             cal.fit(st_probs, st_labels)
+            probe_outputs = np.asarray(cal.predict(probe_grid), dtype=float)
+            unique_outputs = int(len(np.unique(np.round(probe_outputs, 6))))
+            output_range = float(np.max(probe_outputs) - np.min(probe_outputs))
+            if unique_outputs < MIN_UNIQUE_OUTPUTS:
+                stat_meta[st] = {
+                    "n": n,
+                    "calibrated": False,
+                    "reason": "degenerate_low_unique_outputs",
+                    "unique_outputs": unique_outputs,
+                    "output_range": round(output_range, 6),
+                }
+                degenerate_stats.append(st)
+                degenerate_reason[st] = "degenerate_low_unique_outputs"
+                continue
+            if output_range < MIN_OUTPUT_RANGE:
+                stat_meta[st] = {
+                    "n": n,
+                    "calibrated": False,
+                    "reason": "degenerate_low_output_range",
+                    "unique_outputs": unique_outputs,
+                    "output_range": round(output_range, 6),
+                }
+                degenerate_stats.append(st)
+                degenerate_reason[st] = "degenerate_low_output_range"
+                continue
+
             calibrators[st] = cal
-            stat_meta[st] = {"n": n, "calibrated": True}
+            stat_meta[st] = {
+                "n": n,
+                "calibrated": True,
+                "unique_outputs": unique_outputs,
+                "output_range": round(output_range, 6),
+            }
 
         meta = {
             "calibrator_version": CALIBRATOR_VERSION,
@@ -153,6 +222,12 @@ class StatTypeCalibrator:
             "global_calibrated": global_cal is not None,
             "stat_types": stat_meta,
             "min_samples_per_stat": MIN_SAMPLES_PER_STAT,
+            "input_source": str(input_source),
+            "degenerate_stats": sorted(degenerate_stats),
+            "degenerate_reason": degenerate_reason,
+            "fit_window_days": int(fit_window_days) if fit_window_days is not None else None,
+            "min_unique_outputs": MIN_UNIQUE_OUTPUTS,
+            "min_output_range": MIN_OUTPUT_RANGE,
         }
         return cls(calibrators=calibrators, global_calibrator=global_cal, meta=meta)
 
@@ -167,12 +242,12 @@ class StatTypeCalibrator:
                     if table == "vw_resolved_picks_canonical"
                     else "WHERE outcome IN ('over', 'under') AND over_label IS NOT NULL AND actual_value IS NOT NULL"
                 )
-                p_expr = "p_final" if table == "vw_resolved_picks_canonical" else "prob_over"
                 df = pd.read_sql(
                     text(
                         f"""
                         SELECT
-                            {p_expr} AS p_final,
+                            details->>'p_pre_cal' AS p_pre_cal,
+                            p_raw,
                             over_label,
                             stat_type
                         FROM {table}
@@ -193,6 +268,16 @@ class StatTypeCalibrator:
         if df.empty:
             return cls()
 
-        df["p_final"] = pd.to_numeric(df["p_final"], errors="coerce")
+        df["p_pre_cal"] = pd.to_numeric(df.get("p_pre_cal"), errors="coerce")
+        df["p_raw"] = pd.to_numeric(df.get("p_raw"), errors="coerce")
+        df["p_input"] = df["p_pre_cal"].where(df["p_pre_cal"].notna(), df["p_raw"])
         df["over_label"] = pd.to_numeric(df["over_label"], errors="coerce")
-        return cls.fit_from_dataframe(df)
+        df = df.dropna(subset=["p_input", "over_label", "stat_type"]).copy()
+        if df.empty:
+            return cls()
+        return cls.fit_from_dataframe(
+            df,
+            input_col="p_input",
+            input_source="details.p_pre_cal_then_p_raw",
+            fit_window_days=int(max(1, days_back)),
+        )

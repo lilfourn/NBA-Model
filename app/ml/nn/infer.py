@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
@@ -64,6 +65,32 @@ def _is_compatible_payload(payload: dict[str, Any]) -> bool:
     return True
 
 
+def _checkpoint_numeric_cols(payload: dict[str, Any]) -> list[str]:
+    numeric_cols = payload.get("numeric_cols")
+    if isinstance(numeric_cols, list) and numeric_cols:
+        return [str(col) for col in numeric_cols]
+    numeric_stats = payload.get("numeric_stats")
+    if isinstance(numeric_stats, dict) and numeric_stats:
+        return [str(col) for col in numeric_stats.keys()]
+    return []
+
+
+def _align_numeric_frame(
+    numeric: pd.DataFrame, *, checkpoint_numeric_cols: list[str]
+) -> pd.DataFrame:
+    if not checkpoint_numeric_cols:
+        work = numeric.copy()
+        return work.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    work = numeric.copy()
+    for col in checkpoint_numeric_cols:
+        if col not in work.columns:
+            work[col] = 0.0
+    aligned = work[checkpoint_numeric_cols].copy()
+    aligned = aligned.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    return aligned
+
+
 def latest_compatible_checkpoint(
     models_dir: Path, pattern: str = "nn_gru_attention_*.pt"
 ) -> Path | None:
@@ -81,7 +108,6 @@ def latest_compatible_checkpoint(
 
 def load_model(
     path: str,
-    num_numeric: int,
     *,
     payload: dict[str, Any] | None = None,
 ) -> tuple[GRUAttentionTabularClassifier, dict[str, Any]]:
@@ -104,8 +130,12 @@ def load_model(
     if "seq_d_in" not in arch_kwargs:
         arch_kwargs["seq_d_in"] = 2
 
+    numeric_cols = _checkpoint_numeric_cols(payload)
+    if not numeric_cols:
+        raise ValueError("NN checkpoint missing numeric_cols/numeric_stats schema")
+
     model = GRUAttentionTabularClassifier(
-        num_numeric=num_numeric,
+        num_numeric=len(numeric_cols),
         cat_cardinalities=cat_cardinalities,
         cat_emb_dims=cat_emb_dims,
         **arch_kwargs,
@@ -116,6 +146,7 @@ def load_model(
         "cat_maps": cat_maps,
         "history_len": history_len,
         "temperature": temperature,
+        "numeric_cols": numeric_cols,
     }
 
 
@@ -149,16 +180,20 @@ def infer_over_probs(
             probs=np.zeros((0,), dtype=np.float32),
         )
 
-    num_numeric = numeric.shape[1]
-    model, info = load_model(model_path, num_numeric=num_numeric, payload=payload)
+    model, info = load_model(model_path, payload=payload)
     cat_maps = info["cat_maps"]
     temperature = float(info.get("temperature") or temperature)
     if temperature <= 0:
         temperature = 1.0
+    numeric_cols = list(info.get("numeric_cols") or [])
+    numeric_aligned = _align_numeric_frame(
+        numeric,
+        checkpoint_numeric_cols=numeric_cols,
+    )
 
     dataset = NNDataset(
         frame=frame,
-        numeric=numeric,
+        numeric=numeric_aligned,
         sequences=sequences,
         cat_maps=cat_maps,
         cat_keys=list(cat_maps.keys()),
@@ -186,7 +221,7 @@ def infer_over_probs(
         except Exception:  # noqa: BLE001
             pass
 
-    return InferenceResult(frame=frame, numeric=numeric, probs=probs)
+    return InferenceResult(frame=frame, numeric=numeric_aligned, probs=probs)
 
 
 def format_predictions(frame, probs: np.ndarray) -> list[dict[str, Any]]:

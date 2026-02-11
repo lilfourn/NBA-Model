@@ -104,6 +104,7 @@ class ScoredPick:
     selection_threshold: float = 0.60
     selection_margin: float = 0.0
     policy_version: str = "legacy"
+    is_publishable: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -172,16 +173,8 @@ EXCLUDED_STAT_TYPES: set[str] = {"Dunks", "Blocked Shots"}
 PRIOR_ONLY_STAT_TYPES: set[str] = {
     "Offensive Rebounds",
     "Two Pointers Made",
-    "Two Pointers Attempted",
     "Turnovers",
-    "Free Throws Attempted",
-    "Steals",
     "Blks+Stls",
-    "Defensive Rebounds",
-    "Fantasy Score",
-    "Pts+Rebs",
-    "Pts+Asts",
-    "Pts+Rebs+Asts",
 }
 
 ENSEMBLE_EXPERTS = ("p_lr", "p_xgb", "p_lgbm", "p_nn", "p_forecast_cal", "p_tabdl")
@@ -902,6 +895,21 @@ def score_logged_predictions(
             or "Unknown"
         )
 
+        publishable_raw = details.get("is_publishable")
+        if isinstance(publishable_raw, bool):
+            is_publishable = publishable_raw
+        elif isinstance(publishable_raw, (int, float)):
+            is_publishable = bool(publishable_raw)
+        elif isinstance(publishable_raw, str):
+            is_publishable = publishable_raw.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+            }
+        else:
+            is_publishable = bool(selection_margin >= 0.0 and edge >= MIN_EDGE)
+
         scored_pick = ScoredPick(
             projection_id=str(getattr(row, "projection_id", "") or ""),
             player_name=player_name,
@@ -932,25 +940,8 @@ def score_logged_predictions(
             selection_threshold=float(selection_threshold),
             selection_margin=float(selection_margin),
             policy_version=policy_version,
+            is_publishable=is_publishable,
         )
-
-        publishable_raw = details.get("is_publishable")
-        if isinstance(publishable_raw, bool):
-            is_publishable = publishable_raw
-        elif isinstance(publishable_raw, (int, float)):
-            is_publishable = bool(publishable_raw)
-        elif isinstance(publishable_raw, str):
-            is_publishable = publishable_raw.strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "y",
-            }
-        else:
-            is_publishable = bool(
-                selection_margin >= 0.0
-                and edge >= MIN_EDGE
-            )
         scored_items.append((scored_pick, is_publishable))
 
     publishable = [pick for pick, ok in scored_items if ok]
@@ -1512,14 +1503,19 @@ def score_ensemble(
         # Prior-only stat types: use context prior directly, never publish
         _is_prior_only = stat_type in PRIOR_ONLY_STAT_TYPES
         if _is_prior_only:
-            p_final = _ctx_prior if _ctx_prior is not None else 0.5
+            p_pre_cal = _ctx_prior if _ctx_prior is not None else 0.5
+            p_final = p_pre_cal
             p_raw = p_final
+            calibrator_source = "prior_only"
+            calibrator_mode = "bypass"
         else:
-            p_final = shrink_probability(
+            p_pre_cal = shrink_probability(
                 p_raw, n_eff=n_eff_val, context_prior=_ctx_prior
             )
             # Apply per-stat-type isotonic recalibration
-            p_final = _stat_calibrator.transform(p_final, stat_type)
+            p_final, calibrator_source, calibrator_mode = (
+                _stat_calibrator.transform_with_info(p_pre_cal, stat_type)
+            )
 
         pick = "OVER" if p_final >= 0.5 else "UNDER"
         conf = float(confidence_from_probability(p_final))
@@ -1588,6 +1584,7 @@ def score_ensemble(
                 "pick": pick,
                 "prob_over": p_final,
                 "p_raw": p_raw,
+                "p_pre_cal": p_pre_cal,
                 "confidence": conf,
                 "rank_score": float(score),
                 "p_forecast_cal": expert_probs["p_forecast_cal"],
@@ -1606,6 +1603,8 @@ def score_ensemble(
                 "selection_threshold": selection_threshold,
                 "selection_margin": selection_margin,
                 "policy_version": _selection_policy.version,
+                "calibrator_source": calibrator_source,
+                "calibrator_mode": calibrator_mode,
                 "is_prior_only": _is_prior_only,
                 "has_diversity": _has_diversity,
                 "has_min_neff": _has_min_neff,
@@ -1784,6 +1783,7 @@ def score_ensemble(
             selection_threshold=float(item.get("selection_threshold") or 0.60),
             selection_margin=float(item.get("selection_margin") or 0.0),
             policy_version=str(item.get("policy_version") or "legacy"),
+            is_publishable=bool(item.get("is_publishable", False)),
         )
         for item in top_picks
     ]

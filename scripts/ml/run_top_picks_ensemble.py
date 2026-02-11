@@ -647,17 +647,22 @@ def main() -> None:
 
         if _is_prior_only:
             p_raw = _ctx_prior if _ctx_prior is not None else 0.5
+            p_pre_cal = p_raw
             p_final = p_raw
+            calibrator_source = "prior_only"
+            calibrator_mode = "bypass"
         else:
             p_raw = float(ens.predict(expert_probs, ctx))
             if not math.isfinite(p_raw):
                 skipped_nonfinite += 1
                 continue
-            p_final = shrink_probability(
+            p_pre_cal = shrink_probability(
                 p_raw, n_eff=n_eff_val, context_prior=_ctx_prior
             )
             # Apply per-stat isotonic recalibration
-            p_final = _stat_calibrator.transform(p_final, stat_type)
+            p_final, calibrator_source, calibrator_mode = (
+                _stat_calibrator.transform_with_info(p_pre_cal, stat_type)
+            )
 
         pick = "OVER" if p_final >= 0.5 else "UNDER"
         conf = float(confidence_from_probability(p_final))
@@ -709,6 +714,7 @@ def main() -> None:
                 "pick": pick,
                 "prob_over": p_final,
                 "p_raw": p_raw,
+                "p_pre_cal": p_pre_cal,
                 "confidence": conf,
                 "rank_score": float(score),
                 "p_forecast_cal": expert_probs["p_forecast_cal"],
@@ -730,6 +736,8 @@ def main() -> None:
                 "selection_threshold": selection_threshold,
                 "selection_margin": selection_margin,
                 "policy_version": _selection_policy.version,
+                "calibrator_source": calibrator_source,
+                "calibrator_mode": calibrator_mode,
             }
         )
 
@@ -831,11 +839,14 @@ def main() -> None:
                     "p_lgbm": item.get("p_lgbm"),
                     "p_meta": item.get("p_meta"),
                     "p_raw": item.get("p_raw"),
+                    "p_pre_cal": item.get("p_pre_cal"),
                     "p_final": item.get("prob_over"),
                     "p_pick": item.get("p_pick"),
                     "selection_threshold": item.get("selection_threshold"),
                     "selection_margin": item.get("selection_margin"),
                     "policy_version": item.get("policy_version"),
+                    "calibrator_source": item.get("calibrator_source"),
+                    "calibrator_mode": item.get("calibrator_mode"),
                     "model_version": item.get("model_version"),
                     "calibration_version": calibration_version,
                     "calibration_status": item.get("calibration_status"),

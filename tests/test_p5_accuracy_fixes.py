@@ -7,38 +7,43 @@ import math
 import numpy as np
 
 
-# --- Phase 1a: Combo stats → PRIOR_ONLY ---
+# --- Phase 1a: PRIOR_ONLY trimmed to weak stats only ---
 
 
 class TestComboStatsPriorOnly:
-    COMBO_TYPES = {"Fantasy Score", "Pts+Rebs", "Pts+Asts", "Pts+Rebs+Asts"}
-    ORIGINAL_TYPES = {
+    TRIMMED_TYPES = {
         "Offensive Rebounds",
         "Two Pointers Made",
-        "Two Pointers Attempted",
         "Turnovers",
+        "Blks+Stls",
+    }
+    REMOVED_TYPES = {
+        "Fantasy Score",
+        "Pts+Rebs",
+        "Pts+Asts",
+        "Pts+Rebs+Asts",
+        "Two Pointers Attempted",
         "Free Throws Attempted",
         "Steals",
-        "Blks+Stls",
         "Defensive Rebounds",
     }
 
-    def test_combo_types_in_prior_only(self) -> None:
+    def test_trimmed_types_in_prior_only(self) -> None:
         from app.services.scoring import PRIOR_ONLY_STAT_TYPES
 
-        for st in self.COMBO_TYPES:
+        for st in self.TRIMMED_TYPES:
             assert st in PRIOR_ONLY_STAT_TYPES, f"{st} missing from PRIOR_ONLY"
 
-    def test_original_types_preserved(self) -> None:
+    def test_removed_types_not_prior_only(self) -> None:
         from app.services.scoring import PRIOR_ONLY_STAT_TYPES
 
-        for st in self.ORIGINAL_TYPES:
-            assert st in PRIOR_ONLY_STAT_TYPES, f"Original {st} removed from PRIOR_ONLY"
+        for st in self.REMOVED_TYPES:
+            assert st not in PRIOR_ONLY_STAT_TYPES, f"{st} should not be PRIOR_ONLY"
 
     def test_total_count(self) -> None:
         from app.services.scoring import PRIOR_ONLY_STAT_TYPES
 
-        assert len(PRIOR_ONLY_STAT_TYPES) == 12
+        assert len(PRIOR_ONLY_STAT_TYPES) == 4
 
 
 # --- Phase 1b: Tighter probability clipping ---

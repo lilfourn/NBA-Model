@@ -42,6 +42,9 @@ def main() -> None:
     print(f"  Total rows:    {meta.get('total_rows', 0)}")
     print(f"  Stat types calibrated: {meta.get('n_stat_types_calibrated', 0)}")
     print(f"  Global calibrated:     {meta.get('global_calibrated', False)}")
+    print(f"  Input source:          {meta.get('input_source', 'unknown')}")
+    degenerate_stats = list(meta.get("degenerate_stats") or [])
+    print(f"  Degenerate stat types: {len(degenerate_stats)}")
     for st, info in sorted(meta.get("stat_types", {}).items()):
         status = "OK" if info.get("calibrated") else info.get("reason", "skip")
         print(f"    {st:25s} n={info.get('n', 0):>5d} {status}")

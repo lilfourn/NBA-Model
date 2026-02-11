@@ -150,3 +150,87 @@ def test_build_health_report_has_live_metadata(monkeypatch) -> None:
     assert "p_final" in report["expert_metrics"]
     assert "base_rate" in report
     assert report["base_rate"] is not None
+
+
+def test_build_health_report_includes_collect_guardrail_alerts(monkeypatch) -> None:
+    rows = []
+    for _ in range(ROLLING_WINDOW):
+        rows.append(
+            {
+                "p_final": 0.7,
+                "p_forecast_cal": 0.7,
+                "p_nn": 0.7,
+                "p_tabdl": 0.7,
+                "p_lr": 0.7,
+                "p_xgb": 0.7,
+                "p_lgbm": 0.7,
+                "over_label": 1,
+                "is_correct": 1.0,
+            }
+        )
+    resolved_df = pd.DataFrame(rows)
+
+    monkeypatch.setattr(
+        monitor,
+        "_load_resolved_predictions",
+        lambda _engine, days_back=90: resolved_df,
+    )
+    monkeypatch.setattr(monitor, "_load_ensemble_mean_weights", lambda _path: {})
+    monkeypatch.setattr(monitor, "_check_ensemble_weights", lambda _path: [])
+    monkeypatch.setattr(
+        monitor,
+        "_compute_latest_collect_metrics",
+        lambda _engine: {
+            "snapshot_id": "snap-1",
+            "total_scored": 100,
+            "publishable_count": 10,
+            "publishable_by_stat": {"Free Throws Made": 9, "Rebounds": 1},
+            "top_stat_share": 0.9,
+            "expert_coverage": {
+                "p_forecast_cal": 1.0,
+                "p_nn": 0.4,
+                "p_tabdl": 0.95,
+                "p_lr": 0.99,
+                "p_xgb": 0.98,
+                "p_lgbm": 0.97,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        monitor,
+        "_load_recent_collect_summaries",
+        lambda _engine, limit=5: [
+            {
+                "snapshot_id": "snap-1",
+                "scored_at": "2026-02-11T12:00:00Z",
+                "total_scored": 100,
+                "publishable_count": 10,
+                "publishable_ratio": 0.10,
+            },
+            {
+                "snapshot_id": "snap-0",
+                "scored_at": "2026-02-11T10:00:00Z",
+                "total_scored": 120,
+                "publishable_count": 12,
+                "publishable_ratio": 0.10,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        monitor,
+        "_load_calibrator_flat_stat_types",
+        lambda _path="models/stat_calibrator.joblib": ["Assists"],
+    )
+
+    report = monitor.build_health_report(engine=object())
+
+    assert report["publishable_by_stat"]["Free Throws Made"] == 9
+    assert report["top_stat_share"] == 0.9
+    assert report["expert_coverage"]["p_nn"] == 0.4
+    assert report["calibrator_flat_stat_types"] == ["Assists"]
+
+    alert_types = {a["type"] for a in report["alerts"]}
+    assert "stat_concentration" in alert_types
+    assert "expert_coverage_low" in alert_types
+    assert "low_publishable_ratio" in alert_types
+    assert "calibrator_flat_stats" in alert_types

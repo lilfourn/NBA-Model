@@ -171,16 +171,8 @@ class TestPriorOnlyStatTypes:
     EXPECTED = {
         "Offensive Rebounds",
         "Two Pointers Made",
-        "Two Pointers Attempted",
         "Turnovers",
-        "Free Throws Attempted",
-        "Steals",
         "Blks+Stls",
-        "Defensive Rebounds",
-        "Fantasy Score",
-        "Pts+Rebs",
-        "Pts+Asts",
-        "Pts+Rebs+Asts",
     }
 
     def test_contains_all_expected(self) -> None:
@@ -188,16 +180,14 @@ class TestPriorOnlyStatTypes:
             assert st in PRIOR_ONLY_STAT_TYPES, f"{st} missing from PRIOR_ONLY"
 
     def test_count(self) -> None:
-        assert len(PRIOR_ONLY_STAT_TYPES) >= len(self.EXPECTED)
+        assert len(PRIOR_ONLY_STAT_TYPES) == len(self.EXPECTED)
 
-    def test_steals_added(self) -> None:
-        assert "Steals" in PRIOR_ONLY_STAT_TYPES
-
-    def test_blks_stls_added(self) -> None:
+    def test_blks_stls_in_prior_only(self) -> None:
         assert "Blks+Stls" in PRIOR_ONLY_STAT_TYPES
 
-    def test_defensive_rebounds_added(self) -> None:
-        assert "Defensive Rebounds" in PRIOR_ONLY_STAT_TYPES
+    def test_combo_stats_not_prior_only(self) -> None:
+        for st in {"Fantasy Score", "Pts+Rebs", "Pts+Asts", "Pts+Rebs+Asts"}:
+            assert st not in PRIOR_ONLY_STAT_TYPES
 
 
 # --- PRIOR_ONLY uses context prior ---
@@ -209,7 +199,7 @@ class TestPriorOnlyUsesContextPrior:
     def test_prior_only_uses_prior(self) -> None:
         ctx_prior = 0.45
         p_raw_model = 0.72
-        stat_type = "Steals"
+        stat_type = "Turnovers"
         assert stat_type in PRIOR_ONLY_STAT_TYPES
         p_final = ctx_prior if stat_type in PRIOR_ONLY_STAT_TYPES else p_raw_model
         assert p_final == ctx_prior

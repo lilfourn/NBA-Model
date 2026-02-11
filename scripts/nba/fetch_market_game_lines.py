@@ -38,6 +38,14 @@ DEFAULT_HEADERS = {
     "Accept": "application/json",
 }
 
+ABBREV_NORMALIZATION_MAP: dict[str, str] = {
+    "GS": "GSW",
+    "NO": "NOP",
+    "SA": "SAS",
+    "NY": "NYK",
+    "UTAH": "UTA",
+}
+
 
 def _get_json(url: str, *, params: dict[str, Any] | None = None, timeout: int = 25) -> Any:
     query = urlencode({k: v for k, v in (params or {}).items() if v is not None})
@@ -91,6 +99,15 @@ def _to_abbr(mapping: dict[str, str], raw_name: str | None) -> str | None:
     if key in mapping:
         return mapping[key]
     return mapping.get(" ".join(key.split()))
+
+
+def _normalize_abbreviation(raw_abbr: str | None) -> str | None:
+    if not raw_abbr:
+        return None
+    key = str(raw_abbr).strip().upper()
+    if not key:
+        return None
+    return ABBREV_NORMALIZATION_MAP.get(key, key)
 
 
 def _extract_market_values(markets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -193,7 +210,7 @@ def _parse_espn_rows(events: list[dict[str, Any]], *, provider: str) -> list[dic
                 team = competitor.get("team") or {}
                 if not isinstance(team, dict):
                     continue
-                abbr = str(team.get("abbreviation") or "").strip().upper() or None
+                abbr = _normalize_abbreviation(str(team.get("abbreviation") or ""))
                 if not abbr:
                     continue
                 side = str(competitor.get("homeAway") or "").strip().lower()
@@ -320,8 +337,8 @@ def _parse_rows(events: list[dict[str, Any]], team_map: dict[str, str], *, provi
         if not event_id or not home_team or not away_team or not commence_time:
             continue
 
-        home_abbr = _to_abbr(team_map, home_team)
-        away_abbr = _to_abbr(team_map, away_team)
+        home_abbr = _normalize_abbreviation(_to_abbr(team_map, home_team))
+        away_abbr = _normalize_abbreviation(_to_abbr(team_map, away_team))
         if not home_abbr or not away_abbr:
             continue
 
@@ -422,6 +439,44 @@ def _upsert_rows(engine, rows: list[dict[str, Any]]) -> int:
     return len(rows)
 
 
+def _rows_matching_nba_games(engine, rows: list[dict[str, Any]]) -> int:
+    if not rows:
+        return 0
+    keys: list[tuple[object, str, str]] = []
+    for row in rows:
+        game_date = row.get("game_date")
+        home = _normalize_abbreviation(row.get("home_team_abbreviation"))
+        away = _normalize_abbreviation(row.get("away_team_abbreviation"))
+        if game_date is None or not home or not away:
+            continue
+        keys.append((game_date, home, away))
+    if not keys:
+        return 0
+
+    game_dates = sorted({game_date for game_date, _, _ in keys})
+    with engine.connect() as conn:
+        matched = conn.execute(
+            text(
+                """
+                select game_date, home_team_abbreviation, away_team_abbreviation
+                from nba_games
+                where game_date = any(:game_dates)
+                """
+            ),
+            {"game_dates": game_dates},
+        ).all()
+
+    matched_keys = {
+        (
+            row.game_date,
+            _normalize_abbreviation(row.home_team_abbreviation),
+            _normalize_abbreviation(row.away_team_abbreviation),
+        )
+        for row in matched
+    }
+    return sum(1 for key in keys if key in matched_keys)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch and load external market game lines.")
     parser.add_argument("--database-url", default=None)
@@ -455,6 +510,7 @@ def main() -> None:
             )
             rows = _parse_rows(events, team_map, provider=provider or "the_odds_api")
             upserted = _upsert_rows(engine, rows)
+            matched_rows = _rows_matching_nba_games(engine, rows)
             print(
                 {
                     "source": source,
@@ -462,6 +518,8 @@ def main() -> None:
                     "events": len(events),
                     "rows_parsed": len(rows),
                     "rows_upserted": upserted,
+                    "rows_matching_nba_games": matched_rows,
+                    "join_match_rate": round(matched_rows / len(rows), 4) if rows else 0.0,
                     "database": bool(settings.database_url or args.database_url),
                 }
             )
@@ -470,6 +528,7 @@ def main() -> None:
     events = _fetch_espn_events(days_ahead=int(args.days_ahead))
     rows = _parse_espn_rows(events, provider=provider or "espn_public")
     upserted = _upsert_rows(engine, rows)
+    matched_rows = _rows_matching_nba_games(engine, rows)
 
     print(
         {
@@ -478,6 +537,8 @@ def main() -> None:
             "events": len(events),
             "rows_parsed": len(rows),
             "rows_upserted": upserted,
+            "rows_matching_nba_games": matched_rows,
+            "join_match_rate": round(matched_rows / len(rows), 4) if rows else 0.0,
             "database": bool(settings.database_url or args.database_url),
         }
     )

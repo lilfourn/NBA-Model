@@ -22,12 +22,16 @@ from scripts.ml.train_baseline_model import load_env  # noqa: E402
 EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
 ROLLING_WINDOW = 50
 METRICS_VERSION = (
-    "2.0.0"  # Bump when metric logic changes (push/void, thresholds, etc.)
+    "2.1.0"  # Bump when metric logic changes (push/void, thresholds, etc.)
 )
 ACCURACY_ALERT_THRESHOLD = 0.48
 LOGLOSS_ALERT_THRESHOLD = 0.75
 WEIGHT_COLLAPSE_THRESHOLD = 0.80
 MIN_ALERT_EXPERT_WEIGHT = 0.03
+TOP_STAT_SHARE_ALERT_THRESHOLD = 0.70
+MIN_REQUIRED_EXPERT_COVERAGE = 0.90
+REQUIRED_EXPERTS = tuple(EXPERT_COLS)
+MIN_PUBLISHABLE_SHARE = 0.15
 
 
 def _logloss(y: int, p: float) -> float:
@@ -104,6 +108,216 @@ order by coalesce(decision_time, resolved_at, created_at) asc, created_at asc, i
     if "is_correct" in df.columns:
         df["is_correct"] = pd.to_numeric(df["is_correct"], errors="coerce")
     return df
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return False
+
+
+def _load_latest_collect_predictions(engine) -> pd.DataFrame:
+    from sqlalchemy import text as sa_text
+
+    query = sa_text(
+        """
+        with latest_snapshot as (
+            select snapshot_id
+            from projection_predictions
+            where snapshot_id is not null
+            group by snapshot_id
+            order by max(coalesce(decision_time, created_at)) desc
+            limit 1
+        ),
+        latest as (
+            select distinct on (pp.projection_id)
+                pp.snapshot_id::text as snapshot_id,
+                pp.projection_id::text as projection_id,
+                pp.stat_type,
+                pp.p_forecast_cal,
+                pp.p_nn,
+                coalesce(pp.p_tabdl::text, pp.details->>'p_tabdl') as p_tabdl,
+                pp.p_lr,
+                pp.p_xgb,
+                pp.p_lgbm,
+                pp.details,
+                coalesce(pp.decision_time, pp.created_at) as scored_at
+            from projection_predictions pp
+            join latest_snapshot ls on ls.snapshot_id = pp.snapshot_id
+            order by
+                pp.projection_id,
+                coalesce(pp.decision_time, pp.created_at) desc,
+                pp.created_at desc,
+                pp.id desc
+        )
+        select * from latest
+        """
+    )
+    return pd.read_sql(query, engine)
+
+
+def _compute_latest_collect_metrics(engine) -> dict:
+    try:
+        latest = _load_latest_collect_predictions(engine)
+    except Exception:  # noqa: BLE001
+        latest = pd.DataFrame()
+    if latest.empty:
+        return {
+            "snapshot_id": None,
+            "total_scored": 0,
+            "publishable_count": 0,
+            "publishable_by_stat": {},
+            "top_stat_share": 0.0,
+            "expert_coverage": {},
+        }
+
+    details_series = latest.get("details")
+    if details_series is None:
+        details_series = pd.Series([{}] * len(latest), index=latest.index, dtype=object)
+
+    def _extract_is_publishable(raw: object) -> bool:
+        if isinstance(raw, dict):
+            return _coerce_bool(raw.get("is_publishable"))
+        if isinstance(raw, str):
+            text_value = raw.strip()
+            if not text_value:
+                return False
+            try:
+                parsed = json.loads(text_value)
+            except json.JSONDecodeError:
+                return False
+            if isinstance(parsed, dict):
+                return _coerce_bool(parsed.get("is_publishable"))
+        return False
+
+    publishable_mask = details_series.apply(_extract_is_publishable).astype(bool)
+    publishable = latest[publishable_mask]
+    publishable_by_stat = (
+        publishable["stat_type"].fillna("unknown").astype(str).value_counts().to_dict()
+        if not publishable.empty and "stat_type" in publishable.columns
+        else {}
+    )
+    publishable_count = int(publishable_mask.sum())
+    top_stat_share = (
+        float(max(publishable_by_stat.values()) / publishable_count)
+        if publishable_count > 0 and publishable_by_stat
+        else 0.0
+    )
+
+    expert_coverage: dict[str, float] = {}
+    for col in EXPERT_COLS:
+        if col not in latest.columns:
+            expert_coverage[col] = 0.0
+            continue
+        series = pd.to_numeric(latest[col], errors="coerce")
+        expert_coverage[col] = float(series.notna().mean()) if len(series) else 0.0
+
+    snapshot_id = None
+    if "snapshot_id" in latest.columns and not latest["snapshot_id"].dropna().empty:
+        snapshot_id = str(latest["snapshot_id"].dropna().iloc[0])
+
+    return {
+        "snapshot_id": snapshot_id,
+        "total_scored": int(len(latest)),
+        "publishable_count": publishable_count,
+        "publishable_by_stat": {
+            str(key): int(value) for key, value in publishable_by_stat.items()
+        },
+        "top_stat_share": round(top_stat_share, 4),
+        "expert_coverage": {
+            str(key): round(float(value), 4) for key, value in expert_coverage.items()
+        },
+    }
+
+
+def _load_recent_collect_summaries(engine, *, limit: int = 5) -> list[dict]:
+    from sqlalchemy import text as sa_text
+
+    query = sa_text(
+        """
+        with snapshots as (
+            select
+                snapshot_id,
+                max(coalesce(decision_time, created_at)) as scored_at
+            from projection_predictions
+            where snapshot_id is not null
+            group by snapshot_id
+            order by scored_at desc
+            limit :limit
+        ),
+        latest as (
+            select
+                pp.snapshot_id,
+                pp.projection_id,
+                pp.details,
+                row_number() over (
+                    partition by pp.snapshot_id, pp.projection_id
+                    order by
+                        coalesce(pp.decision_time, pp.created_at) desc,
+                        pp.created_at desc,
+                        pp.id desc
+                ) as rn
+            from projection_predictions pp
+            join snapshots s on s.snapshot_id = pp.snapshot_id
+        )
+        select
+            s.snapshot_id::text as snapshot_id,
+            s.scored_at,
+            count(l.projection_id) as total_scored,
+            sum(
+                case
+                    when lower(coalesce(l.details->>'is_publishable', '')) in ('1', 'true', 'yes', 'y')
+                    then 1 else 0
+                end
+            ) as publishable_count
+        from snapshots s
+        left join latest l
+            on l.snapshot_id = s.snapshot_id
+           and l.rn = 1
+        group by s.snapshot_id, s.scored_at
+        order by s.scored_at desc
+        """
+    )
+    try:
+        df = pd.read_sql(query, engine, params={"limit": int(max(1, limit))})
+    except Exception:  # noqa: BLE001
+        return []
+    if df.empty:
+        return []
+    out: list[dict] = []
+    for row in df.itertuples(index=False):
+        total = int(row.total_scored or 0)
+        publishable = int(row.publishable_count or 0)
+        ratio = (publishable / total) if total > 0 else 0.0
+        scored_at = pd.to_datetime(row.scored_at, utc=True, errors="coerce")
+        out.append(
+            {
+                "snapshot_id": str(row.snapshot_id),
+                "scored_at": scored_at.isoformat() if pd.notna(scored_at) else None,
+                "total_scored": total,
+                "publishable_count": publishable,
+                "publishable_ratio": round(float(ratio), 4),
+            }
+        )
+    return out
+
+
+def _load_calibrator_flat_stat_types(path: str = "models/stat_calibrator.joblib") -> list[str]:
+    try:
+        from app.ml.stat_calibrator import StatTypeCalibrator
+
+        cal = StatTypeCalibrator.load(path)
+        meta = cal.meta or {}
+        stats = meta.get("degenerate_stats") or []
+        if isinstance(stats, list):
+            return sorted({str(st) for st in stats if st})
+    except Exception:  # noqa: BLE001
+        return []
+    return []
 
 
 def _load_ensemble_mean_weights(weights_path: str) -> dict[str, float]:
@@ -584,6 +798,9 @@ def build_health_report(
     expert_metrics: dict[str, dict] = {}
 
     ensemble_weights = _load_ensemble_mean_weights(ensemble_weights_path)
+    latest_collect = _compute_latest_collect_metrics(engine)
+    recent_collects = _load_recent_collect_summaries(engine, limit=5)
+    calibrator_flat_stat_types = _load_calibrator_flat_stat_types()
 
     base_rate = None
     tier_metrics: dict = {}
@@ -604,6 +821,69 @@ def build_health_report(
     weight_alerts = _check_ensemble_weights(ensemble_weights_path)
     all_alerts.extend(weight_alerts)
 
+    top_stat_share = float(latest_collect.get("top_stat_share") or 0.0)
+    if top_stat_share > TOP_STAT_SHARE_ALERT_THRESHOLD:
+        all_alerts.append(
+            {
+                "type": "stat_concentration",
+                "value": round(top_stat_share, 4),
+                "threshold": TOP_STAT_SHARE_ALERT_THRESHOLD,
+                "message": (
+                    f"Top publishable stat share {top_stat_share:.1%} exceeds "
+                    f"{TOP_STAT_SHARE_ALERT_THRESHOLD:.0%}"
+                ),
+            }
+        )
+
+    expert_coverage = latest_collect.get("expert_coverage") or {}
+    for expert in REQUIRED_EXPERTS:
+        coverage = float(expert_coverage.get(expert, 0.0))
+        if coverage < MIN_REQUIRED_EXPERT_COVERAGE:
+            all_alerts.append(
+                {
+                    "type": "expert_coverage_low",
+                    "expert": str(expert),
+                    "value": round(coverage, 4),
+                    "threshold": MIN_REQUIRED_EXPERT_COVERAGE,
+                    "message": (
+                        f"{expert} coverage {coverage:.1%} < "
+                        f"{MIN_REQUIRED_EXPERT_COVERAGE:.0%} on latest collect"
+                    ),
+                }
+            )
+
+    if len(recent_collects) >= 2:
+        low_publishable = [
+            row
+            for row in recent_collects[:2]
+            if int(row.get("total_scored") or 0) > 0
+            and float(row.get("publishable_ratio") or 0.0) < MIN_PUBLISHABLE_SHARE
+        ]
+        if len(low_publishable) == 2:
+            all_alerts.append(
+                {
+                    "type": "low_publishable_ratio",
+                    "value": [row.get("publishable_ratio") for row in low_publishable],
+                    "threshold": MIN_PUBLISHABLE_SHARE,
+                    "message": (
+                        "Publishable ratio below "
+                        f"{MIN_PUBLISHABLE_SHARE:.0%} for two consecutive collects"
+                    ),
+                }
+            )
+
+    if calibrator_flat_stat_types:
+        all_alerts.append(
+            {
+                "type": "calibrator_flat_stats",
+                "value": calibrator_flat_stat_types,
+                "message": (
+                    "Per-stat calibrator marked degenerate stats: "
+                    + ", ".join(calibrator_flat_stat_types[:8])
+                ),
+            }
+        )
+
     return {
         "metrics_version": METRICS_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -617,6 +897,12 @@ def build_health_report(
         "base_rate": base_rate,
         "tier_metrics": tier_metrics,
         "calibration_diagnostics": calibration_diagnostics,
+        "latest_collect": latest_collect,
+        "recent_collects": recent_collects,
+        "publishable_by_stat": latest_collect.get("publishable_by_stat", {}),
+        "top_stat_share": latest_collect.get("top_stat_share", 0.0),
+        "expert_coverage": latest_collect.get("expert_coverage", {}),
+        "calibrator_flat_stat_types": calibrator_flat_stat_types,
         "expert_metrics": expert_metrics,
         "alerts": all_alerts,
         "suppressed_alerts": suppressed_alerts,
@@ -676,6 +962,16 @@ def main() -> None:
             f"(threshold={actionable.get('threshold', 'N/A')})"
         )
         print(f"  Coverage:   {coverage:.1%}")
+
+    latest_collect = report.get("latest_collect", {})
+    if latest_collect:
+        total_scored = int(latest_collect.get("total_scored") or 0)
+        publishable_count = int(latest_collect.get("publishable_count") or 0)
+        top_stat_share = float(latest_collect.get("top_stat_share") or 0.0)
+        print("\nLatest collect telemetry:")
+        print(f"  Scored rows:      {total_scored}")
+        print(f"  Publishable rows: {publishable_count}")
+        print(f"  Top stat share:   {top_stat_share:.1%}")
 
     if expert_metrics:
         print(f"\nRolling {ROLLING_WINDOW}-bet metrics:")
