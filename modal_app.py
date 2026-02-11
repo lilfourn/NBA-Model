@@ -277,6 +277,17 @@ def _run_collect_pipeline() -> None:
     _run_cmd(
         [
             "-m",
+            "scripts.nba.fetch_market_game_lines",
+            "--source",
+            "auto",
+            "--provider",
+            "market_feed",
+        ],
+        allow_fail=True,
+    )
+    _run_cmd(
+        [
+            "-m",
             "scripts.prizepicks.collect_prizepicks",
             "--output-dir",
             str(REMOTE_DATA_DIR / "snapshots"),
@@ -402,6 +413,17 @@ def gpu_smoke_test() -> None:
 def _run_train_pipeline() -> None:
     _begin_run()
     _run_cmd(["-m", "alembic", "upgrade", "head"])
+    _run_cmd(
+        [
+            "-m",
+            "scripts.nba.fetch_market_game_lines",
+            "--source",
+            "auto",
+            "--provider",
+            "market_feed",
+        ],
+        allow_fail=True,
+    )
 
     date_from, date_to = _central_date_window()
     _run_cmd(
@@ -559,6 +581,25 @@ def _run_train_pipeline() -> None:
             "45",
             "--output",
             str(REMOTE_MODELS_DIR / "stat_calibrator.joblib"),
+            "--upload-db",
+        ],
+        allow_fail=True,
+    )
+    # Fit adaptive per-stat selection thresholds (selective policy).
+    _run_cmd(
+        [
+            "-m",
+            "scripts.ml.fit_selection_thresholds",
+            "--days-back",
+            "180",
+            "--coverage-floor",
+            "0.40",
+            "--target-hit-rate",
+            "0.55",
+            "--min-rows-per-stat",
+            "200",
+            "--output",
+            str(REMOTE_MODELS_DIR / "selection_policy.json"),
             "--upload-db",
         ],
         allow_fail=True,

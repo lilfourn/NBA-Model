@@ -821,9 +821,8 @@ def score_logged_predictions(
             else datetime.now(timezone.utc).isoformat()
         )
 
-    top_frame = frame.head(int(top))
-    picks: list[ScoredPick] = []
-    for row in top_frame.itertuples(index=False):
+    scored_items: list[tuple[ScoredPick, bool]] = []
+    for row in frame.itertuples(index=False):
         details = _details_dict(getattr(row, "details", None))
 
         prob_over = _safe_float(getattr(row, "prob_over", None))
@@ -903,48 +902,76 @@ def score_logged_predictions(
             or "Unknown"
         )
 
-        picks.append(
-            ScoredPick(
-                projection_id=str(getattr(row, "projection_id", "") or ""),
-                player_name=player_name,
-                player_image_url=_optional_str(getattr(row, "player_image_url", None)),
-                player_id=str(getattr(row, "player_id", "") or ""),
-                game_id=_optional_str(getattr(row, "game_id", None)),
-                stat_type=str(getattr(row, "stat_type", "") or ""),
-                line_score=float(_safe_float(getattr(row, "line_score", None)) or 0.0),
-                pick=pick,
-                prob_over=prob_over,
-                confidence=confidence,
-                rank_score=float(rank_score),
-                p_forecast_cal=_safe_float(getattr(row, "p_forecast_cal", None)),
-                p_nn=_safe_float(getattr(row, "p_nn", None)),
-                p_tabdl=_safe_float(getattr(row, "p_tabdl", None)),
-                p_lr=_safe_float(getattr(row, "p_lr", None)),
-                p_xgb=_safe_float(getattr(row, "p_xgb", None)),
-                p_lgbm=_safe_float(getattr(row, "p_lgbm", None)),
-                p_meta=_safe_float(details.get("p_meta")),
-                mu_hat=_safe_float(getattr(row, "mu_hat", None)),
-                sigma_hat=_safe_float(getattr(row, "sigma_hat", None)),
-                calibration_status=calibration_status,
-                n_eff=_safe_float(getattr(row, "n_eff", None)),
-                conformal_set_size=conformal_set_size,
-                edge=edge,
-                grade=grade,
-                p_pick=p_pick,
-                selection_threshold=float(selection_threshold),
-                selection_margin=float(selection_margin),
-                policy_version=policy_version,
-            )
+        scored_pick = ScoredPick(
+            projection_id=str(getattr(row, "projection_id", "") or ""),
+            player_name=player_name,
+            player_image_url=_optional_str(getattr(row, "player_image_url", None)),
+            player_id=str(getattr(row, "player_id", "") or ""),
+            game_id=_optional_str(getattr(row, "game_id", None)),
+            stat_type=str(getattr(row, "stat_type", "") or ""),
+            line_score=float(_safe_float(getattr(row, "line_score", None)) or 0.0),
+            pick=pick,
+            prob_over=prob_over,
+            confidence=confidence,
+            rank_score=float(rank_score),
+            p_forecast_cal=_safe_float(getattr(row, "p_forecast_cal", None)),
+            p_nn=_safe_float(getattr(row, "p_nn", None)),
+            p_tabdl=_safe_float(getattr(row, "p_tabdl", None)),
+            p_lr=_safe_float(getattr(row, "p_lr", None)),
+            p_xgb=_safe_float(getattr(row, "p_xgb", None)),
+            p_lgbm=_safe_float(getattr(row, "p_lgbm", None)),
+            p_meta=_safe_float(details.get("p_meta")),
+            mu_hat=_safe_float(getattr(row, "mu_hat", None)),
+            sigma_hat=_safe_float(getattr(row, "sigma_hat", None)),
+            calibration_status=calibration_status,
+            n_eff=_safe_float(getattr(row, "n_eff", None)),
+            conformal_set_size=conformal_set_size,
+            edge=edge,
+            grade=grade,
+            p_pick=p_pick,
+            selection_threshold=float(selection_threshold),
+            selection_margin=float(selection_margin),
+            policy_version=policy_version,
         )
+
+        publishable_raw = details.get("is_publishable")
+        if isinstance(publishable_raw, bool):
+            is_publishable = publishable_raw
+        elif isinstance(publishable_raw, (int, float)):
+            is_publishable = bool(publishable_raw)
+        elif isinstance(publishable_raw, str):
+            is_publishable = publishable_raw.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+            }
+        else:
+            is_publishable = bool(
+                selection_margin >= 0.0
+                and edge >= MIN_EDGE
+                and conformal_set_size != 2
+            )
+        scored_items.append((scored_pick, is_publishable))
+
+    publishable = [pick for pick, ok in scored_items if ok]
+    top_picks = publishable[: int(top)]
+    fallback_used = False
+    fallback_reason: str | None = None
+    if not top_picks:
+        top_picks = [pick for pick, _ in scored_items][: int(top)]
+        if top_picks:
+            fallback_used = True
+            fallback_reason = "logged_no_publishable"
 
     return ScoringResult(
         snapshot_id=str(resolved_snapshot),
         scored_at=scored_at,
         total_scored=int(len(frame)),
-        picks=picks,
-        publishable_count=int(len(picks)),
-        fallback_used=False,
-        fallback_reason=None,
+        picks=top_picks,
+        publishable_count=int(len(publishable)),
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
     )
 
 

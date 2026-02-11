@@ -10,12 +10,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-import requests
 from sqlalchemy import text
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +28,24 @@ from app.core.config import settings  # noqa: E402
 from app.db.engine import get_engine  # noqa: E402
 
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
+
+def _get_json(url: str, *, params: dict[str, Any] | None = None, timeout: int = 25) -> Any:
+    query = urlencode({k: v for k, v in (params or {}).items() if v is not None})
+    full_url = f"{url}?{query}" if query else url
+    request = Request(full_url, headers=DEFAULT_HEADERS)
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310
+        payload = response.read().decode("utf-8")
+    return json.loads(payload)
 
 
 def _team_name_to_abbr(engine) -> dict[str, str]:
@@ -116,6 +136,150 @@ def _extract_market_values(markets: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def _safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_espn_events(*, days_ahead: int = 2) -> list[dict[str, Any]]:
+    events_by_id: dict[str, dict[str, Any]] = {}
+    today = datetime.now(timezone.utc).date()
+    horizon = max(0, int(days_ahead))
+    for offset in range(horizon + 1):
+        game_day = today + timedelta(days=offset)
+        params = {"dates": game_day.strftime("%Y%m%d")}
+        payload = _get_json(ESPN_SCOREBOARD_URL, params=params, timeout=25)
+        events = payload.get("events") or []
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_id = str(event.get("id") or "").strip()
+            if event_id:
+                events_by_id[event_id] = event
+    return list(events_by_id.values())
+
+
+def _parse_espn_rows(events: list[dict[str, Any]], *, provider: str) -> list[dict[str, Any]]:
+    captured_at = datetime.now(timezone.utc)
+    captured_at_iso = captured_at.replace(microsecond=0).isoformat()
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        event_id = str(event.get("id") or "").strip()
+        competitions = event.get("competitions") or []
+        if not event_id or not isinstance(competitions, list) or not competitions:
+            continue
+        comp = competitions[0] if isinstance(competitions[0], dict) else {}
+        event_time = str(comp.get("date") or event.get("date") or "")
+        if not event_time:
+            continue
+        try:
+            game_date = datetime.fromisoformat(event_time.replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+
+        home_abbr: str | None = None
+        away_abbr: str | None = None
+        competitors = comp.get("competitors") or []
+        if isinstance(competitors, list):
+            for competitor in competitors:
+                if not isinstance(competitor, dict):
+                    continue
+                team = competitor.get("team") or {}
+                if not isinstance(team, dict):
+                    continue
+                abbr = str(team.get("abbreviation") or "").strip().upper() or None
+                if not abbr:
+                    continue
+                side = str(competitor.get("homeAway") or "").strip().lower()
+                if side == "home":
+                    home_abbr = abbr
+                elif side == "away":
+                    away_abbr = abbr
+        if not home_abbr or not away_abbr:
+            continue
+
+        odds_entries = comp.get("odds") or []
+        if not isinstance(odds_entries, list):
+            continue
+        for odds in odds_entries:
+            if not isinstance(odds, dict):
+                continue
+            provider_obj = odds.get("provider") or {}
+            if not isinstance(provider_obj, dict):
+                provider_obj = {}
+            book_display = str(
+                provider_obj.get("displayName") or provider_obj.get("name") or "espn"
+            ).strip()
+            book = re.sub(r"[^a-z0-9]+", "_", book_display.lower()).strip("_") or "espn"
+
+            spread = None
+            try:
+                if odds.get("spread") is not None:
+                    spread = float(odds.get("spread"))
+            except (TypeError, ValueError):
+                spread = None
+            point_spread = odds.get("pointSpread") or {}
+            if spread is None and isinstance(point_spread, dict):
+                home_close = ((point_spread.get("home") or {}).get("close") or {}).get("line")
+                try:
+                    spread = float(str(home_close).strip()) if home_close is not None else None
+                except (TypeError, ValueError):
+                    spread = None
+
+            total_points = None
+            try:
+                if odds.get("overUnder") is not None:
+                    total_points = float(odds.get("overUnder"))
+            except (TypeError, ValueError):
+                total_points = None
+            total_obj = odds.get("total") or {}
+            if total_points is None and isinstance(total_obj, dict):
+                over_line = ((total_obj.get("over") or {}).get("close") or {}).get("line")
+                if over_line is not None:
+                    digits = re.sub(r"^[^0-9.-]+", "", str(over_line).strip())
+                    try:
+                        total_points = float(digits)
+                    except (TypeError, ValueError):
+                        total_points = None
+
+            moneyline_obj = odds.get("moneyline") or {}
+            home_moneyline = None
+            away_moneyline = None
+            if isinstance(moneyline_obj, dict):
+                home_moneyline = _safe_int(
+                    ((moneyline_obj.get("home") or {}).get("close") or {}).get("odds")
+                )
+                away_moneyline = _safe_int(
+                    ((moneyline_obj.get("away") or {}).get("close") or {}).get("odds")
+                )
+
+            row_id = _stable_line_id(provider, book, event_id, captured_at_iso)
+            rows.append(
+                {
+                    "id": row_id,
+                    "provider": provider,
+                    "book": book,
+                    "captured_at": captured_at,
+                    "game_date": game_date,
+                    "home_team_abbreviation": home_abbr,
+                    "away_team_abbreviation": away_abbr,
+                    "home_spread": spread,
+                    "away_spread": (-spread if spread is not None else None),
+                    "total_points": total_points,
+                    "home_moneyline": home_moneyline,
+                    "away_moneyline": away_moneyline,
+                    "source_payload": json.dumps(odds, ensure_ascii=True),
+                }
+            )
+    return rows
+
+
 def _stable_line_id(
     provider: str,
     book: str,
@@ -139,9 +303,7 @@ def _fetch_odds_events(api_key: str, *, regions: str, bookmakers: str | None = N
     if bookmakers:
         params["bookmakers"] = bookmakers
 
-    res = requests.get(ODDS_API_URL, params=params, timeout=25)
-    res.raise_for_status()
-    payload = res.json()
+    payload = _get_json(ODDS_API_URL, params=params, timeout=25)
     return payload if isinstance(payload, list) else []
 
 
@@ -263,25 +425,56 @@ def _upsert_rows(engine, rows: list[dict[str, Any]]) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch and load external market game lines.")
     parser.add_argument("--database-url", default=None)
-    parser.add_argument("--provider", default="the_odds_api")
+    parser.add_argument(
+        "--source",
+        default="auto",
+        choices=["auto", "the_odds_api", "espn"],
+        help="Market line source. 'auto' uses The Odds API when key exists, else ESPN public odds feed.",
+    )
+    parser.add_argument("--provider", default="market_feed")
     parser.add_argument("--regions", default="us")
     parser.add_argument("--bookmakers", default=None)
+    parser.add_argument("--days-ahead", type=int, default=2)
     args = parser.parse_args()
 
     api_key = os.getenv("MARKET_ODDS_API_KEY", "").strip()
-    if not api_key:
-        raise SystemExit("MARKET_ODDS_API_KEY is required")
-
     engine = get_engine(args.database_url)
-    team_map = _team_name_to_abbr(engine)
+    source = str(args.source).strip().lower()
+    if source == "auto":
+        source = "the_odds_api" if api_key else "espn"
+    provider = str(args.provider).strip() or source
 
-    events = _fetch_odds_events(api_key, regions=args.regions, bookmakers=args.bookmakers)
-    rows = _parse_rows(events, team_map, provider=str(args.provider))
+    if source == "the_odds_api":
+        if not api_key:
+            print("MARKET_ODDS_API_KEY missing; falling back to ESPN public odds feed.")
+            source = "espn"
+        else:
+            team_map = _team_name_to_abbr(engine)
+            events = _fetch_odds_events(
+                api_key, regions=args.regions, bookmakers=args.bookmakers
+            )
+            rows = _parse_rows(events, team_map, provider=provider or "the_odds_api")
+            upserted = _upsert_rows(engine, rows)
+            print(
+                {
+                    "source": source,
+                    "provider": provider,
+                    "events": len(events),
+                    "rows_parsed": len(rows),
+                    "rows_upserted": upserted,
+                    "database": bool(settings.database_url or args.database_url),
+                }
+            )
+            return
+
+    events = _fetch_espn_events(days_ahead=int(args.days_ahead))
+    rows = _parse_espn_rows(events, provider=provider or "espn_public")
     upserted = _upsert_rows(engine, rows)
 
     print(
         {
-            "provider": args.provider,
+            "source": source,
+            "provider": provider,
             "events": len(events),
             "rows_parsed": len(rows),
             "rows_upserted": upserted,

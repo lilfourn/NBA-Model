@@ -30,6 +30,7 @@ from app.ml.artifacts import (  # noqa: E402
     load_joblib_artifact,
     latest_compatible_joblib_path,
 )  # noqa: E402
+from app.ml.artifact_store import load_latest_artifact_as_file  # noqa: E402
 from app.ml.meta_learner import infer_meta_learner  # noqa: E402
 from app.modeling.db_logs import load_db_game_logs  # noqa: E402
 from app.modeling.forecast_calibration import (  # noqa: E402
@@ -45,6 +46,7 @@ from app.modeling.stat_forecast import (  # noqa: E402
     StatForecastPredictor,
 )  # noqa: E402
 from app.modeling.types import Projection  # noqa: E402
+from app.ml.selection_policy import SelectionPolicy  # noqa: E402
 from app.ml.stat_mappings import (  # noqa: E402
     stat_components,
     stat_diff_components,
@@ -564,11 +566,28 @@ def main() -> None:
         EXCLUDED_STAT_TYPES,
         PRIOR_ONLY_STAT_TYPES,
         MIN_EDGE,
-        PICK_THRESHOLD,
     )
 
     _context_priors = load_context_priors()
     _stat_calibrator = StatTypeCalibrator.load()
+    _selection_policy_path: Path | None = None
+    try:
+        db_policy = load_latest_artifact_as_file(
+            engine, "selection_policy", suffix=".json"
+        )
+        if db_policy is not None:
+            _selection_policy_path = Path(db_policy)
+    except Exception:
+        _selection_policy_path = None
+    if _selection_policy_path is None:
+        local_policy = Path(args.models_dir) / "selection_policy.json"
+        if local_policy.exists():
+            _selection_policy_path = local_policy
+    _selection_policy = (
+        SelectionPolicy.load(str(_selection_policy_path))
+        if _selection_policy_path is not None
+        else SelectionPolicy.load()
+    )
 
     # Load inversion correction flags
     from app.ml.inversion_corrections import load_inversion_flags
@@ -669,6 +688,13 @@ def main() -> None:
             skipped_nonfinite += 1
             continue
 
+        conformal_size = _conformal_set_size(conformal_by_expert, expert_probs)
+        p_pick = max(p_final, 1.0 - p_final)
+        selection_threshold = float(
+            _selection_policy.threshold_for(stat_type, conformal_size)
+        )
+        selection_margin = float(p_pick - selection_threshold)
+
         scored.append(
             {
                 "projection_id": proj_id,
@@ -699,9 +725,11 @@ def main() -> None:
                 if f
                 else None,
                 "n_eff": n_eff_val,
-                "conformal_set_size": _conformal_set_size(
-                    conformal_by_expert, expert_probs
-                ),
+                "conformal_set_size": conformal_size,
+                "p_pick": p_pick,
+                "selection_threshold": selection_threshold,
+                "selection_margin": selection_margin,
+                "policy_version": _selection_policy.version,
             }
         )
 
@@ -736,10 +764,11 @@ def main() -> None:
 
     # Apply publishability filters
     for item in scored:
-        p_pick = max(item["prob_over"], 1.0 - item["prob_over"])
+        p_pick = float(item.get("p_pick") or max(item["prob_over"], 1.0 - item["prob_over"]))
+        selection_threshold = float(item.get("selection_threshold") or 0.60)
         _st = item.get("stat_type", "")
         item["is_publishable"] = bool(
-            p_pick >= PICK_THRESHOLD
+            p_pick >= selection_threshold
             and item.get("conformal_set_size") != 2
             and item.get("edge", 0) >= MIN_EDGE
             and _st not in PRIOR_ONLY_STAT_TYPES
@@ -804,11 +833,19 @@ def main() -> None:
                     "p_meta": item.get("p_meta"),
                     "p_raw": item.get("p_raw"),
                     "p_final": item.get("prob_over"),
+                    "p_pick": item.get("p_pick"),
+                    "selection_threshold": item.get("selection_threshold"),
+                    "selection_margin": item.get("selection_margin"),
+                    "policy_version": item.get("policy_version"),
                     "model_version": item.get("model_version"),
                     "calibration_version": calibration_version,
                     "calibration_status": item.get("calibration_status"),
                     "n_eff": item.get("n_eff"),
                     "rank_score": item.get("rank_score"),
+                    "conformal_set_size": item.get("conformal_set_size"),
+                    "edge": item.get("edge"),
+                    "grade": item.get("grade"),
+                    "is_publishable": bool(item.get("is_publishable")),
                 }
             )
         append_prediction_log(pd.DataFrame(rows), path=args.log_path)
