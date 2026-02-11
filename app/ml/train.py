@@ -75,12 +75,15 @@ def _build_lr_pipeline() -> Pipeline:
 
 
 def train_baseline(engine, model_dir: Path) -> TrainResult:
+    print("[baseline] Loading training data...", flush=True)
     df = load_training_data(engine)
     if df.empty:
         raise RuntimeError(
             "No training data available. Did you load NBA stats and build features?"
         )
+    print(f"[baseline] Loaded rows: {len(df)}", flush=True)
 
+    print("[baseline] Preparing features...", flush=True)
     X, y, df_used = prepare_lr_features(df)
     X, y, df_used = (
         X.reset_index(drop=True),
@@ -99,6 +102,7 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
         )
 
     folds = time_series_cv_split(df_used, X, y, n_splits=5)
+    print(f"[baseline] Time-series folds: {len(folds)}", flush=True)
 
     oof_proba = np.full(len(y), np.nan)
     oof_pred = np.full(len(y), np.nan)
@@ -109,6 +113,11 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
             "ignore", message=".*encountered in matmul", category=RuntimeWarning
         )
         for i, (X_tr, X_te, y_tr, y_te) in enumerate(folds):
+            print(
+                "[baseline] CV fold "
+                f"{i + 1}/{len(folds)} train={len(X_tr)} test={len(X_te)}",
+                flush=True,
+            )
             pipe = _build_lr_pipeline()
             pipe.fit(X_tr, y_tr)
             proba = pipe.predict_proba(X_te)[:, 1]
@@ -155,6 +164,7 @@ def train_baseline(engine, model_dir: Path) -> TrainResult:
     }
 
     # Final model: retrain on ALL data
+    print("[baseline] Training final model on full dataset...", flush=True)
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore", message=".*encountered in matmul", category=RuntimeWarning

@@ -39,7 +39,11 @@ from app.modeling.forecast_calibration import (  # noqa: E402
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler  # noqa: E402
 from app.modeling.conformal import ConformalCalibrator  # noqa: E402
 from app.modeling.probability import confidence_from_probability  # noqa: E402
-from app.services.scoring import _conformal_set_size, shrink_probability  # noqa: E402
+from app.services.scoring import (  # noqa: E402
+    _conformal_set_size,
+    _select_diverse_top,
+    shrink_probability,
+)
 from app.modeling.stat_forecast import (  # noqa: E402
     ForecastParams,
     LeaguePriors,
@@ -784,7 +788,7 @@ def main() -> None:
     scored.sort(key=lambda item: item["edge"], reverse=True)
     # Enforce abstain: only publishable picks in top-N
     publishable = [item for item in scored if item.get("is_publishable", False)]
-    top = publishable[: args.top]
+    top = _select_diverse_top(publishable, top=int(args.top))
 
     print(f"\nTop {len(top)} Ensemble Picks (snapshot {snapshot_id})")
     print("=" * 80)

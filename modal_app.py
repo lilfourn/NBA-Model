@@ -53,7 +53,23 @@ def _parse_gpu_spec(raw: str) -> Union[str, list[str]]:
     return parts
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 TRAIN_GPU_SPEC = _parse_gpu_spec(TRAIN_GPU)
+BASELINE_TRAIN_TIMEOUT_SECONDS = _env_int(
+    "MODAL_BASELINE_TRAIN_TIMEOUT_SECONDS", 90 * 60
+)
+COLLECT_SCORE_TIMEOUT_SECONDS = _env_int(
+    "MODAL_COLLECT_SCORE_TIMEOUT_SECONDS", 45 * 60
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -175,24 +191,39 @@ def _run_cmd(
     *,
     allow_fail: bool = False,
     env_overrides: dict[str, str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> int:
     cmd = [sys.executable, *args]
     print(f"[modal] running: {' '.join(cmd)}")
     cmd_env = _runtime_env()
     if env_overrides:
         cmd_env.update({k: str(v) for k, v in env_overrides.items()})
-    proc = subprocess.run(
-        cmd,
-        cwd=str(REMOTE_PROJECT_ROOT),
-        env=cmd_env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if proc.stdout:
-        print(proc.stdout)
-    if proc.stderr:
-        print(proc.stderr, file=sys.stderr)
+    effective_timeout = timeout_seconds
+    if effective_timeout is None:
+        raw_default_timeout = os.getenv("MODAL_CMD_TIMEOUT_SECONDS", "").strip()
+        if raw_default_timeout:
+            try:
+                effective_timeout = max(1, int(raw_default_timeout))
+            except ValueError:
+                effective_timeout = None
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(REMOTE_PROJECT_ROOT),
+            env=cmd_env,
+            text=True,
+            check=False,
+            timeout=effective_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "[modal] command timed out"
+            f" after {effective_timeout}s: {' '.join(cmd)}",
+            file=sys.stderr,
+        )
+        if not allow_fail:
+            raise RuntimeError(f"Command timed out: {' '.join(cmd)}")
+        return 124
     if proc.returncode != 0 and not allow_fail:
         raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(cmd)}")
     return proc.returncode
@@ -308,7 +339,7 @@ def _run_collect_pipeline() -> None:
     calibration = _latest_calibration_path()
     if calibration:
         cmd.extend(["--calibration", calibration])
-    _run_cmd(cmd)
+    _run_cmd(cmd, timeout_seconds=COLLECT_SCORE_TIMEOUT_SECONDS)
     _finish_run()
 
 
@@ -502,7 +533,8 @@ def _run_train_pipeline() -> None:
             "scripts.ml.train_baseline_model",
             "--model-dir",
             str(REMOTE_MODELS_DIR),
-        ]
+        ],
+        timeout_seconds=BASELINE_TRAIN_TIMEOUT_SECONDS,
     )
     # Launch GPU training in parallel (non-blocking) while CPU models train
     nn_handle = train_nn_gpu.spawn()

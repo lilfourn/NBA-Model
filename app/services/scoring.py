@@ -152,6 +152,7 @@ SHRINK_MAX = 0.25  # low-data picks: 25% pull toward prior
 # p_pick = max(p_final, 1 - p_final)
 PICK_THRESHOLD = 0.60
 SELECTION_POLICY_PATH = os.getenv("SELECTION_POLICY_PATH", "models/selection_policy.json")
+MAX_TOP_STAT_SHARE = 0.70
 
 # Minimum edge score for a pick to be publishable
 MIN_EDGE = 5.0
@@ -441,6 +442,66 @@ def _select_empty_publishable_fallback(
 
     # Last-resort guarantee for non-empty UX if any rows were scored.
     return scored[:top]
+
+
+def _item_projection_id(item: Any) -> str:
+    if isinstance(item, dict):
+        value = item.get("projection_id")
+    else:
+        value = getattr(item, "projection_id", None)
+    if value is None:
+        return str(id(item))
+    value_text = str(value).strip()
+    return value_text or str(id(item))
+
+
+def _item_stat_type(item: Any) -> str:
+    if isinstance(item, dict):
+        value = item.get("stat_type")
+    else:
+        value = getattr(item, "stat_type", None)
+    value_text = str(value or "").strip()
+    return value_text or "unknown"
+
+
+def _select_diverse_top(
+    items: list[Any],
+    *,
+    top: int,
+    max_top_stat_share: float = MAX_TOP_STAT_SHARE,
+) -> list[Any]:
+    """Apply a soft per-stat cap to avoid one-stat concentration in top picks."""
+    if top <= 0 or not items:
+        return []
+    max_share = max(0.05, min(1.0, float(max_top_stat_share)))
+    stat_cap = max(1, math.ceil(top * max_share))
+    selected: list[Any] = []
+    selected_ids: set[str] = set()
+    stat_counts: Counter[str] = Counter()
+
+    for item in items:
+        proj_id = _item_projection_id(item)
+        if proj_id in selected_ids:
+            continue
+        stat_type = _item_stat_type(item)
+        if stat_counts[stat_type] >= stat_cap:
+            continue
+        selected.append(item)
+        selected_ids.add(proj_id)
+        stat_counts[stat_type] += 1
+        if len(selected) >= top:
+            return selected
+
+    if len(selected) < top:
+        for item in items:
+            proj_id = _item_projection_id(item)
+            if proj_id in selected_ids:
+                continue
+            selected.append(item)
+            selected_ids.add(proj_id)
+            if len(selected) >= top:
+                break
+    return selected
 
 
 def _conformal_set_size(
@@ -945,11 +1006,14 @@ def score_logged_predictions(
         scored_items.append((scored_pick, is_publishable))
 
     publishable = [pick for pick, ok in scored_items if ok]
-    top_picks = publishable[: int(top)]
+    top_picks = _select_diverse_top(publishable, top=int(top))
     fallback_used = False
     fallback_reason: str | None = None
     if not top_picks:
-        top_picks = [pick for pick, _ in scored_items][: int(top)]
+        top_picks = _select_diverse_top(
+            [pick for pick, _ in scored_items],
+            top=int(top),
+        )
         if top_picks:
             fallback_used = True
             fallback_reason = "logged_no_publishable"
@@ -1652,7 +1716,7 @@ def score_ensemble(
     scored.sort(key=lambda item: item["edge"], reverse=True)
     # Enforce abstain policy: only return publishable picks in the top-N
     publishable = [item for item in scored if item.get("is_publishable", False)]
-    top_picks = publishable[:top]
+    top_picks = _select_diverse_top(publishable, top=top)
 
     # --- Direction balance guardrail ---
     # When >75% of picks lean one direction, apply a soft correction:
@@ -1727,7 +1791,10 @@ def score_ensemble(
                             reasons.append("edge_below_min")
             # Re-sort and re-filter after demotion
             publishable = [item for item in scored if item.get("is_publishable", False)]
-            top_picks = sorted(publishable, key=lambda x: x["edge"], reverse=True)[:top]
+            top_picks = _select_diverse_top(
+                sorted(publishable, key=lambda x: x["edge"], reverse=True),
+                top=top,
+            )
 
     fallback_used = False
     fallback_reason: str | None = None
@@ -1742,6 +1809,7 @@ def score_ensemble(
             dict(reject_counts.most_common(8)),
         )
         top_picks = _select_empty_publishable_fallback(scored, top=top)
+        top_picks = _select_diverse_top(top_picks, top=top)
         if top_picks:
             fallback_used = True
             fallback_reason = "soft_fallback_no_publishable"

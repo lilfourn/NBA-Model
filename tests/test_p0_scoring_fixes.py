@@ -10,6 +10,7 @@ from app.services.scoring import (
     PRIOR_ONLY_STAT_TYPES,
     _direction_imbalance_penalty,
     _logit,
+    _select_diverse_top,
     _sigmoid,
     shrink_probability,
 )
@@ -311,3 +312,44 @@ class TestDirectionImbalancePenalty:
             context_prior=0.60,
         )
         assert strong < weak
+
+
+class TestTopPickDiversityGuardrail:
+    def test_diversity_guardrail_limits_dominant_stat_when_alternatives_exist(self) -> None:
+        items = []
+        for idx in range(8):
+            items.append(
+                {
+                    "projection_id": f"a{idx}",
+                    "stat_type": "Free Throws Made",
+                    "edge": 60 - idx,
+                }
+            )
+        for idx in range(4):
+            items.append(
+                {
+                    "projection_id": f"b{idx}",
+                    "stat_type": "Two Pointers Attempted",
+                    "edge": 52 - idx,
+                }
+            )
+
+        selected = _select_diverse_top(items, top=10)
+        dominant = sum(
+            1 for item in selected if item["stat_type"] == "Free Throws Made"
+        )
+        assert len(selected) == 10
+        assert dominant <= 7
+
+    def test_diversity_guardrail_relaxes_when_no_alternatives(self) -> None:
+        items = [
+            {
+                "projection_id": f"a{idx}",
+                "stat_type": "Free Throws Made",
+                "edge": 60 - idx,
+            }
+            for idx in range(10)
+        ]
+        selected = _select_diverse_top(items, top=10)
+        assert len(selected) == 10
+        assert all(item["stat_type"] == "Free Throws Made" for item in selected)

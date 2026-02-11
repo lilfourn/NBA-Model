@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from scripts.nba.fetch_market_game_lines import _normalize_abbreviation, _parse_espn_rows
+from scripts.nba.fetch_market_game_lines import (
+    _event_game_date,
+    _normalize_abbreviation,
+    _parse_espn_rows,
+)
 
 
 def test_normalize_abbreviation_maps_espn_variants() -> None:
@@ -46,3 +50,8 @@ def test_parse_espn_rows_normalizes_team_abbreviations() -> None:
     assert row["away_team_abbreviation"] == "NOP"
     assert row["home_spread"] == -4.5
     assert row["away_spread"] == 4.5
+
+
+def test_event_game_date_uses_new_york_calendar_day() -> None:
+    # 01:00Z is still prior calendar day in America/New_York.
+    assert str(_event_game_date("2026-02-12T01:00:00Z")) == "2026-02-11"
