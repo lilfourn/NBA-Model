@@ -269,6 +269,24 @@ nba_games = Table(
     Column("updated_at", DateTime(timezone=True), nullable=True),
 )
 
+market_game_lines = Table(
+    "market_game_lines",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("provider", Text, nullable=False),
+    Column("book", Text, nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("game_date", Date, nullable=False),
+    Column("home_team_abbreviation", Text, nullable=False),
+    Column("away_team_abbreviation", Text, nullable=False),
+    Column("home_spread", Numeric, nullable=True),
+    Column("away_spread", Numeric, nullable=True),
+    Column("total_points", Numeric, nullable=True),
+    Column("home_moneyline", Integer, nullable=True),
+    Column("away_moneyline", Integer, nullable=True),
+    Column("source_payload", JSONB, nullable=True),
+)
+
 nba_player_game_stats = Table(
     "nba_player_game_stats",
     metadata,
@@ -392,6 +410,21 @@ Index(
     nba_games.c.game_date,
     nba_games.c.home_team_abbreviation,
     nba_games.c.away_team_abbreviation,
+)
+Index(
+    "idx_market_lines_game_date_teams",
+    market_game_lines.c.game_date,
+    market_game_lines.c.home_team_abbreviation,
+    market_game_lines.c.away_team_abbreviation,
+)
+Index(
+    "idx_market_lines_captured_at",
+    market_game_lines.c.captured_at,
+)
+Index(
+    "idx_market_lines_provider_book",
+    market_game_lines.c.provider,
+    market_game_lines.c.book,
 )
 Index(
     "idx_projections_snapshot_odds_type",

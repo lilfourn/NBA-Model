@@ -13,14 +13,7 @@ import {
   ChartLegendContent,
 } from "@/components/ui/chart";
 import { fetchTrainingHistory } from "@/lib/api";
-
-const MODEL_KEYS: Record<string, { label: string; color: string }> = {
-  baseline_logreg: { label: "Logistic Regression", color: "oklch(0.75 0.12 75)" },
-  nn_gru_attention: { label: "Neural Network", color: "oklch(0.6 0.04 250)" },
-  xgboost: { label: "XGBoost", color: "oklch(0.55 0.03 180)" },
-  lightgbm: { label: "LightGBM", color: "oklch(0.65 0.06 60)" },
-  meta_learner: { label: "Meta Learner", color: "oklch(0.5 0 0)" },
-};
+import { MODEL_META } from "@/lib/constants";
 
 function formatDate(iso: string | null): string {
   if (!iso) return "";
@@ -60,7 +53,7 @@ export function TrainingHistoryChart() {
   const accConfig: ChartConfig = {};
   const aucConfig: ChartConfig = {};
   for (const name of modelNames) {
-    const info = MODEL_KEYS[name] ?? { label: name, color: "hsl(var(--chart-5))" };
+    const info = MODEL_META[name] ?? { label: name, color: "hsl(var(--chart-5))" };
     accConfig[`${name}_accuracy`] = { label: info.label, color: info.color };
     aucConfig[`${name}_auc`] = { label: info.label, color: info.color };
   }

@@ -12,6 +12,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { EdgeBadge } from "@/components/edge-badge";
 import { ExpertBreakdown } from "@/components/expert-breakdown";
+import { Button } from "@/components/ui/button";
 import { ChevronDown, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import type { ScoredPick } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -21,7 +22,11 @@ type SortKey =
   | "confidence"
   | "line_score"
   | "player_name"
-  | "stat_type";
+  | "stat_type"
+  | "p_pick"
+  | "selection_margin"
+  | "n_eff"
+  | "conformal_set_size";
 
 type SortDir = "asc" | "desc";
 
@@ -96,6 +101,7 @@ export function PicksTable({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("edge");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   const filtered = useMemo(() => {
     let result = picks;
@@ -141,7 +147,17 @@ export function PicksTable({
   }
 
   return (
-    <div className="rounded-lg border overflow-hidden">
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setShowDiagnostics((v) => !v)}
+        >
+          {showDiagnostics ? "Hide Diagnostics" : "Show Diagnostics"}
+        </Button>
+      </div>
+      <div className="rounded-lg border overflow-hidden">
       <Table>
         <TableHeader>
           <TableRow className="border-b border-border">
@@ -189,6 +205,46 @@ export function PicksTable({
             >
               Edge
             </HeaderCell>
+            {showDiagnostics && (
+              <>
+                <HeaderCell
+                  column="p_pick"
+                  className="text-right"
+                  sortKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                >
+                  P(Pick)
+                </HeaderCell>
+                <HeaderCell
+                  column="selection_margin"
+                  className="text-right"
+                  sortKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                >
+                  Margin
+                </HeaderCell>
+                <HeaderCell
+                  column="conformal_set_size"
+                  className="text-right"
+                  sortKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                >
+                  Conf Set
+                </HeaderCell>
+                <HeaderCell
+                  column="n_eff"
+                  className="text-right"
+                  sortKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                >
+                  n_eff
+                </HeaderCell>
+              </>
+            )}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -261,10 +317,28 @@ export function PicksTable({
                   <TableCell className="text-right">
                     <EdgeBadge edge={pick.edge} grade={pick.grade} />
                   </TableCell>
+                  {showDiagnostics && (
+                    <>
+                      <TableCell className="text-right font-mono text-xs">
+                        {pick.p_pick != null ? `${(pick.p_pick * 100).toFixed(1)}%` : "—"}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs">
+                        {pick.selection_margin != null
+                          ? `${(pick.selection_margin * 100).toFixed(1)}`
+                          : "—"}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs">
+                        {pick.conformal_set_size ?? "—"}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs">
+                        {pick.n_eff != null ? pick.n_eff.toFixed(1) : "—"}
+                      </TableCell>
+                    </>
+                  )}
                 </TableRow>
                 {isExpanded && (
                   <TableRow>
-                    <TableCell colSpan={7} className="bg-white/[0.01] p-0">
+                    <TableCell colSpan={showDiagnostics ? 11 : 7} className="bg-white/[0.01] p-0">
                       <ExpertBreakdown pick={pick} />
                     </TableCell>
                   </TableRow>
@@ -274,6 +348,7 @@ export function PicksTable({
           })}
         </TableBody>
       </Table>
+    </div>
     </div>
   );
 }

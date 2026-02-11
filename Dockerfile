@@ -43,7 +43,10 @@ COPY app ./app
 COPY scripts ./scripts
 COPY alembic ./alembic
 COPY alembic.ini gunicorn_conf.py start.sh ./
-COPY data/name_overrides.json data/team_abbrev_overrides.json ./data/
+COPY modal_app.py ./modal_app.py
+COPY requirements.txt ./requirements.txt
+COPY data/tuning ./data/tuning
+COPY data/name_overrides.json data/team_abbrev_overrides.json data/stat_expert_routing.json ./data/
 RUN chmod +x start.sh
 USER app
 EXPOSE 8000

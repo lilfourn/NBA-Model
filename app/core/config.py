@@ -123,6 +123,10 @@ class Settings(BaseSettings):
         default="models/ensemble_weights.json",
         validation_alias="ENSEMBLE_WEIGHTS_PATH",
     )
+    # Picks response source:
+    # - inline: score on API request (legacy)
+    # - modal_db/logged_db: read pre-scored predictions from projection_predictions
+    picks_source: str = Field(default="inline", validation_alias="PICKS_SOURCE")
 
     @property
     def cors_origins(self) -> list[str]:

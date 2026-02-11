@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from curl_cffi import requests as curl_requests
 
 from app.clients.base import CrawlerClient
 from app.core.config import settings

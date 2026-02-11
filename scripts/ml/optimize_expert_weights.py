@@ -357,8 +357,11 @@ def _contextual_weights(
         return out
     frame = train_frame.copy()
     frame["context_key"] = [
-        _ctx_key_str(_ctx_key(s, l, n))
-        for s, l, n in frame[["stat_type", "is_live", "n_eff"]].itertuples(index=False, name=None)
+        _ctx_key_str(_ctx_key(s, is_live, n))
+        for s, is_live, n in frame[["stat_type", "is_live", "n_eff"]].itertuples(
+            index=False,
+            name=None,
+        )
     ]
     for ctx_key, grp in frame.groupby("context_key", sort=False):
         n_rows = int(len(grp))
@@ -696,8 +699,11 @@ def main() -> None:
 
     # Build optimized ensemble state compatible with ContextualHedgeEnsembler.
     all_ctx = {
-        _ctx_key_str(_ctx_key(s, l, n))
-        for s, l, n in frame[["stat_type", "is_live", "n_eff"]].itertuples(index=False, name=None)
+        _ctx_key_str(_ctx_key(s, is_live, n))
+        for s, is_live, n in frame[["stat_type", "is_live", "n_eff"]].itertuples(
+            index=False,
+            name=None,
+        )
     }
     weights_state: dict[str, dict[str, float]] = {}
     for ctx_key in sorted(all_ctx):

@@ -10,6 +10,8 @@ interface DataCardProps {
   loading?: boolean;
   noData?: boolean;
   noDataDescription?: ReactNode;
+  error?: ReactNode;
+  errorDescription?: ReactNode;
   children?: ReactNode;
   skeletonHeight?: string;
 }
@@ -20,6 +22,8 @@ export function DataCard({
   loading = false,
   noData = false,
   noDataDescription,
+  error,
+  errorDescription,
   children,
   skeletonHeight = "h-72",
 }: DataCardProps) {
@@ -37,7 +41,7 @@ export function DataCard({
     );
   }
 
-  if (noData) {
+  if (noData && !children) {
     return (
       <Card>
         <CardHeader>
@@ -56,7 +60,23 @@ export function DataCard({
         <CardTitle>{title}</CardTitle>
         {description && <CardDescription>{description}</CardDescription>}
       </CardHeader>
-      {children && <CardContent>{children}</CardContent>}
+      <CardContent>
+        {error && (
+          <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-500">
+            <p className="font-medium">{error}</p>
+            {errorDescription && (
+              <p className="mt-1 text-xs text-amber-500/90">{errorDescription}</p>
+            )}
+          </div>
+        )}
+        {noData ? (
+          <p className="text-sm text-muted-foreground">
+            {noDataDescription ?? "No data available yet."}
+          </p>
+        ) : (
+          children
+        )}
+      </CardContent>
     </Card>
   );
 }

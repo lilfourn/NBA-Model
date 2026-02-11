@@ -1,4 +1,26 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL =
+  process.env.NEXT_PUBLIC_API_URL ||
+  "https://nba-model-production.up.railway.app";
+const API_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 45_000);
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  timeoutMs: number = API_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)}s`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 export interface ScoredPick {
   projection_id: string;
@@ -26,12 +48,20 @@ export interface ScoredPick {
   conformal_set_size: number | null;
   edge: number;
   grade: string;
+  p_pick?: number;
+  selection_threshold?: number;
+  selection_margin?: number;
+  policy_version?: string;
 }
 
 export interface ScoringResult {
   snapshot_id: string;
   scored_at: string;
   total_scored: number;
+  publishable_count?: number;
+  fallback_used?: boolean;
+  fallback_reason?: string | null;
+  policy_version?: string;
   picks: ScoredPick[];
 }
 
@@ -85,7 +115,7 @@ export async function fetchPicks(params?: {
   if (params?.force) searchParams.set("force", "true");
 
   const url = `${API_URL}/api/picks?${searchParams.toString()}`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   const result: ScoringResult = await res.json();
   setCachedPicks(result);
@@ -95,7 +125,7 @@ export async function fetchPicks(params?: {
 export async function fetchSnapshots(
   limit: number = 20
 ): Promise<SnapshotsResponse> {
-  const res = await fetch(`${API_URL}/api/snapshots-list?limit=${limit}`);
+  const res = await fetchWithTimeout(`${API_URL}/api/snapshots-list?limit=${limit}`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
@@ -120,14 +150,14 @@ export interface JobType {
 }
 
 export async function fetchJobTypes(): Promise<JobType[]> {
-  const res = await fetch(`${API_URL}/api/job-types`);
+  const res = await fetchWithTimeout(`${API_URL}/api/job-types`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   const data = await res.json();
   return data.job_types;
 }
 
 export async function startJob(jobType: string): Promise<Job> {
-  const res = await fetch(`${API_URL}/api/jobs`, {
+  const res = await fetchWithTimeout(`${API_URL}/api/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ job_type: jobType }),
@@ -140,14 +170,14 @@ export async function startJob(jobType: string): Promise<Job> {
 }
 
 export async function fetchJobs(limit: number = 20): Promise<Job[]> {
-  const res = await fetch(`${API_URL}/api/jobs?limit=${limit}`);
+  const res = await fetchWithTimeout(`${API_URL}/api/jobs?limit=${limit}`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   const data = await res.json();
   return data.jobs;
 }
 
 export async function fetchJob(jobId: string): Promise<Job> {
-  const res = await fetch(`${API_URL}/api/jobs/${jobId}`);
+  const res = await fetchWithTimeout(`${API_URL}/api/jobs/${jobId}`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
@@ -252,38 +282,92 @@ export interface ConfidenceDistResponse {
   bins: ConfidenceBin[];
 }
 
+export interface PerStatPerformanceEntry {
+  stat_type: string;
+  n_scored: number;
+  accuracy_scored: number | null;
+  n_actionable: number;
+  accuracy_actionable: number | null;
+  actionable_coverage: number | null;
+  n_placed: number;
+  accuracy_placed: number | null;
+  placed_coverage: number | null;
+  mean_p_pick: number | null;
+  mean_threshold: number | null;
+}
+
+export interface PerStatPerformanceResponse {
+  days_back: number;
+  stats: PerStatPerformanceEntry[];
+}
+
+export interface CoverageFrontierPoint {
+  threshold: number;
+  n_actionable: number;
+  coverage: number | null;
+  accuracy_actionable: number | null;
+  n_placed: number;
+  placed_coverage: number | null;
+  accuracy_placed: number | null;
+}
+
+export interface CoverageFrontierResponse {
+  days_back: number;
+  points: CoverageFrontierPoint[];
+}
+
 export async function fetchTrainingHistory(): Promise<TrainingHistoryResponse> {
-  const res = await fetch(`${API_URL}/api/stats/training-history`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/training-history`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
 
 export async function fetchExpertComparison(): Promise<ExpertComparisonResponse> {
-  const res = await fetch(`${API_URL}/api/stats/expert-comparison`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/expert-comparison`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
 
 export async function fetchHitRate(window: number = 50): Promise<HitRateResponse> {
-  const res = await fetch(`${API_URL}/api/stats/hit-rate?window=${window}`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/hit-rate?window=${window}`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
 
 export async function fetchCalibration(): Promise<CalibrationResponse> {
-  const res = await fetch(`${API_URL}/api/stats/calibration`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/calibration`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
 
 export async function fetchEnsembleWeights(): Promise<EnsembleWeightsResponse> {
-  const res = await fetch(`${API_URL}/api/stats/ensemble-weights`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/ensemble-weights`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
 
 export async function fetchConfidenceDist(bins: number = 20): Promise<ConfidenceDistResponse> {
-  const res = await fetch(`${API_URL}/api/stats/confidence-dist?bins=${bins}`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/confidence-dist?bins=${bins}`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchPerStatPerformance(
+  daysBack: number = 120
+): Promise<PerStatPerformanceResponse> {
+  const res = await fetchWithTimeout(
+    `${API_URL}/api/stats/per-stat-performance?days_back=${daysBack}`
+  );
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCoverageFrontier(
+  daysBack: number = 120
+): Promise<CoverageFrontierResponse> {
+  const res = await fetchWithTimeout(
+    `${API_URL}/api/stats/coverage-frontier?days_back=${daysBack}`
+  );
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
@@ -326,19 +410,19 @@ export interface MixingWeightsResponse {
 }
 
 export async function fetchWeightHistory(limit: number = 100): Promise<WeightHistoryResponse> {
-  const res = await fetch(`${API_URL}/api/stats/weight-history?limit=${limit}`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/weight-history?limit=${limit}`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
 
 export async function fetchDriftReport(): Promise<DriftReportResponse> {
-  const res = await fetch(`${API_URL}/api/stats/drift-report`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/drift-report`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
 
 export async function fetchMixingWeights(): Promise<MixingWeightsResponse> {
-  const res = await fetch(`${API_URL}/api/stats/mixing-weights`);
+  const res = await fetchWithTimeout(`${API_URL}/api/stats/mixing-weights`);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
@@ -401,7 +485,7 @@ export async function fetchModelHealth(
   daysBack: number = 90,
   minAlertWeight: number = 0.03
 ): Promise<ModelHealthResponse> {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `${API_URL}/api/stats/model-health?days_back=${daysBack}&min_alert_weight=${minAlertWeight}`
   );
   if (!res.ok) throw new Error(`API error: ${res.status}`);

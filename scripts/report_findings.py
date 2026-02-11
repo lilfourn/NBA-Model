@@ -89,7 +89,7 @@ def _print_training_sanity(df: pd.DataFrame) -> None:
     if "actual_value" not in df.columns:
         # load_training_data already includes raw stat cols; training computes actual_value later
         # but for sanity we just re-use app.ml.dataset.compute_actual_value indirectly by re-running the same logic.
-        from app.ml.dataset import compute_actual_value  # noqa: WPS433 (local import to keep script fast)
+        from app.ml.dataset import compute_actual_value  # noqa: PLC0415 (local import to keep script fast)
 
         df["actual_value"] = df.apply(compute_actual_value, axis=1)
 

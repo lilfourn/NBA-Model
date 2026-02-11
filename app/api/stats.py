@@ -5,12 +5,14 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Query
 from sqlalchemy import text
 
 from app.core.config import settings
 from app.db.engine import get_async_engine, get_engine
+from app.ml.selection_policy import SelectionPolicy
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -94,6 +96,8 @@ select
     over_label, outcome, is_correct,
     p_final, p_raw,
     p_forecast_cal, p_nn, p_tabdl, p_lr, p_xgb, p_lgbm,
+    cast(details->>'conformal_set_size' as integer) as conformal_set_size,
+    cast(details->>'selection_threshold' as float) as selection_threshold,
     stat_type, rank_score, n_eff
 from {CANONICAL_VIEW}
 order by coalesce(decision_time, created_at) asc, created_at asc, id asc
@@ -108,6 +112,8 @@ select
     prob_over as p_final, p_raw,
     p_forecast_cal, p_nn,
     coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl,
+    cast(details->>'conformal_set_size' as integer) as conformal_set_size,
+    cast(details->>'selection_threshold' as float) as selection_threshold,
     p_lr, p_xgb, p_lgbm,
     stat_type, rank_score, n_eff
 from projection_predictions
@@ -139,6 +145,30 @@ def _load_model_health_sync(*, days_back: int, min_alert_weight: float) -> dict:
         ensemble_weights_path=str(ENSEMBLE_WEIGHTS_PATH),
         min_alert_weight=float(max(0.0, min(1.0, min_alert_weight))),
     )
+
+
+def _selection_thresholds_for_rows(scored: pd.DataFrame) -> pd.Series:
+    if scored.empty:
+        return pd.Series(dtype=float)
+    policy = SelectionPolicy.load()
+    stat_types = scored.get("stat_type", pd.Series([""] * len(scored))).astype(str).tolist()
+    conformal = pd.to_numeric(scored.get("conformal_set_size"), errors="coerce")
+    thresholds = [
+        float(
+            policy.threshold_for(
+                stat_type,
+                int(conf) if conf is not None and pd.notna(conf) else None,
+            )
+        )
+        for stat_type, conf in zip(stat_types, conformal.tolist())
+    ]
+    explicit = pd.to_numeric(scored.get("selection_threshold"), errors="coerce")
+    if explicit is not None and len(explicit) == len(thresholds):
+        thresholds = [
+            float(exp) if exp is not None and pd.notna(exp) else float(th)
+            for th, exp in zip(thresholds, explicit.tolist())
+        ]
+    return pd.Series(thresholds, index=scored.index, dtype=float)
 
 
 @router.get("/hit-rate")
@@ -268,16 +298,20 @@ async def hit_rate(window: int = Query(50, ge=5, le=500)) -> dict:
     # Tier metrics: scored vs actionable
     import numpy as _np
 
-    actionable_threshold = 0.57
     p_arr = (
         scored["p_final"].to_numpy(dtype=float) if "p_final" in scored.columns else None
     )
     published_hit_rate = None
     published_n = 0
     coverage = 0.0
+    actionable_threshold = None
     if p_arr is not None and len(p_arr) > 0:
         p_pick = _np.maximum(p_arr, 1.0 - p_arr)
-        act_mask = p_pick >= actionable_threshold
+        threshold_series = _selection_thresholds_for_rows(scored)
+        if threshold_series.empty:
+            threshold_series = pd.Series([0.60] * len(scored), index=scored.index, dtype=float)
+        actionable_threshold = _safe_float(float(threshold_series.mean()))
+        act_mask = p_pick >= threshold_series.to_numpy(dtype=float)
         published_n = int(act_mask.sum())
         if published_n > 0:
             published_hit_rate = _safe_float(
@@ -463,6 +497,128 @@ async def confidence_dist(bins: int = Query(20, ge=5, le=50)) -> dict:
         result.append(entry)
 
     return {"bins": result}
+
+
+@router.get("/per-stat-performance")
+async def per_stat_performance(days_back: int = Query(120, ge=7, le=365)) -> dict:
+    df = await asyncio.to_thread(_load_prediction_records_sync)
+    if df is None or df.empty or "p_final" not in df.columns or "over_label" not in df.columns:
+        return {"days_back": days_back, "stats": []}
+
+    frame = df.copy()
+    for col in ["decision_time", "created_at"]:
+        if col in frame.columns:
+            frame[col] = pd.to_datetime(frame[col], errors="coerce", utc=True)
+    if "decision_time" in frame.columns:
+        recent_cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=int(days_back))
+        frame = frame[frame["decision_time"].fillna(frame.get("created_at")) >= recent_cutoff]
+    if frame.empty:
+        return {"days_back": days_back, "stats": []}
+
+    frame["p_final"] = pd.to_numeric(frame["p_final"], errors="coerce")
+    frame["over_label"] = pd.to_numeric(frame["over_label"], errors="coerce")
+    frame = frame.dropna(subset=["p_final", "over_label", "stat_type"]).copy()
+    if frame.empty:
+        return {"days_back": days_back, "stats": []}
+
+    frame["pick"] = (frame["p_final"] >= 0.5).astype(int)
+    frame["correct"] = (frame["pick"] == frame["over_label"].astype(int)).astype(float)
+    frame["p_pick"] = frame["p_final"].apply(lambda p: max(float(p), 1.0 - float(p)))
+    frame["selection_threshold"] = _selection_thresholds_for_rows(frame)
+    frame["is_actionable"] = frame["p_pick"] >= frame["selection_threshold"]
+    if "conformal_set_size" in frame.columns:
+        conf_ok = pd.to_numeric(frame["conformal_set_size"], errors="coerce").fillna(1).to_numpy() != 2
+        frame["is_placed"] = frame["is_actionable"] & conf_ok
+    else:
+        frame["is_placed"] = frame["is_actionable"]
+
+    rows: list[dict] = []
+    for stat_type, grp in frame.groupby("stat_type"):
+        actionable = grp[grp["is_actionable"]]
+        placed = grp[grp["is_placed"]]
+        rows.append(
+            {
+                "stat_type": str(stat_type),
+                "n_scored": int(len(grp)),
+                "accuracy_scored": _safe_float(float(grp["correct"].mean())),
+                "n_actionable": int(len(actionable)),
+                "accuracy_actionable": _safe_float(float(actionable["correct"].mean())) if len(actionable) > 0 else None,
+                "actionable_coverage": _safe_float(float(len(actionable) / len(grp))) if len(grp) > 0 else 0.0,
+                "n_placed": int(len(placed)),
+                "accuracy_placed": _safe_float(float(placed["correct"].mean())) if len(placed) > 0 else None,
+                "placed_coverage": _safe_float(float(len(placed) / len(grp))) if len(grp) > 0 else 0.0,
+                "mean_p_pick": _safe_float(float(grp["p_pick"].mean())),
+                "mean_threshold": _safe_float(float(grp["selection_threshold"].mean())),
+            }
+        )
+
+    rows.sort(key=lambda x: (x.get("n_actionable", 0), x.get("n_scored", 0)), reverse=True)
+    return {"days_back": days_back, "stats": rows}
+
+
+@router.get("/coverage-frontier")
+async def coverage_frontier(days_back: int = Query(120, ge=7, le=365)) -> dict:
+    df = await asyncio.to_thread(_load_prediction_records_sync)
+    if df is None or df.empty or "p_final" not in df.columns or "over_label" not in df.columns:
+        return {"days_back": days_back, "points": []}
+
+    frame = df.copy()
+    for col in ["decision_time", "created_at"]:
+        if col in frame.columns:
+            frame[col] = pd.to_datetime(frame[col], errors="coerce", utc=True)
+    if "decision_time" in frame.columns:
+        recent_cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=int(days_back))
+        frame = frame[frame["decision_time"].fillna(frame.get("created_at")) >= recent_cutoff]
+    if frame.empty:
+        return {"days_back": days_back, "points": []}
+
+    frame["p_final"] = pd.to_numeric(frame["p_final"], errors="coerce")
+    frame["over_label"] = pd.to_numeric(frame["over_label"], errors="coerce")
+    frame = frame.dropna(subset=["p_final", "over_label"]).copy()
+    if frame.empty:
+        return {"days_back": days_back, "points": []}
+
+    probs = frame["p_final"].to_numpy(dtype=float)
+    labels = frame["over_label"].to_numpy(dtype=int)
+    picks = (probs >= 0.5).astype(int)
+    correct = (picks == labels).astype(float)
+    p_pick = pd.Series(np.maximum(probs, 1.0 - probs), dtype=float)
+    conformal = pd.to_numeric(frame.get("conformal_set_size"), errors="coerce").fillna(1).to_numpy()
+    n_total = len(frame)
+
+    points: list[dict] = []
+    for threshold in np.arange(0.50, 0.76, 0.01):
+        threshold = round(float(threshold), 2)
+        actionable = p_pick.to_numpy(dtype=float) >= threshold
+        n_actionable = int(actionable.sum())
+        if n_actionable == 0:
+            points.append(
+                {
+                    "threshold": threshold,
+                    "n_actionable": 0,
+                    "coverage": 0.0,
+                    "accuracy_actionable": None,
+                    "n_placed": 0,
+                    "placed_coverage": 0.0,
+                    "accuracy_placed": None,
+                }
+            )
+            continue
+        placed_mask = actionable & (conformal != 2)
+        n_placed = int(placed_mask.sum())
+        points.append(
+            {
+                "threshold": threshold,
+                "n_actionable": n_actionable,
+                "coverage": _safe_float(float(n_actionable / n_total)),
+                "accuracy_actionable": _safe_float(float(correct[actionable].mean())),
+                "n_placed": n_placed,
+                "placed_coverage": _safe_float(float(n_placed / n_total)),
+                "accuracy_placed": _safe_float(float(correct[placed_mask].mean())) if n_placed > 0 else None,
+            }
+        )
+
+    return {"days_back": days_back, "points": points}
 
 
 def _safe_float(value) -> float | None:

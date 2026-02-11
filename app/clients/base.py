@@ -5,9 +5,12 @@ import random
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from curl_cffi import requests as curl_requests
+
+if TYPE_CHECKING:
+    from app.clients.cache import ResponseCache
 
 # ---------------------------------------------------------------------------
 # User-Agent pool — rotated per-request for fingerprint diversity.
@@ -150,7 +153,7 @@ class CrawlerClient:
         should_retry: Callable[[int], bool] | None = None,
         rotate_ua: bool = True,
         rotate_impersonate: bool = False,
-        cache: "ResponseCache | None" = None,
+        cache: ResponseCache | None = None,
     ) -> None:
         self.source_name = source_name
         self.max_retries = max_retries

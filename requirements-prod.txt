@@ -17,3 +17,4 @@ lxml
 torch
 matplotlib
 python-dotenv
+modal

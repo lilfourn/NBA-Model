@@ -16,6 +16,7 @@ from app.ml.feature_engineering import (
     build_league_means_timeline,
     build_logs_by_player,
     compute_history_features,
+    estimate_team_travel_context,
     league_mean_before_cutoff,
     load_gamelogs_frame,
     prepare_gamelogs,
@@ -325,6 +326,15 @@ OPPONENT_FEATURE_COLS = [
     "opp_def_rank",
 ]
 
+MARKET_FEATURE_COLS = [
+    "market_total_points",
+    "market_spread_abs",
+    "market_total_move",
+    "market_volatility",
+    "market_home_implied_total",
+    "market_away_implied_total",
+]
+
 
 def _resolve_nba_game_ids(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     """Resolve PrizePicks game_id -> nba_game_id when not already on the frame."""
@@ -369,6 +379,36 @@ def _resolve_nba_game_ids(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     return frame
 
 
+def _load_market_lines_by_game(engine: Engine, nba_game_ids: list[str]) -> pd.DataFrame:
+    """Load market lines joined to nba_game_id for provided games."""
+    if not nba_game_ids:
+        return pd.DataFrame()
+    try:
+        return pd.read_sql(
+            text(
+                """
+                select
+                    ng.id as nba_game_id,
+                    m.captured_at,
+                    m.home_spread,
+                    m.away_spread,
+                    m.total_points
+                from market_game_lines m
+                join nba_games ng
+                  on ng.game_date = m.game_date
+                 and upper(ng.home_team_abbreviation) = upper(m.home_team_abbreviation)
+                 and upper(ng.away_team_abbreviation) = upper(m.away_team_abbreviation)
+                where ng.id = any(:game_ids)
+                """
+            ),
+            engine,
+            params={"game_ids": nba_game_ids},
+        )
+    except Exception:
+        # Table might not exist yet in dev/local; features will default to zeros.
+        return pd.DataFrame()
+
+
 def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -387,6 +427,17 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     opp_def_avgs = build_opponent_defensive_averages(team_game_stats)
     opp_def_ranks = build_opponent_defensive_ranks(opp_def_avgs)
     team_pace_data = compute_team_pace(team_game_stats)
+    market_lines = _load_market_lines_by_game(
+        engine,
+        sorted(
+            {
+                str(v)
+                for v in frame.get("nba_game_id", pd.Series(dtype=object))
+                .dropna()
+                .unique()
+            }
+        ),
+    )
 
     # Build player -> team abbreviation lookup from nba_players
     nba_player_teams = pd.read_sql(
@@ -458,6 +509,7 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
     frame["cutoff_time"] = cutoff_times
 
     extras_rows: list[dict[str, float]] = []
+    travel_cache: dict[tuple[str, str], dict[str, float]] = {}
     for row in frame.itertuples(index=False):
         nba_player_id = getattr(row, "nba_player_id", None)
         if nba_player_id is None:
@@ -593,8 +645,77 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
             "game_pace": g_pace,
             "player_usage": p_usage,
         }
+        travel_key = (
+            str(player_team or ""),
+            str(pd.to_datetime(cutoff, errors="coerce").date())
+            if cutoff is not None
+            else "",
+        )
+        if travel_key not in travel_cache:
+            travel_cache[travel_key] = estimate_team_travel_context(
+                team_game_stats,
+                team_abbreviation=player_team,
+                cutoff=cutoff,
+                lookback_games=7,
+            )
+        travel_feats = travel_cache[travel_key]
 
-        extras_rows.append({**hist_feats, **opp_feats, **pace_usage_feats})
+        market_feats = {
+            "market_total_points": 0.0,
+            "market_spread_abs": 0.0,
+            "market_total_move": 0.0,
+            "market_volatility": 0.0,
+            "market_home_implied_total": 0.0,
+            "market_away_implied_total": 0.0,
+        }
+        if (
+            nba_game_id is not None
+            and not market_lines.empty
+            and "nba_game_id" in market_lines.columns
+        ):
+            ml = market_lines[market_lines["nba_game_id"].astype(str) == str(nba_game_id)].copy()
+            if not ml.empty:
+                ml["captured_at"] = pd.to_datetime(ml["captured_at"], errors="coerce", utc=True)
+                if cutoff is not None:
+                    cutoff_utc = pd.to_datetime(cutoff, errors="coerce", utc=True)
+                    ml = ml[ml["captured_at"] <= cutoff_utc]
+                if not ml.empty:
+                    ml = ml.sort_values("captured_at")
+                    latest = ml.iloc[-1]
+                    total = pd.to_numeric(latest.get("total_points"), errors="coerce")
+                    hs = pd.to_numeric(latest.get("home_spread"), errors="coerce")
+                    aspr = pd.to_numeric(latest.get("away_spread"), errors="coerce")
+                    spread = hs if pd.notna(hs) else aspr
+                    spread_abs = abs(float(spread)) if pd.notna(spread) else 0.0
+                    market_feats["market_total_points"] = (
+                        float(total) if pd.notna(total) else 0.0
+                    )
+                    market_feats["market_spread_abs"] = spread_abs
+                    if len(ml) >= 2:
+                        first_total = pd.to_numeric(
+                            ml.iloc[0].get("total_points"), errors="coerce"
+                        )
+                        if pd.notna(total) and pd.notna(first_total):
+                            market_feats["market_total_move"] = float(total - first_total)
+                        spread_series = pd.to_numeric(
+                            ml["home_spread"].fillna(ml["away_spread"]), errors="coerce"
+                        ).dropna()
+                        if len(spread_series) >= 2:
+                            market_feats["market_volatility"] = float(spread_series.std(ddof=0))
+                    if pd.notna(total) and pd.notna(hs):
+                        home_implied = float(total) / 2.0 - float(hs) / 2.0
+                        market_feats["market_home_implied_total"] = home_implied
+                        market_feats["market_away_implied_total"] = float(total) - home_implied
+
+        extras_rows.append(
+            {
+                **hist_feats,
+                **opp_feats,
+                **pace_usage_feats,
+                **travel_feats,
+                **market_feats,
+            }
+        )
 
     extras_df = pd.DataFrame(extras_rows)
     for key in extras_df.columns:
@@ -642,6 +763,9 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         "stat_cv",
         "recent_vs_season",
         "minutes_trend",
+        "minutes_std_10",
+        "recent_load_3",
+        "role_stability",
         "stat_std_5",
         "line_move_pct",
         "line_move_late",
@@ -657,6 +781,9 @@ def _add_history_features(frame: pd.DataFrame, engine: Engine) -> pd.DataFrame:
         "opp_pace",
         "game_pace",
         "player_usage",
+        "travel_km_7d",
+        "circadian_shift_hours",
+        *MARKET_FEATURE_COLS,
         *OPPONENT_FEATURE_COLS,
     ]:
         if col not in frame.columns:

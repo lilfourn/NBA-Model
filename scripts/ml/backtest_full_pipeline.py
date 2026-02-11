@@ -31,12 +31,12 @@ from app.ml.ensemble_strategies import (
     build_strategies,
     multi_window_metrics,
 )  # noqa: E402
+from app.ml.selection_policy import SelectionPolicy  # noqa: E402
 from app.ml.stat_calibrator import StatTypeCalibrator  # noqa: E402
 from app.services.scoring import (  # noqa: E402
     ENSEMBLE_EXPERTS,
     EXCLUDED_STAT_TYPES,
     MIN_EDGE,
-    PICK_THRESHOLD,
     PRIOR_ONLY_STAT_TYPES,
     _compute_edge,
     shrink_probability,
@@ -71,6 +71,7 @@ def _load_resolved(engine, days_back: int) -> pd.DataFrame:
                         p_forecast_cal, p_nn,
                         coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl,
                         p_lr, p_xgb, p_lgbm,
+                        cast(details->>'conformal_set_size' as integer) as conformal_set_size,
                         {p_expr} as p_final_logged,
                         coalesce(details->>'is_live', 'false') as is_live,
                         coalesce(decision_time, created_at) as event_time
@@ -171,10 +172,55 @@ def _build_comparison(
                 "logloss": round(float(grp["logloss"].mean()), 4),
             }
 
+        per_direction: dict[str, dict] = {}
+        for direction, grp in rdf.groupby("pick_dir"):
+            per_direction[str(direction)] = {
+                "n": int(len(grp)),
+                "accuracy": round(float(grp["correct"].mean()), 4),
+                "coverage": round(float(len(grp) / len(rdf)), 4) if len(rdf) else 0.0,
+            }
+
+        deciles: list[dict[str, float | int | str]] = []
+        if len(rdf) > 0:
+            bins = np.linspace(0.5, 1.0, 11)
+            rdf = rdf.copy()
+            rdf["decile"] = pd.cut(
+                rdf["p_pick"],
+                bins=bins,
+                include_lowest=True,
+                right=True,
+                labels=[
+                    "50-55",
+                    "55-60",
+                    "60-65",
+                    "65-70",
+                    "70-75",
+                    "75-80",
+                    "80-85",
+                    "85-90",
+                    "90-95",
+                    "95-100",
+                ],
+            )
+            for decile, grp in rdf.groupby("decile", observed=True):
+                if decile is None or len(grp) == 0:
+                    continue
+                deciles.append(
+                    {
+                        "decile": str(decile),
+                        "n": int(len(grp)),
+                        "coverage": round(float(len(grp) / len(rdf)), 4),
+                        "accuracy": round(float(grp["correct"].mean()), 4),
+                        "mean_p_pick": round(float(grp["p_pick"].mean()), 4),
+                    }
+                )
+
         comparison[name] = {
             "windows": windows,
             "tiers": tiers,
             "per_stat_type": per_stat,
+            "per_direction": per_direction,
+            "confidence_deciles": deciles,
         }
     return comparison
 
@@ -257,6 +303,7 @@ def main() -> None:
 
     context_priors = load_context_priors()
     stat_calibrator = StatTypeCalibrator.load()
+    selection_policy = SelectionPolicy.load()
 
     stacking_model = _load_stacking_model(models_dir)
     strategies = build_strategies(stacking_model=stacking_model, experts=EXPERTS)
@@ -277,6 +324,12 @@ def main() -> None:
         y = int(row.over_label)
         line_score = float(row.line_score)
         n_eff_val = float(row.n_eff) if pd.notna(row.n_eff) else None
+        conformal_size = None
+        if hasattr(row, "conformal_set_size") and pd.notna(row.conformal_set_size):
+            try:
+                conformal_size = int(row.conformal_set_size)
+            except (TypeError, ValueError):
+                conformal_size = None
 
         if stat_type in EXCLUDED_STAT_TYPES:
             continue
@@ -311,8 +364,14 @@ def main() -> None:
             correct = int(pick == y)
             p_pick = max(p_final, 1.0 - p_final)
             edge = _compute_edge(p_final, expert_probs, None, n_eff=n_eff_val)
-            is_actionable = p_pick >= PICK_THRESHOLD
-            is_placed = is_actionable and edge >= MIN_EDGE and not is_prior_only
+            selection_threshold = selection_policy.threshold_for(stat_type, conformal_size)
+            is_actionable = p_pick >= selection_threshold
+            is_placed = (
+                is_actionable
+                and edge >= MIN_EDGE
+                and not is_prior_only
+                and conformal_size != 2
+            )
 
             strategy_results[name].append(
                 {
@@ -324,6 +383,9 @@ def main() -> None:
                     "is_actionable": is_actionable,
                     "is_placed": is_placed,
                     "edge": edge,
+                    "p_pick": p_pick,
+                    "selection_threshold": selection_threshold,
+                    "pick_dir": "OVER" if pick == 1 else "UNDER",
                 }
             )
 
@@ -348,7 +410,7 @@ def main() -> None:
 
     _print_comparison(comparison)
 
-    print(f"\nBest strategy per window:")
+    print("\nBest strategy per window:")
     for wk, name in sorted(best_per_window.items()):
         print(f"  {wk}: {name}")
 

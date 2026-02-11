@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import time
 from typing import Any, Callable
 
-from curl_cffi import requests as curl_requests
 
 from app.clients.base import CrawlerClient
 

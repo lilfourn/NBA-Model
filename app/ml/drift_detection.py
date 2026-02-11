@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
 # Thresholds
 PSI_THRESHOLD = 0.20          # PSI > 0.20 = significant distribution shift

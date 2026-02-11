@@ -29,6 +29,7 @@ MIN_SAMPLES_PER_STAT = 100  # Minimum resolved rows before we calibrate
 CALIBRATOR_PATH = (
     Path(os.environ.get("MODELS_DIR", "models")) / "stat_calibrator.joblib"
 )
+CALIBRATOR_VERSION = "2.1.0"
 
 # Stat types excluded from calibration (degenerate base rates)
 EXCLUDED_STAT_TYPES: set[str] = {
@@ -75,6 +76,7 @@ class StatTypeCalibrator:
             "calibrators": self.calibrators,
             "global_calibrator": self.global_calibrator,
             "meta": self.meta,
+            "version": CALIBRATOR_VERSION,
         }
         joblib.dump(payload, out)
         return out
@@ -86,10 +88,13 @@ class StatTypeCalibrator:
             return cls()  # Empty calibrator (pass-through)
         try:
             payload = joblib.load(p)
+            meta = payload.get("meta", {}) or {}
+            if "calibrator_version" not in meta:
+                meta["calibrator_version"] = str(payload.get("version") or "legacy")
             return cls(
                 calibrators=payload.get("calibrators", {}),
                 global_calibrator=payload.get("global_calibrator"),
-                meta=payload.get("meta", {}),
+                meta=meta,
             )
         except Exception:  # noqa: BLE001
             return cls()
@@ -142,10 +147,12 @@ class StatTypeCalibrator:
             stat_meta[st] = {"n": n, "calibrated": True}
 
         meta = {
+            "calibrator_version": CALIBRATOR_VERSION,
             "total_rows": len(valid),
             "n_stat_types_calibrated": len(calibrators),
             "global_calibrated": global_cal is not None,
             "stat_types": stat_meta,
+            "min_samples_per_stat": MIN_SAMPLES_PER_STAT,
         }
         return cls(calibrators=calibrators, global_calibrator=global_cal, meta=meta)
 

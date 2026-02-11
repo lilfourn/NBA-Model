@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback } from "react";
 import { usePolling } from "@/lib/use-polling";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line } from "recharts";
 import { DataCard } from "@/components/ui/data-card";
@@ -25,7 +26,8 @@ const curveConfig = {
 } satisfies ChartConfig;
 
 export function ConfidenceDistChart() {
-  const { data, loading } = usePolling(() => fetchConfidenceDist(20));
+  const fetcher = useCallback(() => fetchConfidenceDist(20), []);
+  const { data, loading, error } = usePolling(fetcher);
   const noData = !data || data.bins.length === 0;
   const hasOutcomes = data?.bins.some((b) => b.hits != null) ?? false;
 
@@ -47,6 +49,8 @@ export function ConfidenceDistChart() {
       loading={loading}
       noData={noData}
       noDataDescription="No prediction data available yet."
+      error={error ? "Failed to refresh confidence distribution." : undefined}
+      errorDescription={error?.message}
     >
         <div className="space-y-8">
           <div>

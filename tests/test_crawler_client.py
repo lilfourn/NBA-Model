@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import time
-import threading
 
 import pytest
 
@@ -10,9 +9,7 @@ from app.clients.base import (
     CircuitBreaker,
     CircuitOpenError,
     CrawlerClient,
-    CrawlResult,
     RateLimiter,
-    RetryableStatusError,
     USER_AGENTS,
     _jittered_backoff,
     _pick_ua,

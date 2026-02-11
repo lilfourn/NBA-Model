@@ -26,22 +26,7 @@ import {
 } from "@/components/ui/chart";
 import { fetchWeightHistory } from "@/lib/api";
 import type { WeightHistoryEntry } from "@/lib/api";
-
-const EXPERT_COLORS: Record<string, string> = {
-  p_forecast_cal: "oklch(0.75 0.12 75)",
-  p_nn: "oklch(0.6 0.04 250)",
-  p_lr: "oklch(0.55 0.03 180)",
-  p_xgb: "oklch(0.65 0.06 60)",
-  p_lgbm: "oklch(0.5 0 0)",
-};
-
-const EXPERT_LABELS: Record<string, string> = {
-  p_forecast_cal: "Forecast",
-  p_nn: "NN",
-  p_lr: "LR",
-  p_xgb: "XGB",
-  p_lgbm: "LGBM",
-};
+import { EXPERT_COLORS, EXPERT_LABELS } from "@/lib/constants";
 
 function formatDate(ts: string): string {
   try {

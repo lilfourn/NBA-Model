@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from app.ml.drift_detection import (
     check_calibration_drift,

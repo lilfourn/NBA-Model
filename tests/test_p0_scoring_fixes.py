@@ -8,6 +8,7 @@ import pytest
 
 from app.services.scoring import (
     PRIOR_ONLY_STAT_TYPES,
+    _direction_imbalance_penalty,
     _logit,
     _sigmoid,
     shrink_probability,
@@ -265,3 +266,58 @@ class TestShrinkProbabilityUnchanged:
         p_low = shrink_probability(0.001, n_eff=30.0)
         assert p_low > 0.001
         assert math.isfinite(p_low)
+
+
+class TestDirectionImbalancePenalty:
+    def test_no_penalty_when_balance_below_threshold(self) -> None:
+        edge = _direction_imbalance_penalty(
+            edge=70.0,
+            prob_over=0.61,
+            dominant_dir="OVER",
+            dominant_pct=0.70,
+            threshold=0.75,
+            context_prior=0.60,
+        )
+        assert edge == 70.0
+
+    def test_no_penalty_for_non_dominant_direction(self) -> None:
+        edge = _direction_imbalance_penalty(
+            edge=70.0,
+            prob_over=0.40,
+            dominant_dir="OVER",
+            dominant_pct=0.90,
+            threshold=0.75,
+            context_prior=0.45,
+        )
+        assert edge == 70.0
+
+    def test_penalty_applies_for_dominant_direction_near_prior(self) -> None:
+        edge = _direction_imbalance_penalty(
+            edge=70.0,
+            prob_over=0.62,
+            dominant_dir="OVER",
+            dominant_pct=0.90,
+            threshold=0.75,
+            context_prior=0.60,
+        )
+        assert edge < 70.0
+        assert edge == pytest.approx(63.5)
+
+    def test_penalty_grows_with_stronger_imbalance(self) -> None:
+        weak = _direction_imbalance_penalty(
+            edge=70.0,
+            prob_over=0.62,
+            dominant_dir="OVER",
+            dominant_pct=0.80,
+            threshold=0.75,
+            context_prior=0.60,
+        )
+        strong = _direction_imbalance_penalty(
+            edge=70.0,
+            prob_over=0.62,
+            dominant_dir="OVER",
+            dominant_pct=0.95,
+            threshold=0.75,
+            context_prior=0.60,
+        )
+        assert strong < weak

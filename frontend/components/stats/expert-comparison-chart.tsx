@@ -11,14 +11,7 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart";
 import { fetchExpertComparison } from "@/lib/api";
-
-const MODEL_META: Record<string, { label: string; color: string }> = {
-  baseline_logreg: { label: "LR", color: "oklch(0.75 0.12 75)" },
-  nn_gru_attention: { label: "NN", color: "oklch(0.6 0.04 250)" },
-  xgboost: { label: "XGB", color: "oklch(0.55 0.03 180)" },
-  lightgbm: { label: "LGBM", color: "oklch(0.65 0.06 60)" },
-  meta_learner: { label: "Meta", color: "oklch(0.5 0 0)" },
-};
+import { MODEL_META } from "@/lib/constants";
 
 const chartConfig: ChartConfig = {
   value: { label: "Value" },

@@ -285,12 +285,10 @@ class TestScoringDeadCodeCleanup:
 
     def test_no_hybrid_imports(self) -> None:
         """HybridEnsembleCombiner should not be importable from scoring after cleanup."""
-        try:
-            from app.services.scoring import HybridEnsembleCombiner  # type: ignore[attr-defined]
+        from importlib import import_module
 
-            has_hybrid = True
-        except ImportError:
-            has_hybrid = False
+        scoring = import_module("app.services.scoring")
+        has_hybrid = hasattr(scoring, "HybridEnsembleCombiner")
         # Currently the import exists as a module-level import inside scoring.py.
         # After cleanup, this should flip to `assert not has_hybrid`.
         assert isinstance(has_hybrid, bool)

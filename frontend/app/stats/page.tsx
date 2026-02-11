@@ -9,6 +9,8 @@ import { ConfidenceDistChart } from "@/components/stats/confidence-dist-chart";
 import { WeightHistoryChart } from "@/components/stats/weight-history-chart";
 import { DriftStatusCard } from "@/components/stats/drift-status-card";
 import { ModelHealthCard } from "@/components/stats/model-health-card";
+import { PerStatPerformanceCard } from "@/components/stats/per-stat-performance-card";
+import { CoverageFrontierChart } from "@/components/stats/coverage-frontier-chart";
 
 export default function StatsPage() {
   return (
@@ -26,6 +28,10 @@ export default function StatsPage() {
           <ExpertComparisonChart />
           <TrainingHistoryChart />
           <HitRateChart />
+          <div className="grid gap-6 lg:grid-cols-2">
+            <PerStatPerformanceCard />
+            <CoverageFrontierChart />
+          </div>
           <EnsembleWeightsChart />
           <WeightHistoryChart />
           <div className="grid gap-6 lg:grid-cols-2">

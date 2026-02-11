@@ -128,7 +128,7 @@ def test_best_calibrator_serializes_correctly() -> None:
     cal = best_calibrator(probs, labels)
     data = cal.to_dict()
     restored = load_calibrator(data)
-    assert type(restored) == type(cal)
+    assert isinstance(restored, type(cal))
     np.testing.assert_allclose(
         cal.transform(probs), restored.transform(probs), atol=1e-6
     )

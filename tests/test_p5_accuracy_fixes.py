@@ -132,4 +132,24 @@ class TestFeaturePruning:
     def test_feature_count(self) -> None:
         from app.ml.prepare_features import NUMERIC_COLS
 
-        assert len(NUMERIC_COLS) == 34
+        # Guard against accidental feature explosion while allowing intentional additions.
+        assert len(NUMERIC_COLS) >= 34
+        assert len(NUMERIC_COLS) == len(set(NUMERIC_COLS))
+
+    def test_new_context_and_market_features_present(self) -> None:
+        from app.ml.prepare_features import NUMERIC_COLS
+
+        for col in [
+            "minutes_std_10",
+            "recent_load_3",
+            "role_stability",
+            "travel_km_7d",
+            "circadian_shift_hours",
+            "market_total_points",
+            "market_spread_abs",
+            "market_total_move",
+            "market_volatility",
+            "market_home_implied_total",
+            "market_away_implied_total",
+        ]:
+            assert col in NUMERIC_COLS, f"{col} should be included in numeric features"

@@ -1,10 +1,8 @@
 """Tests for app.collectors.validators — per-source response validation."""
 from __future__ import annotations
 
-import pytest
 
 from app.collectors.validators import (
-    ValidationResult,
     validate_basketball_reference_html,
     validate_nba_stats_response,
     validate_prizepicks_response,

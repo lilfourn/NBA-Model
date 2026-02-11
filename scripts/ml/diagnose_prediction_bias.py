@@ -15,7 +15,6 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -61,20 +60,20 @@ def main() -> None:
     counts = Counter(p.pick for p in picks)
     n_over = counts.get("OVER", 0)
     n_under = counts.get("UNDER", 0)
-    print(f"\n## Overall Distribution")
+    print("\n## Overall Distribution")
     print(f"  OVER:  {n_over:4d} ({100*n_over/n:.1f}%)")
     print(f"  UNDER: {n_under:4d} ({100*n_under/n:.1f}%)")
 
     # 2. prob_over distribution
     probs = [p.prob_over for p in picks]
-    print(f"\n## prob_over (post-shrinkage)")
+    print("\n## prob_over (post-shrinkage)")
     print(f"  mean={np.mean(probs):.4f}  median={np.median(probs):.4f}")
     print(f"  min={np.min(probs):.4f}  max={np.max(probs):.4f}")
     print(f"  % < 0.5: {100*sum(1 for p in probs if p < 0.5)/n:.1f}%")
 
     # 3. Per-expert mean P(over)
     expert_keys = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm", "p_meta"]
-    print(f"\n## Per-Expert Mean P(over)")
+    print("\n## Per-Expert Mean P(over)")
     expert_stats = {}
     for key in expert_keys:
         vals = [getattr(p, key) for p in picks if getattr(p, key) is not None]
@@ -97,7 +96,7 @@ def main() -> None:
         by_stat[p.stat_type]["over" if p.pick == "OVER" else "under"] += 1
         by_stat[p.stat_type]["probs"].append(p.prob_over)
 
-    print(f"\n## Per-Stat-Type Breakdown")
+    print("\n## Per-Stat-Type Breakdown")
     for stat in sorted(by_stat.keys(), key=lambda s: stat_counts[s], reverse=True):
         d = by_stat[stat]
         total = d["over"] + d["under"]
@@ -113,13 +112,13 @@ def main() -> None:
     # 5. Shrinkage impact: how many picks would flip without shrinkage?
     # We can't replay without shrinkage here, but we can check how many are near 0.5
     near_boundary = sum(1 for p in probs if 0.45 <= p <= 0.55)
-    print(f"\n## Shrinkage Impact")
+    print("\n## Shrinkage Impact")
     print(f"  Picks in [0.45, 0.55] range: {near_boundary} ({100*near_boundary/n:.1f}%)")
-    print(f"  These are most vulnerable to shrinkage-induced direction flips.")
+    print("  These are most vulnerable to shrinkage-induced direction flips.")
 
     # 6. Edge score distribution
     edges = [p.edge for p in picks]
-    print(f"\n## Edge Score Distribution")
+    print("\n## Edge Score Distribution")
     print(f"  mean={np.mean(edges):.1f}  median={np.median(edges):.1f}")
     grades = Counter(p.grade for p in picks)
     for g in ["A+", "A", "B", "C", "D", "F"]:
@@ -132,7 +131,7 @@ def main() -> None:
         wdata = json.loads(weights_path.read_text())
         experts_in_weights = wdata.get("experts", [])
         n_contexts = len(wdata.get("weights", {}))
-        print(f"\n## Ensemble Weights Audit")
+        print("\n## Ensemble Weights Audit")
         print(f"  Experts in weights file: {experts_in_weights}")
         print(f"  Context buckets: {n_contexts}")
         expected = ["p_forecast_cal", "p_nn", "p_lr", "p_xgb", "p_lgbm"]

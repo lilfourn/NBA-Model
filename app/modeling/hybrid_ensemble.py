@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from app.modeling.gating_model import GatingModel, build_context_features
+from app.modeling.gating_model import GatingModel
 from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler
 
 EPS = 1e-6

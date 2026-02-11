@@ -1,6 +1,6 @@
 # NBA Stats Project: Engineering Baseline and 60% Hit-Rate Tracker
 
-Last updated: 2026-02-06 (America/Chicago)
+Last updated: 2026-02-11 (America/Chicago)
 
 ## Goal
 
@@ -144,36 +144,25 @@ Conformal:
 Primary scoring path:
 - `app/services/scoring.py::score_ensemble`
 
-Contextual hedge:
-- `app/modeling/online_ensemble.py`
-- Context key: `(stat_type, regime, n_eff bucket)`.
-- Multiplicative weights update with log loss.
-- Logit-space pooling.
+Current ensemble behavior:
+- Expert probabilities are collected from `p_forecast_cal`, `p_nn`, `p_tabdl`, `p_lr`, `p_xgb`, `p_lgbm`.
+- Optional stacking meta-model is used when available; otherwise logit-mean fallback is used.
+- Expert probabilities are clipped to `[0.25, 0.75]` before combination to prevent outlier domination.
+- Stat types in `EXCLUDED_STAT_TYPES` are skipped; `PRIOR_ONLY_STAT_TYPES` are scored from context prior only and never published.
 
-Thompson component:
-- `app/modeling/thompson_ensemble.py`
-- Beta posterior per expert/context.
-- Continuous reward update: `reward = 1 - |y - p|`.
+Probability shrinkage and calibration:
+- Shrinkage is logit-space blending toward context prior with neutral fallback anchor `0.50`.
+- Shrink strength increases when `n_eff` is low (`SHRINK_MAX`) and decreases with stronger history (`SHRINK_MIN`).
+- Per-stat isotonic recalibration is applied via `StatTypeCalibrator`.
 
-Gating component:
-- `app/modeling/gating_model.py`
-- Learns per-expert correctness from context features.
-
-Hybrid combiner:
-- `app/modeling/hybrid_ensemble.py`
-- Combines Thompson, Gating, and Meta in logit space via mixing weights.
-
-Probability shrinkage:
-- `scoring.py` shrinks raw ensemble probability toward anchor 0.42:
-  - `p_final = (1-k)*p_raw + k*0.42`
-  - `k` decreases with higher `n_eff` (more trust with more data).
-
-Risk-adjusted confidence:
-- Uses `p_pick = max(p_final, 1-p_final)` and dampens with lower data quality/calibration status.
+Publishability gates:
+- Picks must pass confidence threshold, conformal ambiguity filter, expert diversity, minimum `n_eff`, forecast-edge guardrail, and minimum edge score.
+- If publishable set is empty, a soft fallback returns ranked best-effort picks and marks fallback metadata in response.
 
 Edge/grade:
-- Composite score from directional edge, expert agreement quality, spread tightness, data quality, conformal set size, and anti-overconfidence penalty.
-- Grades: A+, A, B, C, D, F.
+- Composite edge score combines forecast edge, data quality, expert disagreement signal, confidence band, uncertainty, and conformal bonus.
+- Grades map edge into: `A+`, `A`, `B`, `C`, `D`, `F`.
+- Direction-imbalance guardrail demotes dominant-direction picks near context prior when published picks are overly one-sided.
 
 ---
 

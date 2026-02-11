@@ -16,3 +16,4 @@ lightgbm
 lxml
 torch
 matplotlib
+modal

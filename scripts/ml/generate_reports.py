@@ -19,7 +19,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 
 def _plot_weight_evolution(history_path: str, output_dir: Path) -> None:
@@ -130,7 +129,7 @@ def _plot_drift_history(drift_path: str, output_dir: Path) -> None:
     colors = ["red" if c["is_drifted"] else "green" for c in checks]
 
     x = np.arange(len(names))
-    bars = ax.bar(x, values, color=colors, alpha=0.7, label="Metric Value")
+    ax.bar(x, values, color=colors, alpha=0.7, label="Metric Value")
     ax.scatter(x, thresholds, color="black", marker="_", s=200, linewidths=2, zorder=5, label="Threshold")
 
     ax.set_xticks(x)

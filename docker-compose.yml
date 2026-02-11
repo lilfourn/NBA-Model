@@ -3,6 +3,8 @@ services:
     build:
       context: .
       target: dev
+    profiles:
+      - local-api
     env_file:
       - .env
     ports:
@@ -18,10 +20,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://nba-model-production.up.railway.app}
     volumes:
       - ./frontend:/app
       - /app/node_modules
       - /app/.next
-    depends_on:
-      - api

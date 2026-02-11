@@ -9,7 +9,6 @@ from uuid import uuid4
 
 import joblib
 import numpy as np
-import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 

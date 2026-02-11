@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 
 from app.modeling.online_ensemble import Context, ContextualHedgeEnsembler
 from app.services.scoring import shrink_probability

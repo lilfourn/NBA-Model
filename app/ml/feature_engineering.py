@@ -20,6 +20,39 @@ from app.ml.stat_mappings import (
     stat_weighted_components,
 )
 
+TEAM_GEO: dict[str, dict[str, float]] = {
+    "ATL": {"lat": 33.76, "lon": -84.39, "tz": -5.0},
+    "BOS": {"lat": 42.36, "lon": -71.06, "tz": -5.0},
+    "BKN": {"lat": 40.68, "lon": -73.98, "tz": -5.0},
+    "CHA": {"lat": 35.23, "lon": -80.84, "tz": -5.0},
+    "CHI": {"lat": 41.88, "lon": -87.63, "tz": -6.0},
+    "CLE": {"lat": 41.50, "lon": -81.69, "tz": -5.0},
+    "DAL": {"lat": 32.78, "lon": -96.80, "tz": -6.0},
+    "DEN": {"lat": 39.74, "lon": -104.99, "tz": -7.0},
+    "DET": {"lat": 42.33, "lon": -83.05, "tz": -5.0},
+    "GSW": {"lat": 37.77, "lon": -122.42, "tz": -8.0},
+    "HOU": {"lat": 29.76, "lon": -95.37, "tz": -6.0},
+    "IND": {"lat": 39.77, "lon": -86.16, "tz": -5.0},
+    "LAC": {"lat": 34.05, "lon": -118.24, "tz": -8.0},
+    "LAL": {"lat": 34.05, "lon": -118.24, "tz": -8.0},
+    "MEM": {"lat": 35.15, "lon": -90.05, "tz": -6.0},
+    "MIA": {"lat": 25.76, "lon": -80.19, "tz": -5.0},
+    "MIL": {"lat": 43.04, "lon": -87.91, "tz": -6.0},
+    "MIN": {"lat": 44.98, "lon": -93.27, "tz": -6.0},
+    "NOP": {"lat": 29.95, "lon": -90.07, "tz": -6.0},
+    "NYK": {"lat": 40.75, "lon": -73.99, "tz": -5.0},
+    "OKC": {"lat": 35.47, "lon": -97.52, "tz": -6.0},
+    "ORL": {"lat": 28.54, "lon": -81.38, "tz": -5.0},
+    "PHI": {"lat": 39.95, "lon": -75.17, "tz": -5.0},
+    "PHX": {"lat": 33.45, "lon": -112.07, "tz": -7.0},
+    "POR": {"lat": 45.52, "lon": -122.68, "tz": -8.0},
+    "SAC": {"lat": 38.58, "lon": -121.49, "tz": -8.0},
+    "SAS": {"lat": 29.42, "lon": -98.49, "tz": -6.0},
+    "TOR": {"lat": 43.65, "lon": -79.38, "tz": -5.0},
+    "UTA": {"lat": 40.76, "lon": -111.89, "tz": -7.0},
+    "WAS": {"lat": 38.91, "lon": -77.04, "tz": -5.0},
+}
+
 
 @dataclass
 class _GamelogCacheEntry:
@@ -281,6 +314,81 @@ def compute_player_usage(
     return float((player_fga + 0.44 * player_fta + player_to) / denom)
 
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_km = 6371.0
+    lat1_r, lon1_r, lat2_r, lon2_r = np.radians([lat1, lon1, lat2, lon2])
+    dlat = lat2_r - lat1_r
+    dlon = lon2_r - lon1_r
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_r) * np.cos(lat2_r) * np.sin(dlon / 2.0) ** 2
+    c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+    return float(radius_km * c)
+
+
+def estimate_team_travel_context(
+    team_game_stats: pd.DataFrame,
+    *,
+    team_abbreviation: str | None,
+    cutoff: datetime | None,
+    lookback_games: int = 7,
+) -> dict[str, float]:
+    """Estimate travel/fatigue proxies from recent team schedule transitions.
+
+    Returns:
+      - travel_km_7d: cumulative inter-game venue distance over recent games.
+      - circadian_shift_hours: cumulative absolute timezone shift.
+    """
+    if (
+        team_abbreviation is None
+        or not str(team_abbreviation).strip()
+        or team_game_stats.empty
+    ):
+        return {"travel_km_7d": 0.0, "circadian_shift_hours": 0.0}
+
+    team = str(team_abbreviation).strip().upper()
+    if team not in TEAM_GEO:
+        return {"travel_km_7d": 0.0, "circadian_shift_hours": 0.0}
+
+    cutoff_ts = _cutoff_date(cutoff)
+    frame = team_game_stats[
+        team_game_stats["team_abbreviation"].astype(str).str.upper() == team
+    ].copy()
+    if frame.empty:
+        return {"travel_km_7d": 0.0, "circadian_shift_hours": 0.0}
+
+    if cutoff_ts is not None:
+        frame = frame[frame["game_date"] < cutoff_ts.normalize()]
+    if frame.empty:
+        return {"travel_km_7d": 0.0, "circadian_shift_hours": 0.0}
+
+    frame = frame.sort_values("game_date").tail(max(2, int(lookback_games)))
+    venues: list[str] = []
+    for row in frame.itertuples(index=False):
+        home_abbr = str(getattr(row, "home_team_abbreviation", "") or "").upper()
+        away_abbr = str(getattr(row, "away_team_abbreviation", "") or "").upper()
+        venue = home_abbr if home_abbr == team else away_abbr
+        if venue and venue in TEAM_GEO:
+            venues.append(venue)
+
+    if len(venues) < 2:
+        return {"travel_km_7d": 0.0, "circadian_shift_hours": 0.0}
+
+    total_km = 0.0
+    total_tz = 0.0
+    prev = venues[0]
+    for venue in venues[1:]:
+        g1 = TEAM_GEO.get(prev)
+        g2 = TEAM_GEO.get(venue)
+        if g1 is not None and g2 is not None:
+            total_km += _haversine_km(g1["lat"], g1["lon"], g2["lat"], g2["lon"])
+            total_tz += abs(float(g2["tz"]) - float(g1["tz"]))
+        prev = venue
+
+    return {
+        "travel_km_7d": round(float(total_km), 4),
+        "circadian_shift_hours": round(float(total_tz), 4),
+    }
+
+
 def _cutoff_date(cutoff: datetime | None) -> datetime | None:
     if cutoff is None:
         return None
@@ -322,6 +430,9 @@ def _empty_history(league_mean: float) -> dict[str, float]:
         "stat_cv": 0.0,
         "recent_vs_season": 1.0,
         "minutes_trend": 1.0,
+        "minutes_std_10": 0.0,
+        "recent_load_3": 0.0,
+        "role_stability": 0.0,
         "stat_std_5": 0.0,
         "stat_rate_per_min": 0.0,
         "line_vs_mean_ratio": 1.0,
@@ -442,6 +553,11 @@ def compute_history_features(
     minutes_trend = 1.0
     if minutes_mean_10 > 0 and minutes_mean_3 > 0:
         minutes_trend = float(minutes_mean_3 / minutes_mean_10)
+    minutes_std_10 = 0.0
+    if mins.size >= 2:
+        minutes_std_10 = float(mins[-min(10, mins.size) :].std(ddof=0))
+    recent_load_3 = float(mins[-min(3, mins.size) :].sum()) if mins.size > 0 else 0.0
+    role_stability = float(1.0 / (1.0 + max(0.0, minutes_std_10)))
 
     # Stat variance in last 5 games (raw, not normalized).
     stat_std_5 = 0.0
@@ -498,6 +614,9 @@ def compute_history_features(
         "stat_cv": float(stat_cv),
         "recent_vs_season": float(recent_vs_season),
         "minutes_trend": float(minutes_trend),
+        "minutes_std_10": float(minutes_std_10),
+        "recent_load_3": float(recent_load_3),
+        "role_stability": float(role_stability),
         "stat_std_5": float(stat_std_5),
         "stat_rate_per_min": float(stat_rate_per_min),
         "line_vs_mean_ratio": float(line_vs_mean_ratio),

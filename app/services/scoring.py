@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 import logging
 import math
+import os
 import threading
 import time as _time
 from dataclasses import asdict, dataclass
@@ -10,7 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import torch as _torch
 from sqlalchemy import text
@@ -29,6 +30,7 @@ from app.ml.tabdl.infer import (
     infer_over_probs as infer_tabdl_over_probs,
     latest_compatible_checkpoint as latest_compatible_tabdl_checkpoint,
 )
+from app.ml.selection_policy import SelectionPolicy
 from app.ml.xgb.infer import infer_over_probs as infer_xgb_over_probs
 from app.modeling.conformal import ConformalCalibrator
 from app.modeling.db_logs import load_db_game_logs
@@ -47,6 +49,13 @@ from app.ml.stat_mappings import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 # --- Scoring cache ---
 _CACHE_TTL_SECONDS = 300  # 5 min
@@ -91,6 +100,10 @@ class ScoredPick:
     conformal_set_size: int | None
     edge: float
     grade: str
+    p_pick: float = 0.5
+    selection_threshold: float = 0.60
+    selection_margin: float = 0.0
+    policy_version: str = "legacy"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -137,6 +150,7 @@ SHRINK_MAX = 0.25  # low-data picks: 25% pull toward prior
 # Abstain policy: only publish picks with p_pick >= threshold
 # p_pick = max(p_final, 1 - p_final)
 PICK_THRESHOLD = 0.60
+SELECTION_POLICY_PATH = os.getenv("SELECTION_POLICY_PATH", "models/selection_policy.json")
 
 # Minimum edge score for a pick to be publishable
 MIN_EDGE = 5.0
@@ -215,7 +229,6 @@ def _compute_edge(
     expert_probs: dict[str, float | None],
     conformal_set_size: int | None,
     n_eff: float | None = None,
-    context_prior: float | None = None,
     mu_hat: float | None = None,
     line_score: float | None = None,
     sigma_hat: float | None = None,
@@ -320,6 +333,37 @@ def _compute_edge(
         + conf_bonus
     )
     return round(min(100.0, max(0.0, edge)), 1)
+
+
+def _direction_imbalance_penalty(
+    *,
+    edge: float,
+    prob_over: float,
+    dominant_dir: str,
+    dominant_pct: float,
+    threshold: float,
+    context_prior: float | None,
+    max_penalty: float = 12.0,
+) -> float:
+    """Apply deterministic edge demotion for dominant-direction picks near context prior."""
+    if dominant_pct <= threshold:
+        return edge
+
+    pick_dir = "OVER" if prob_over >= 0.5 else "UNDER"
+    if pick_dir != dominant_dir:
+        return edge
+
+    # Scale penalty from 0..max_penalty as dominance moves from threshold..100%.
+    dominance_scale = (dominant_pct - threshold) / (1.0 - threshold)
+    dominance_scale = max(0.0, min(1.0, dominance_scale))
+
+    prior = 0.5 if context_prior is None else float(context_prior)
+    distance_to_prior = abs(float(prob_over) - prior)
+    # Picks close to prior carry less differentiated signal and are demoted more.
+    prior_alignment = 1.0 - min(1.0, distance_to_prior / 0.20)
+
+    penalty = round(max_penalty * dominance_scale * prior_alignment, 1)
+    return round(max(0.0, float(edge) - penalty), 1)
 
 
 def _grade_from_edge(edge: float) -> str:
@@ -602,6 +646,308 @@ def _to_projection(row: object) -> Projection:
     )
 
 
+def _latest_logged_snapshot_id(engine: Engine) -> str | None:
+    with engine.connect() as conn:
+        return conn.execute(
+            text(
+                """
+                select pp.snapshot_id
+                from projection_predictions pp
+                where pp.snapshot_id is not null
+                order by coalesce(pp.decision_time, pp.created_at) desc, pp.created_at desc
+                limit 1
+                """
+            )
+        ).scalar()
+
+
+def _logged_snapshot_id_for_game_date(engine: Engine, game_date: str) -> str | None:
+    with engine.connect() as conn:
+        return conn.execute(
+            text(
+                """
+                select pp.snapshot_id
+                from projection_predictions pp
+                join projection_features pf
+                  on pf.snapshot_id = pp.snapshot_id
+                 and pf.projection_id = pp.projection_id
+                where pp.snapshot_id is not null
+                  and (pf.start_time at time zone 'America/New_York')::date = :game_date
+                order by coalesce(pp.decision_time, pp.created_at) desc, pp.created_at desc
+                limit 1
+                """
+            ),
+            {"game_date": game_date},
+        ).scalar()
+
+
+def _safe_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value_f):
+        return None
+    return value_f
+
+
+def _details_dict(raw: object) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text_value = raw.strip()
+        if not text_value:
+            return {}
+        try:
+            parsed = json.loads(text_value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def score_logged_predictions(
+    engine: Engine,
+    *,
+    snapshot_id: str | None = None,
+    game_date: str | None = None,
+    top: int = 50,
+    rank: str = "risk_adj",
+    include_non_today: bool = False,
+) -> ScoringResult:
+    resolved_snapshot = snapshot_id
+    if not resolved_snapshot and game_date:
+        resolved_snapshot = _logged_snapshot_id_for_game_date(engine, str(game_date))
+    resolved_snapshot = resolved_snapshot or _latest_logged_snapshot_id(engine)
+    if not resolved_snapshot:
+        return ScoringResult(
+            snapshot_id="",
+            scored_at=datetime.now(timezone.utc).isoformat(),
+            total_scored=0,
+            picks=[],
+        )
+
+    query = text(
+        """
+        with latest as (
+            select distinct on (pp.projection_id)
+                pp.projection_id,
+                pp.player_id,
+                pp.game_id,
+                pp.stat_type,
+                pp.line_score,
+                pp.pick,
+                pp.prob_over,
+                pp.confidence,
+                pp.rank_score,
+                pp.p_forecast_cal,
+                pp.p_nn,
+                pp.p_tabdl,
+                pp.p_lr,
+                pp.p_xgb,
+                pp.p_lgbm,
+                pp.n_eff,
+                pp.mean as mu_hat,
+                pp.std as sigma_hat,
+                pp.details,
+                coalesce(pp.decision_time, pp.created_at) as scored_at
+            from projection_predictions pp
+            where pp.snapshot_id = :snapshot_id
+            order by
+                pp.projection_id,
+                coalesce(pp.decision_time, pp.created_at) desc,
+                pp.created_at desc,
+                pp.id desc
+        )
+        select
+            l.*,
+            coalesce(pl.display_name, '') as player_name,
+            coalesce(
+                nullif(pl.image_url, ''),
+                nullif(p.attributes->>'custom_image', '')
+            ) as player_image_url
+        from latest l
+        left join players pl
+            on pl.id = l.player_id
+        left join projections p
+            on p.snapshot_id = :snapshot_id
+           and p.projection_id = l.projection_id
+        left join projection_features pf
+            on pf.snapshot_id = :snapshot_id
+           and pf.projection_id = l.projection_id
+        where (:include_non_today = true or coalesce(pf.today, true) = true)
+        """
+    )
+    frame = pd.read_sql(
+        query,
+        engine,
+        params={
+            "snapshot_id": str(resolved_snapshot),
+            "include_non_today": bool(include_non_today),
+        },
+    )
+    if frame.empty:
+        return ScoringResult(
+            snapshot_id=str(resolved_snapshot),
+            scored_at=datetime.now(timezone.utc).isoformat(),
+            total_scored=0,
+            picks=[],
+        )
+
+    if rank == "confidence":
+        frame = frame.sort_values(
+            by=["confidence", "rank_score"],
+            ascending=[False, False],
+            na_position="last",
+        )
+    else:
+        frame = frame.sort_values(
+            by=["rank_score", "confidence"],
+            ascending=[False, False],
+            na_position="last",
+        )
+
+    scored_at_ts = pd.to_datetime(frame.get("scored_at"), errors="coerce", utc=True)
+    if getattr(scored_at_ts, "empty", True):
+        scored_at = datetime.now(timezone.utc).isoformat()
+    else:
+        max_ts = scored_at_ts.max()
+        scored_at = (
+            max_ts.to_pydatetime().isoformat()
+            if pd.notna(max_ts)
+            else datetime.now(timezone.utc).isoformat()
+        )
+
+    top_frame = frame.head(int(top))
+    picks: list[ScoredPick] = []
+    for row in top_frame.itertuples(index=False):
+        details = _details_dict(getattr(row, "details", None))
+
+        prob_over = _safe_float(getattr(row, "prob_over", None))
+        if prob_over is None:
+            prob_over = _safe_float(details.get("p_final"))
+        if prob_over is None:
+            prob_over = 0.5
+        prob_over = max(0.0, min(1.0, prob_over))
+
+        confidence = _safe_float(getattr(row, "confidence", None))
+        if confidence is None:
+            confidence = float(confidence_from_probability(prob_over))
+        confidence = max(0.0, min(1.0, confidence))
+
+        rank_score = _safe_float(getattr(row, "rank_score", None))
+        if rank_score is None:
+            rank_score = confidence
+
+        edge = _safe_float(details.get("edge"))
+        if edge is None:
+            if rank_score <= 1.5:
+                edge = rank_score * 100.0
+            else:
+                edge = rank_score
+        edge = round(max(0.0, min(100.0, float(edge))), 1)
+
+        grade_raw = details.get("grade")
+        grade = (
+            str(grade_raw).strip().upper()
+            if isinstance(grade_raw, str) and grade_raw.strip()
+            else _grade_from_edge(edge)
+        )
+
+        conformal_set_size = None
+        conformal_raw = details.get("conformal_set_size")
+        if conformal_raw is not None:
+            try:
+                conformal_set_size = int(conformal_raw)
+            except (TypeError, ValueError):
+                conformal_set_size = None
+
+        calibration_status = (
+            str(details.get("calibration_status") or "logged").strip() or "logged"
+        )
+        p_pick = _safe_float(getattr(row, "p_pick", None))
+        if p_pick is None:
+            p_pick = _safe_float(details.get("p_pick"))
+        if p_pick is None:
+            p_pick = max(prob_over, 1.0 - prob_over)
+        p_pick = max(0.0, min(1.0, p_pick))
+
+        selection_threshold = _safe_float(getattr(row, "selection_threshold", None))
+        if selection_threshold is None:
+            selection_threshold = _safe_float(details.get("selection_threshold"))
+        if selection_threshold is None:
+            selection_threshold = PICK_THRESHOLD
+
+        selection_margin = _safe_float(getattr(row, "selection_margin", None))
+        if selection_margin is None:
+            selection_margin = _safe_float(details.get("selection_margin"))
+        if selection_margin is None:
+            selection_margin = p_pick - selection_threshold
+
+        policy_version = str(
+            details.get("policy_version")
+            or getattr(row, "policy_version", None)
+            or "legacy"
+        ).strip() or "legacy"
+
+        pick = str(getattr(row, "pick", "") or "").strip().upper()
+        if pick not in {"OVER", "UNDER"}:
+            pick = "OVER" if prob_over >= 0.5 else "UNDER"
+
+        player_name = (
+            str(getattr(row, "player_name", "") or "").strip()
+            or str(details.get("player_name") or "").strip()
+            or "Unknown"
+        )
+
+        picks.append(
+            ScoredPick(
+                projection_id=str(getattr(row, "projection_id", "") or ""),
+                player_name=player_name,
+                player_image_url=_optional_str(getattr(row, "player_image_url", None)),
+                player_id=str(getattr(row, "player_id", "") or ""),
+                game_id=_optional_str(getattr(row, "game_id", None)),
+                stat_type=str(getattr(row, "stat_type", "") or ""),
+                line_score=float(_safe_float(getattr(row, "line_score", None)) or 0.0),
+                pick=pick,
+                prob_over=prob_over,
+                confidence=confidence,
+                rank_score=float(rank_score),
+                p_forecast_cal=_safe_float(getattr(row, "p_forecast_cal", None)),
+                p_nn=_safe_float(getattr(row, "p_nn", None)),
+                p_tabdl=_safe_float(getattr(row, "p_tabdl", None)),
+                p_lr=_safe_float(getattr(row, "p_lr", None)),
+                p_xgb=_safe_float(getattr(row, "p_xgb", None)),
+                p_lgbm=_safe_float(getattr(row, "p_lgbm", None)),
+                p_meta=_safe_float(details.get("p_meta")),
+                mu_hat=_safe_float(getattr(row, "mu_hat", None)),
+                sigma_hat=_safe_float(getattr(row, "sigma_hat", None)),
+                calibration_status=calibration_status,
+                n_eff=_safe_float(getattr(row, "n_eff", None)),
+                conformal_set_size=conformal_set_size,
+                edge=edge,
+                grade=grade,
+                p_pick=p_pick,
+                selection_threshold=float(selection_threshold),
+                selection_margin=float(selection_margin),
+                policy_version=policy_version,
+            )
+        )
+
+    return ScoringResult(
+        snapshot_id=str(resolved_snapshot),
+        scored_at=scored_at,
+        total_scored=int(len(frame)),
+        picks=picks,
+        publishable_count=int(len(picks)),
+        fallback_used=False,
+        fallback_reason=None,
+    )
+
+
 def score_ensemble(
     engine: Engine,
     *,
@@ -616,6 +962,7 @@ def score_ensemble(
     include_non_today: bool = False,
     force: bool = False,
 ) -> ScoringResult:
+    light_mode = _env_truthy("SCORING_LIGHT_MODE", False)
     resolved_snapshot = snapshot_id
     if not resolved_snapshot and game_date:
         resolved_snapshot = _snapshot_id_for_game_date(engine, str(game_date))
@@ -729,24 +1076,27 @@ def score_ensemble(
 
     # Stacking meta-learner (optional)
     _stacking_model = None
-    try:
-        from app.ml.stacking import predict_stacking
+    if light_mode:
+        logger.info("Stacking meta-model disabled in SCORING_LIGHT_MODE.")
+    else:
+        try:
+            from app.ml.stacking import predict_stacking
 
-        if _use_db:
-            _stacking_path = load_latest_artifact_as_file(
-                engine, "stacking_meta", suffix=".joblib"
+            if _use_db:
+                _stacking_path = load_latest_artifact_as_file(
+                    engine, "stacking_meta", suffix=".joblib"
+                )
+            else:
+                _stacking_path = latest_compatible_joblib_path(
+                    models_path, "stacking_meta_*.joblib"
+                )
+            if _stacking_path and _stacking_path.exists():
+                _stacking_payload = load_joblib_artifact(str(_stacking_path))
+                _stacking_model = _stacking_payload.get("model")
+        except Exception:
+            logger.warning(
+                "Stacking meta-model not available, using logit average fallback"
             )
-        else:
-            _stacking_path = latest_compatible_joblib_path(
-                models_path, "stacking_meta_*.joblib"
-            )
-        if _stacking_path and _stacking_path.exists():
-            _stacking_payload = load_joblib_artifact(str(_stacking_path))
-            _stacking_model = _stacking_payload.get("model")
-    except Exception:
-        logger.warning(
-            "Stacking meta-model not available, using logit average fallback"
-        )
 
     logger.info(
         "Model paths resolved (configured_source=%s effective_db=%s): "
@@ -760,6 +1110,15 @@ def score_ensemble(
         lgbm_path,
         _stacking_model is not None,
     )
+
+    if light_mode:
+        logger.warning(
+            "SCORING_LIGHT_MODE enabled: disabling memory-heavy experts "
+            "(forecast, nn, tabdl, stacking)."
+        )
+        nn_path = None
+        tabdl_path = None
+        _stacking_model = None
 
     # Load conformal calibrators keyed by expert so each calibrator is applied
     # to the distribution it was calibrated on.
@@ -807,41 +1166,44 @@ def score_ensemble(
     if calibration_path:
         calibrator = ForecastDistributionCalibrator.load(calibration_path)
 
-    # Forecast expert
-    logs = load_db_game_logs(engine)
-    params = ForecastParams()
-    needed_stat_types = sorted(
-        {str(v) for v in frame["stat_type"].fillna("").tolist() if str(v)}
-    )
-    priors = LeaguePriors(
-        logs, stat_types=needed_stat_types, minutes_prior=params.minutes_prior
-    )
-    forecast = StatForecastPredictor(
-        logs,
-        min_games=min_games,
-        params=params,
-        league_priors=priors,
-        calibrator=calibrator,
-    )
-
     forecast_map: dict[str, dict[str, object]] = {}
-    for row in frame.itertuples(index=False):
-        proj = _to_projection(row)
-        pred = forecast.predict(proj)
-        if pred is None:
-            continue
-        p_fc = _safe_prob(pred.prob_over)
-        if p_fc is None:
-            continue
-        details = pred.details or {}
-        forecast_map[proj.projection_id] = {
-            "p_forecast_cal": p_fc,
-            "mu_hat": float(details.get("raw_mean", pred.mean or 0.0)),
-            "sigma_hat": float(details.get("raw_std", pred.std or 0.0)),
-            "n_eff": details.get("n_eff"),
-            "calibration_status": str(details.get("calibration_status") or "raw"),
-            "model_version": pred.model_version,
-        }
+    if light_mode:
+        logger.info("Forecast expert skipped in SCORING_LIGHT_MODE.")
+    else:
+        # Forecast expert
+        logs = load_db_game_logs(engine)
+        params = ForecastParams()
+        needed_stat_types = sorted(
+            {str(v) for v in frame["stat_type"].fillna("").tolist() if str(v)}
+        )
+        priors = LeaguePriors(
+            logs, stat_types=needed_stat_types, minutes_prior=params.minutes_prior
+        )
+        forecast = StatForecastPredictor(
+            logs,
+            min_games=min_games,
+            params=params,
+            league_priors=priors,
+            calibrator=calibrator,
+        )
+
+        for row in frame.itertuples(index=False):
+            proj = _to_projection(row)
+            pred = forecast.predict(proj)
+            if pred is None:
+                continue
+            p_fc = _safe_prob(pred.prob_over)
+            if p_fc is None:
+                continue
+            details = pred.details or {}
+            forecast_map[proj.projection_id] = {
+                "p_forecast_cal": p_fc,
+                "mu_hat": float(details.get("raw_mean", pred.mean or 0.0)),
+                "sigma_hat": float(details.get("raw_std", pred.std or 0.0)),
+                "n_eff": details.get("n_eff"),
+                "calibration_status": str(details.get("calibration_status") or "raw"),
+                "model_version": pred.model_version,
+            }
 
     # NN expert (optional)
     p_nn: dict[str, float] = {}
@@ -999,9 +1361,18 @@ def score_ensemble(
             if _sc_path
             else StatTypeCalibrator.load()
         )
+        _sp_path = load_latest_artifact_as_file(
+            engine, "selection_policy", suffix=".json"
+        )
+        _selection_policy = (
+            SelectionPolicy.load(str(_sp_path))
+            if _sp_path
+            else SelectionPolicy.load(SELECTION_POLICY_PATH)
+        )
     else:
         _context_priors = load_context_priors()
         _stat_calibrator = StatTypeCalibrator.load()
+        _selection_policy = SelectionPolicy.load(SELECTION_POLICY_PATH)
 
     # --- Stat-type expert routing ---
     # For stat types where one expert clearly outperforms the ensemble,
@@ -1038,9 +1409,10 @@ def score_ensemble(
     _n_ctx_stats = len(_context_priors.get("stat_type_priors", {}))
     logger.info(
         "Scoring artifact status: stat_calibrator=%d stat-types, "
-        "context_priors=%d stat-types",
+        "context_priors=%d stat-types, selection_policy=%s",
         _n_stat_cals,
         _n_ctx_stats,
+        _selection_policy.version,
     )
     if _n_stat_cals == 0:
         logger.warning(
@@ -1082,7 +1454,6 @@ def score_ensemble(
         # Clip to prevent logit-space outlier domination (e.g. TabDL at 8%)
         expert_probs = _clip_expert_probs(expert_probs)
 
-        is_live = bool(getattr(row, "is_live", False) or False)
         n_eff = f.get("n_eff")
         try:
             n_eff_val = float(n_eff) if n_eff is not None else None
@@ -1139,6 +1510,10 @@ def score_ensemble(
 
         conformal_size = _conformal_set_size(conformal_by_expert, expert_probs)
         p_pick = max(p_final, 1.0 - p_final)
+        selection_threshold = float(
+            _selection_policy.threshold_for(stat_type, conformal_size)
+        )
+        selection_margin = float(p_pick - selection_threshold)
         # Expert diversity: require at least 1 expert on each side of 0.5.
         # If all experts agree on one direction, the model is just echoing
         # the base rate, not providing a differentiated signal.
@@ -1155,7 +1530,7 @@ def score_ensemble(
             _forecast_edge_ok = abs(_mu_hat_val - _line_score) <= MAX_FORECAST_EDGE
         # Publishable: meets all quality gates
         is_publishable = bool(
-            p_pick >= PICK_THRESHOLD
+            selection_margin >= 0.0
             and conformal_size != 2
             and not _is_prior_only
             and _has_diversity
@@ -1163,7 +1538,7 @@ def score_ensemble(
             and _forecast_edge_ok
         )
         reject_reasons: list[str] = []
-        if p_pick < PICK_THRESHOLD:
+        if selection_margin < 0.0:
             reject_reasons.append("low_pick_confidence")
         if conformal_size == 2:
             reject_reasons.append("conformal_ambiguous")
@@ -1205,6 +1580,9 @@ def score_ensemble(
                 "n_eff": n_eff_val,
                 "conformal_set_size": conformal_size,
                 "p_pick": p_pick,
+                "selection_threshold": selection_threshold,
+                "selection_margin": selection_margin,
+                "policy_version": _selection_policy.version,
                 "is_prior_only": _is_prior_only,
                 "has_diversity": _has_diversity,
                 "has_min_neff": _has_min_neff,
@@ -1218,7 +1596,6 @@ def score_ensemble(
             expert_probs,
             item["conformal_set_size"],
             n_eff=n_eff_val,
-            context_prior=_ctx_prior,
             mu_hat=_mu_hat_val,
             line_score=_line_score,
             sigma_hat=_sigma_hat_val,
@@ -1257,9 +1634,8 @@ def score_ensemble(
 
     # --- Direction balance guardrail ---
     # When >75% of picks lean one direction, apply a soft correction:
-    # re-score with a nudged context prior to reduce the imbalance.
+    # demote dominant-direction picks that sit near the context prior.
     _IMBALANCE_THRESHOLD = 0.75  # trigger correction above this ratio
-    _IMBALANCE_PRIOR_NUDGE = 0.50  # push context prior toward neutral
     if top_picks:
         n_over = sum(1 for item in top_picks if item["pick"] == "OVER")
         n_under = len(top_picks) - n_over
@@ -1289,7 +1665,6 @@ def score_ensemble(
                 if item["pick"] == dominant_dir:
                     st = item["stat_type"]
                     ls = item["line_score"]
-                    cp = get_context_prior(_context_priors, stat_type=st, line_score=ls)
                     # Penalize more aggressively during imbalance
                     item["edge"] = _compute_edge(
                         item["prob_over"],
@@ -1306,10 +1681,21 @@ def score_ensemble(
                         },
                         item["conformal_set_size"],
                         n_eff=item["n_eff"],
-                        context_prior=_IMBALANCE_PRIOR_NUDGE,
                         mu_hat=item.get("mu_hat"),
                         line_score=item.get("line_score"),
                         sigma_hat=item.get("sigma_hat"),
+                    )
+                    item["edge"] = _direction_imbalance_penalty(
+                        edge=item["edge"],
+                        prob_over=item["prob_over"],
+                        dominant_dir=dominant_dir,
+                        dominant_pct=dominant_pct,
+                        threshold=_IMBALANCE_THRESHOLD,
+                        context_prior=get_context_prior(
+                            _context_priors,
+                            stat_type=st,
+                            line_score=ls,
+                        ),
                     )
                     item["grade"] = _grade_from_edge(item["edge"])
                     if item["edge"] < MIN_EDGE:
@@ -1371,6 +1757,10 @@ def score_ensemble(
             conformal_set_size=item.get("conformal_set_size"),
             edge=item["edge"],
             grade=item["grade"],
+            p_pick=float(item.get("p_pick") or 0.5),
+            selection_threshold=float(item.get("selection_threshold") or 0.60),
+            selection_margin=float(item.get("selection_margin") or 0.0),
+            policy_version=str(item.get("policy_version") or "legacy"),
         )
         for item in top_picks
     ]

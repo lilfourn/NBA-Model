@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from urllib.parse import quote
 
 from app.clients.base import CrawlerClient

@@ -11,7 +11,6 @@ Serialization uses simple dicts so artifacts are sklearn-version-independent.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 

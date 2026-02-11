@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import sys
 from threading import Lock
-from datetime import date, datetime, timedelta
+from datetime import date
 from pathlib import Path
 from time import monotonic, sleep
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback } from "react";
 import { usePolling } from "@/lib/use-polling";
 import {
   Card,
@@ -84,7 +85,8 @@ function InversionRow({
 }
 
 export function ModelHealthCard() {
-  const { data, loading } = usePolling(() => fetchModelHealth(), 120_000);
+  const fetcher = useCallback(() => fetchModelHealth(), []);
+  const { data, loading, error } = usePolling(fetcher, 120_000);
 
   if (loading) {
     return (
@@ -112,7 +114,7 @@ export function ModelHealthCard() {
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            No model health data available.
+            {error?.message || "No model health data available."}
           </p>
         </CardContent>
       </Card>
@@ -149,6 +151,11 @@ export function ModelHealthCard() {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {error && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-500">
+            Showing last successful model-health snapshot. Latest refresh failed: {error.message}
+          </div>
+        )}
         {/* Tier metrics */}
         <div className="grid gap-3 sm:grid-cols-3">
           <TierPill

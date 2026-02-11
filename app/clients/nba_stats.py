@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import time
 from datetime import datetime
 from typing import Any
 
-from curl_cffi import requests as curl_requests
 
 from app.clients.base import CrawlerClient
 from app.clients.shared import get_shared_cache

@@ -1,11 +1,9 @@
 """Tests for Thompson Sampling ensemble."""
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler

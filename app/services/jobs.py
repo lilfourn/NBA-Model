@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
@@ -13,6 +16,13 @@ from uuid import uuid4
 
 from app.services.scoring import invalidate_scoring_cache
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MODAL_BIN = os.getenv("MODAL_BIN", "").strip()
+MODAL_APP_REF = os.getenv("MODAL_APP_REF", str(PROJECT_ROOT / "modal_app.py"))
+JOB_OUTPUT_MAX_CHARS = 5000
+
+
 class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -21,45 +31,49 @@ class JobStatus(str, Enum):
 
 
 class JobType(str, Enum):
-    TRAIN_BASELINE = "train_baseline"
-    TRAIN_NN = "train_nn"
-    TRAIN_ENSEMBLE = "train_ensemble"
-    BUILD_BACKTEST = "build_backtest"
-    CALIBRATE = "calibrate"
+    COLLECT = "collect"
+    TRAIN = "train"
 
 
-JOB_COMMANDS: dict[JobType, list[str]] = {
-    JobType.TRAIN_BASELINE: [
-        sys.executable, "-m", "scripts.ml.train_baseline_model",
-    ],
-    JobType.TRAIN_NN: [
-        sys.executable, "-m", "scripts.ml.train_nn_model",
-    ],
-    JobType.TRAIN_ENSEMBLE: [
-        sys.executable, "-m", "scripts.ml.train_online_ensemble",
-        "--source", "db",
-        "--days-back", "90",
-        "--log-path", "data/monitoring/prediction_log.csv",
-        "--out", "models/ensemble_weights.json",
-    ],
-    JobType.BUILD_BACKTEST: [
-        sys.executable, "-m", "scripts.calibration.build_forecast_backtest_dataset",
-        "--output", "data/calibration/forecast_backtest.csv",
-    ],
-    JobType.CALIBRATE: [
-        sys.executable, "-m", "scripts.calibration.calibrate_forecast_distribution",
-        "--input", "data/calibration/forecast_backtest.csv",
-        "--output", "data/calibration/forecast_calibration.json",
-    ],
+_MODAL_ENTRYPOINTS: dict[JobType, str] = {
+    JobType.COLLECT: "collect_now",
+    JobType.TRAIN: "train_now",
+}
+
+JOB_TIMEOUT_SECONDS: dict[JobType, int] = {
+    JobType.COLLECT: int(os.getenv("JOB_TIMEOUT_COLLECT_SECONDS", "3600")),
+    JobType.TRAIN: int(os.getenv("JOB_TIMEOUT_TRAIN_SECONDS", "14400")),
 }
 
 JOB_LABELS: dict[JobType, str] = {
-    JobType.TRAIN_BASELINE: "Train Baseline (LR)",
-    JobType.TRAIN_NN: "Train Neural Network",
-    JobType.TRAIN_ENSEMBLE: "Train Ensemble Weights",
-    JobType.BUILD_BACKTEST: "Build Backtest Dataset",
-    JobType.CALIBRATE: "Calibrate Forecast",
+    JobType.COLLECT: "Collect Pipeline (Modal)",
+    JobType.TRAIN: "Train Pipeline (Modal)",
 }
+
+
+def _modal_run_command(job_type: JobType) -> list[str]:
+    entrypoint = _MODAL_ENTRYPOINTS[job_type]
+    target = f"{MODAL_APP_REF}::{entrypoint}"
+    if MODAL_BIN:
+        return [MODAL_BIN, "run", target]
+    return [sys.executable, "-m", "modal", "run", target]
+
+
+def _ensure_modal_cli_available() -> None:
+    if MODAL_BIN:
+        if shutil.which(MODAL_BIN):
+            return
+        raise RuntimeError(
+            f"Modal CLI '{MODAL_BIN}' not found in PATH. "
+            "Install modal and provide MODAL_TOKEN_ID/MODAL_TOKEN_SECRET in Railway."
+        )
+    try:
+        import modal  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Python package 'modal' is not installed in this runtime. "
+            "Install it in the API image and provide MODAL_TOKEN_ID/MODAL_TOKEN_SECRET in Railway."
+        ) from exc
 
 
 @dataclass
@@ -82,7 +96,7 @@ class Job:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_seconds": self.duration_seconds,
-            "output": self.output[-5000:] if self.output else "",
+            "output": self.output[-JOB_OUTPUT_MAX_CHARS:] if self.output else "",
             "error": self.error,
         }
 
@@ -114,6 +128,7 @@ class JobManager:
             )
 
     def start_job(self, job_type: JobType) -> dict[str, Any]:
+        _ensure_modal_cli_available()
         if self.is_running(job_type):
             raise ValueError(f"{JOB_LABELS[job_type]} is already running")
 
@@ -137,7 +152,8 @@ class JobManager:
             job.status = JobStatus.RUNNING
             job.started_at = datetime.now(timezone.utc).isoformat()
 
-        cmd = JOB_COMMANDS[job.job_type]
+        cmd = _modal_run_command(job.job_type)
+        timeout_seconds = JOB_TIMEOUT_SECONDS[job.job_type]
         start = time.monotonic()
 
         try:
@@ -145,12 +161,16 @@ class JobManager:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=1800,  # 30 min max
+                timeout=timeout_seconds,
+                cwd=str(PROJECT_ROOT),
             )
             elapsed = time.monotonic() - start
 
             with self._lock:
-                job.output = (result.stdout or "") + (result.stderr or "")
+                job.output = (
+                    f"$ {' '.join(cmd)}\n"
+                    f"{result.stdout or ''}{result.stderr or ''}"
+                )
                 job.duration_seconds = round(elapsed, 2)
                 job.finished_at = datetime.now(timezone.utc).isoformat()
 
@@ -161,10 +181,13 @@ class JobManager:
                     job.status = JobStatus.FAILED
                     job.error = f"Exit code {result.returncode}"
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             with self._lock:
                 job.status = JobStatus.FAILED
-                job.error = "Timed out after 30 minutes"
+                out = (exc.stdout or "") + (exc.stderr or "")
+                if out:
+                    job.output = f"$ {' '.join(cmd)}\n{out}"
+                job.error = f"Timed out after {timeout_seconds} seconds"
                 job.finished_at = datetime.now(timezone.utc).isoformat()
                 job.duration_seconds = round(time.monotonic() - start, 2)
 

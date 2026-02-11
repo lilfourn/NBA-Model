@@ -22,11 +22,9 @@ import pandas as pd  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.db.engine import get_engine  # noqa: E402
-from app.ml.artifacts import load_joblib_artifact  # noqa: E402
 from app.ml.meta_learner import infer_meta_learner  # noqa: E402
 from app.modeling.gating_model import GatingModel, build_context_features  # noqa: E402
 from app.modeling.hybrid_ensemble import HybridEnsembleCombiner  # noqa: E402
-from app.modeling.online_ensemble import ContextualHedgeEnsembler  # noqa: E402
 from app.modeling.thompson_ensemble import ThompsonSamplingEnsembler  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
 

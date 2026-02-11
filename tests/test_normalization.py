@@ -1,7 +1,6 @@
 """Tests for unified name normalization, team abbreviation normalization, and type coercion."""
 from __future__ import annotations
 
-import math
 from datetime import date, datetime, timezone
 from decimal import Decimal
 

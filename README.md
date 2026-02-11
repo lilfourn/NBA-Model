@@ -9,7 +9,22 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Then visit:
+By default this starts the frontend only on:
+- http://localhost:3000
+
+The frontend API target defaults to:
+- `https://nba-model-production.up.railway.app`
+
+For Railway production (Modal does heavy scoring, API only reads picks), set:
+- `PICKS_SOURCE=modal_db`
+
+To run a local API container as well:
+
+```bash
+docker compose --profile local-api up --build
+```
+
+Then local API endpoints are available at:
 - http://localhost:8000/
 - http://localhost:8000/health
 - http://localhost:8000/metrics/line-movement
@@ -182,7 +197,7 @@ python -m scripts.prizepicks.load_prizepicks_snapshot
 
 ## Cron (Every 3 Hours)
 
-Add a cron entry on the host to run the collector in Docker:
+Add a cron entry on the host to trigger the Modal collect pipeline:
 
 ```bash
 0 */3 * * * /Users/lukesmac/nba-stats-project/scripts/cron_collect.sh
@@ -194,9 +209,11 @@ Daily training run (includes NBA stats refresh):
 0 14 * * * /Users/lukesmac/nba-stats-project/scripts/cron_train.sh
 ```
 
-`cron_collect.sh` records ensemble predictions into Postgres (`projection_predictions`) every collection run.
+`cron_collect.sh` now calls `modal run modal_app.py::collect_now`.
 
-`cron_train.sh` resolves stored prediction outcomes into Postgres after NBA stats ingestion, then retrains ensemble weights from resolved DB outcomes (`--source db`).
+`cron_train.sh` now calls `modal run modal_app.py::train_now`.
+
+Both scripts are thin wrappers so local cron no longer runs Docker jobs.
 
 Create the log directory once:
 
@@ -257,6 +274,12 @@ If you prefer `NEON_DATABASE_URL`, `modal_app.py` maps it to `DATABASE_URL` auto
 - `verify-full`
 
 Override only if absolutely necessary by setting `MODAL_ENFORCE_DB_SSLMODE=0`.
+
+If you trigger jobs from the Railway API (`/api/jobs`), set these Railway env vars:
+
+- `MODAL_TOKEN_ID`
+- `MODAL_TOKEN_SECRET`
+- optional: `MODAL_APP_REF=/app/modal_app.py`
 
 ### 2) Deploy Modal App
 

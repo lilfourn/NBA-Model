@@ -7,23 +7,41 @@ from app.services.jobs import JobType, job_manager
 
 router = APIRouter()
 
+LEGACY_JOB_TYPE_ALIASES: dict[str, str] = {
+    "train_baseline": JobType.TRAIN.value,
+    "train_nn": JobType.TRAIN.value,
+    "train_ensemble": JobType.TRAIN.value,
+    "build_backtest": JobType.TRAIN.value,
+    "calibrate": JobType.TRAIN.value,
+    "collect_now": JobType.COLLECT.value,
+    "train_now": JobType.TRAIN.value,
+}
+
 
 class StartJobRequest(BaseModel):
     job_type: str
 
 
+def _parse_job_type(raw_job_type: str) -> JobType:
+    normalized = (raw_job_type or "").strip().lower()
+    mapped = LEGACY_JOB_TYPE_ALIASES.get(normalized, normalized)
+    return JobType(mapped)
+
+
 @router.post("/jobs", tags=["jobs"])
 def start_job(req: StartJobRequest) -> dict:
     try:
-        jt = JobType(req.job_type)
+        jt = _parse_job_type(req.job_type)
     except ValueError:
-        valid = [t.value for t in JobType]
+        valid = sorted({*LEGACY_JOB_TYPE_ALIASES.keys(), *(t.value for t in JobType)})
         raise HTTPException(status_code=400, detail=f"Invalid job_type. Valid: {valid}")
 
     try:
         return job_manager.start_job(jt)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 @router.get("/jobs", tags=["jobs"])

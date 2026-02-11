@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db.engine import get_engine  # noqa: E402
+from app.ml.selection_policy import SelectionPolicy  # noqa: E402
 from scripts.ml.train_baseline_model import load_env  # noqa: E402
 
 EXPERT_COLS = ["p_forecast_cal", "p_nn", "p_tabdl", "p_lr", "p_xgb", "p_lgbm"]
@@ -44,6 +45,8 @@ select
     prob_over as p_final,
     p_raw,
     p_forecast_cal, p_nn, coalesce(p_tabdl::text, details->>'p_tabdl') as p_tabdl, p_lr, p_xgb, p_lgbm,
+    cast(details->>'conformal_set_size' as integer) as conformal_set_size,
+    cast(details->>'selection_threshold' as float) as selection_threshold,
     over_label, is_correct, outcome, stat_type, rank_score, n_eff,
     coalesce(decision_time, resolved_at, created_at) as event_time,
     coalesce(decision_time, created_at) as decision_time,
@@ -66,6 +69,8 @@ select
     id::text as prediction_id,
     p_final, p_raw,
     p_forecast_cal, p_nn, p_tabdl, p_lr, p_xgb, p_lgbm,
+    cast(details->>'conformal_set_size' as integer) as conformal_set_size,
+    cast(details->>'selection_threshold' as float) as selection_threshold,
     over_label, is_correct, outcome, stat_type, rank_score, n_eff,
     coalesce(decision_time, resolved_at, created_at) as event_time,
     decision_time, created_at
@@ -86,7 +91,14 @@ order by coalesce(decision_time, resolved_at, created_at) asc, created_at asc, i
             engine,
             params={"days_back": int(max(1, days_back))},
         )
-    for col in EXPERT_COLS + ["p_final", "p_raw", "n_eff", "rank_score"]:
+    for col in EXPERT_COLS + [
+        "p_final",
+        "p_raw",
+        "n_eff",
+        "rank_score",
+        "conformal_set_size",
+        "selection_threshold",
+    ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     if "is_correct" in df.columns:
@@ -136,7 +148,6 @@ def _load_ensemble_mean_weights(weights_path: str) -> dict[str, float]:
 
 def _inversion_test(probs: np.ndarray, labels: np.ndarray) -> dict:
     """Compute accuracy/logloss for p and 1-p to detect direction mismatch."""
-    eps = 1e-7
     picks_normal = (probs >= 0.5).astype(int)
     picks_inv = (probs < 0.5).astype(int)  # equivalent to (1-p >= 0.5)
     acc_normal = float((picks_normal == labels).mean())
@@ -412,16 +423,12 @@ def _compute_calibration_diagnostics(joined: pd.DataFrame) -> dict:
     return result
 
 
-# Default threshold for "actionable" picks (confidence >= this value)
-ACTIONABLE_CONFIDENCE_THRESHOLD = 0.57
-
-
 def _compute_tier_metrics(joined: pd.DataFrame) -> dict:
     """Compute accuracy metrics for scored vs actionable pick tiers.
 
     Tiers:
       - scored: all resolved rows with p_final
-      - actionable: rows where max(p_final, 1-p_final) >= ACTIONABLE_CONFIDENCE_THRESHOLD
+      - actionable: rows passing adaptive per-stat selection policy threshold
     """
     if (
         joined.empty
@@ -443,8 +450,29 @@ def _compute_tier_metrics(joined: pd.DataFrame) -> dict:
     scored_acc = float(scored_correct.mean())
     scored_n = int(len(valid))
 
-    # Actionable: p_pick >= threshold
-    actionable_mask = p_pick >= ACTIONABLE_CONFIDENCE_THRESHOLD
+    policy = SelectionPolicy.load()
+    stat_types = (
+        valid["stat_type"].astype(str)
+        if "stat_type" in valid.columns
+        else pd.Series(["unknown"] * len(valid), index=valid.index, dtype=str)
+    )
+    conformal_sizes = (
+        valid["conformal_set_size"]
+        if "conformal_set_size" in valid.columns
+        else pd.Series([None] * len(valid), index=valid.index, dtype=object)
+    )
+    thresholds = np.array(
+        [
+            float(policy.threshold_for(str(st), int(cs) if pd.notna(cs) else None))
+            for st, cs in zip(stat_types.tolist(), conformal_sizes.tolist())
+        ],
+        dtype=float,
+    )
+    if "selection_threshold" in valid.columns:
+        explicit = pd.to_numeric(valid["selection_threshold"], errors="coerce").to_numpy(dtype=float)
+        thresholds = np.where(np.isfinite(explicit), explicit, thresholds)
+
+    actionable_mask = p_pick >= thresholds
     actionable_n = int(actionable_mask.sum())
     if actionable_n > 0:
         actionable_acc = float(scored_correct[actionable_mask].mean())
@@ -462,6 +490,55 @@ def _compute_tier_metrics(joined: pd.DataFrame) -> dict:
     placed_acc = float(scored_correct[placed_mask].mean()) if placed_n > 0 else None
     placed_coverage = round(placed_n / scored_n, 4) if scored_n > 0 else 0.0
 
+    # Direction slice for actionable picks.
+    actionable_pick_dirs = np.where(probs >= 0.5, "OVER", "UNDER")
+    actionable_by_direction: dict[str, dict[str, float | int | None]] = {}
+    for direction in ("OVER", "UNDER"):
+        mask = actionable_mask & (actionable_pick_dirs == direction)
+        n_dir = int(mask.sum())
+        actionable_by_direction[direction] = {
+            "n": n_dir,
+            "accuracy": round(float(scored_correct[mask].mean()), 4) if n_dir > 0 else None,
+            "coverage": round(n_dir / scored_n, 4) if scored_n > 0 else 0.0,
+        }
+
+    # Confidence deciles over p_pick (for calibration/slice diagnostics).
+    confidence_deciles: list[dict[str, float | int | str]] = []
+    if scored_n > 0:
+        bins = np.linspace(0.5, 1.0, 11)
+        decile_labels = [
+            "50-55",
+            "55-60",
+            "60-65",
+            "65-70",
+            "70-75",
+            "75-80",
+            "80-85",
+            "85-90",
+            "90-95",
+            "95-100",
+        ]
+        binned = pd.cut(p_pick, bins=bins, include_lowest=True, right=True, labels=decile_labels)
+        diag_df = pd.DataFrame(
+            {
+                "decile": binned.astype(str),
+                "p_pick": p_pick,
+                "correct": scored_correct,
+            }
+        )
+        for decile, grp in diag_df.groupby("decile", observed=False):
+            if decile == "nan" or len(grp) == 0:
+                continue
+            confidence_deciles.append(
+                {
+                    "decile": str(decile),
+                    "n": int(len(grp)),
+                    "coverage": round(len(grp) / scored_n, 4),
+                    "accuracy": round(float(grp["correct"].mean()), 4),
+                    "mean_p_pick": round(float(grp["p_pick"].mean()), 4),
+                }
+            )
+
     return {
         "scored": {"n": scored_n, "accuracy": round(scored_acc, 4)},
         "actionable": {
@@ -469,7 +546,8 @@ def _compute_tier_metrics(joined: pd.DataFrame) -> dict:
             "accuracy": round(actionable_acc, 4)
             if actionable_acc is not None
             else None,
-            "threshold": ACTIONABLE_CONFIDENCE_THRESHOLD,
+            "threshold": round(float(policy.global_threshold), 4),
+            "policy_version": policy.version,
         },
         "placed": {
             "n": placed_n,
@@ -477,6 +555,8 @@ def _compute_tier_metrics(joined: pd.DataFrame) -> dict:
         },
         "coverage": coverage,
         "placed_coverage": placed_coverage,
+        "actionable_by_direction": actionable_by_direction,
+        "confidence_deciles": confidence_deciles,
     }
 
 
@@ -585,7 +665,7 @@ def main() -> None:
         scored = tier.get("scored", {})
         actionable = tier.get("actionable", {})
         coverage = tier.get("coverage", 0)
-        print(f"\nTier breakdown:")
+        print("\nTier breakdown:")
         print(
             f"  Scored:     n={scored.get('n', 0)} acc={scored.get('accuracy', 'N/A')}"
         )

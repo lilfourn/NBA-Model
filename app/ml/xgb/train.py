@@ -9,7 +9,6 @@ from uuid import uuid4
 
 import joblib
 import numpy as np
-import pandas as pd
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from xgboost import XGBClassifier
 

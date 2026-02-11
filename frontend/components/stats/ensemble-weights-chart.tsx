@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { usePolling } from "@/lib/use-polling";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, PieChart, Pie, Cell } from "recharts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,49 +15,11 @@ import {
 } from "@/components/ui/chart";
 import { fetchEnsembleWeights } from "@/lib/api";
 import type { EnsembleContext } from "@/lib/api";
-
-const STAT_ABBREV: Record<string, string> = {
-  "3-PT Made": "3PM",
-  "Assists": "AST",
-  "Blks+Stls": "BLK+STL",
-  "Blocked Shots": "BLK",
-  "FG Attempted": "FGA",
-  "FG Made": "FGM",
-  "Fantasy Score": "FPTS",
-  "Free Throws Attempted": "FTA",
-  "Free Throws Made": "FTM",
-  "Points": "PTS",
-  "Pts+Asts": "PTS+AST",
-  "Pts+Rebs+Asts": "PRA",
-  "Rebounds": "REB",
-  "Rebs+Asts": "REB+AST",
-  "Steals": "STL",
-  "Turnovers": "TO",
-  "Two Pointers Attempted": "2PA",
-  "Two Pointers Made": "2PM",
-};
-
-function abbrevStat(s: string): string {
-  return STAT_ABBREV[s] ?? s;
-}
-
-const EXPERT_META: Record<string, { label: string; color: string }> = {
-  p_forecast_cal: { label: "Forecast", color: "oklch(0.75 0.12 75)" },
-  p_nn: { label: "NN", color: "oklch(0.6 0.04 250)" },
-  p_lr: { label: "LR", color: "oklch(0.55 0.03 180)" },
-  p_xgb: { label: "XGB", color: "oklch(0.65 0.06 60)" },
-  p_lgbm: { label: "LGBM", color: "oklch(0.5 0 0)" },
-};
+import { abbrevStat, EXPERT_META } from "@/lib/constants";
 
 export function EnsembleWeightsChart() {
   const { data, loading } = usePolling(fetchEnsembleWeights);
-  const [selected, setSelected] = useState<EnsembleContext | null>(null);
-
-  useEffect(() => {
-    if (data && data.contexts.length > 0 && !selected) {
-      setSelected(data.contexts[0]);
-    }
-  }, [data, selected]);
+  const [selectedContextKey, setSelectedContextKey] = useState<string>("");
 
   if (loading) {
     return (
@@ -78,6 +40,10 @@ export function EnsembleWeightsChart() {
       </Card>
     );
   }
+
+  const defaultContext = data.contexts[0];
+  const selected: EnsembleContext =
+    data.contexts.find((ctx) => ctx.context_key === selectedContextKey) ?? defaultContext;
 
   // Build chart config dynamically from the experts in the data
   const barConfig: ChartConfig = {};
@@ -106,17 +72,15 @@ export function EnsembleWeightsChart() {
   });
 
   const pieConfig: ChartConfig = {};
-  const pieData = selected
-    ? data.experts.map((e) => {
-        const meta = EXPERT_META[e] ?? { label: e, color: "hsl(var(--chart-5))" };
-        pieConfig[meta.label] = { label: meta.label, color: meta.color };
-        return {
-          name: meta.label,
-          value: +(selected.weights[e] * 100).toFixed(1),
-          fill: meta.color,
-        };
-      })
-    : [];
+  const pieData = data.experts.map((e) => {
+    const meta = EXPERT_META[e] ?? { label: e, color: "hsl(var(--chart-5))" };
+    pieConfig[meta.label] = { label: meta.label, color: meta.color };
+    return {
+      name: meta.label,
+      value: +((selected.weights[e] ?? 0) * 100).toFixed(1),
+      fill: meta.color,
+    };
+  });
 
   return (
     <Card>
@@ -160,11 +124,8 @@ export function EnsembleWeightsChart() {
             </p>
             <select
               className="mb-4 w-full rounded-md border border-border bg-white/[0.04] px-2.5 py-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-              value={selected?.context_key ?? ""}
-              onChange={(e) => {
-                const ctx = data.contexts.find((c) => c.context_key === e.target.value);
-                if (ctx) setSelected(ctx);
-              }}
+              value={selected.context_key}
+              onChange={(e) => setSelectedContextKey(e.target.value)}
             >
               {data.contexts.map((ctx) => (
                 <option key={ctx.context_key} value={ctx.context_key}>

@@ -28,6 +28,9 @@ NUMERIC_COLS = [
     "stat_cv",
     "recent_vs_season",
     "minutes_trend",
+    "minutes_std_10",
+    "recent_load_3",
+    "role_stability",
     "stat_std_5",
     "line_move_pct",
     "line_move_late",
@@ -43,6 +46,14 @@ NUMERIC_COLS = [
     "opp_pace",
     "game_pace",
     "player_usage",
+    "travel_km_7d",
+    "circadian_shift_hours",
+    "market_total_points",
+    "market_spread_abs",
+    "market_total_move",
+    "market_volatility",
+    "market_home_implied_total",
+    "market_away_implied_total",
 ]
 
 

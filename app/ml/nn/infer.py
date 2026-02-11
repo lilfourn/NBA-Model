@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from app.ml.calibration import CalibratedExpert, load_calibrator
+from app.ml.calibration import load_calibrator
 from app.ml.nn.dataset import NNDataset
 from app.ml.nn.features import build_inference_data
 from app.ml.nn.model import GRUAttentionTabularClassifier

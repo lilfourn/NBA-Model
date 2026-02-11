@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
 from typing import Iterable
 
 from app.modeling.name_utils import normalize_player_name
