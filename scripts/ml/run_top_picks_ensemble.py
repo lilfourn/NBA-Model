@@ -769,7 +769,6 @@ def main() -> None:
         _st = item.get("stat_type", "")
         item["is_publishable"] = bool(
             p_pick >= selection_threshold
-            and item.get("conformal_set_size") != 2
             and item.get("edge", 0) >= MIN_EDGE
             and _st not in PRIOR_ONLY_STAT_TYPES
         )

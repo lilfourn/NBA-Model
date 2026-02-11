@@ -950,7 +950,6 @@ def score_logged_predictions(
             is_publishable = bool(
                 selection_margin >= 0.0
                 and edge >= MIN_EDGE
-                and conformal_set_size != 2
             )
         scored_items.append((scored_pick, is_publishable))
 
@@ -1558,7 +1557,6 @@ def score_ensemble(
         # Publishable: meets all quality gates
         is_publishable = bool(
             selection_margin >= 0.0
-            and conformal_size != 2
             and not _is_prior_only
             and _has_diversity
             and _has_min_neff
@@ -1567,8 +1565,6 @@ def score_ensemble(
         reject_reasons: list[str] = []
         if selection_margin < 0.0:
             reject_reasons.append("low_pick_confidence")
-        if conformal_size == 2:
-            reject_reasons.append("conformal_ambiguous")
         if _is_prior_only:
             reject_reasons.append("prior_only_stat")
         if not _has_diversity:
