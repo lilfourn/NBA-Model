@@ -353,3 +353,33 @@ class TestTopPickDiversityGuardrail:
         selected = _select_diverse_top(items, top=10)
         assert len(selected) == 10
         assert all(item["stat_type"] == "Free Throws Made" for item in selected)
+
+    def test_diversity_guardrail_can_return_fewer_to_hold_share_cap(self) -> None:
+        items = []
+        for idx in range(37):
+            items.append(
+                {
+                    "projection_id": f"a{idx}",
+                    "stat_type": "Free Throws Made",
+                    "edge": 80 - idx,
+                }
+            )
+        for idx in range(9):
+            items.append(
+                {
+                    "projection_id": f"b{idx}",
+                    "stat_type": "Two Pointers Attempted",
+                    "edge": 40 - idx,
+                }
+            )
+
+        selected = _select_diverse_top(items, top=50)
+        counts = {
+            "ftm": sum(1 for item in selected if item["stat_type"] == "Free Throws Made"),
+            "tpa": sum(
+                1 for item in selected if item["stat_type"] == "Two Pointers Attempted"
+            ),
+        }
+        assert len(selected) == 30
+        assert counts["ftm"] == 21
+        assert counts["tpa"] == 9

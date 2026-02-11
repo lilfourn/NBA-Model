@@ -470,11 +470,29 @@ def _select_diverse_top(
     top: int,
     max_top_stat_share: float = MAX_TOP_STAT_SHARE,
 ) -> list[Any]:
-    """Apply a soft per-stat cap to avoid one-stat concentration in top picks."""
+    """Apply a per-stat concentration cap to avoid one-stat dominance."""
     if top <= 0 or not items:
         return []
+    capped_top = min(int(top), len(items))
     max_share = max(0.05, min(1.0, float(max_top_stat_share)))
-    stat_cap = max(1, math.ceil(top * max_share))
+    available_by_stat: Counter[str] = Counter(_item_stat_type(item) for item in items)
+    if len(available_by_stat) <= 1:
+        return items[:capped_top]
+
+    target_total = 0
+    stat_cap = 0
+    for candidate_total in range(capped_top, 0, -1):
+        candidate_cap = max(1, math.floor(candidate_total * max_share))
+        capacity = sum(
+            min(int(count), candidate_cap) for count in available_by_stat.values()
+        )
+        if capacity >= candidate_total:
+            target_total = candidate_total
+            stat_cap = candidate_cap
+            break
+    if target_total <= 0:
+        return []
+
     selected: list[Any] = []
     selected_ids: set[str] = set()
     stat_counts: Counter[str] = Counter()
@@ -489,18 +507,8 @@ def _select_diverse_top(
         selected.append(item)
         selected_ids.add(proj_id)
         stat_counts[stat_type] += 1
-        if len(selected) >= top:
+        if len(selected) >= target_total:
             return selected
-
-    if len(selected) < top:
-        for item in items:
-            proj_id = _item_projection_id(item)
-            if proj_id in selected_ids:
-                continue
-            selected.append(item)
-            selected_ids.add(proj_id)
-            if len(selected) >= top:
-                break
     return selected
 
 
