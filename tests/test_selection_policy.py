@@ -81,6 +81,18 @@ def test_threshold_for_applies_conformal_penalty() -> None:
     assert policy.threshold_for("Points", conformal_set_size=1) == 0.58
     assert policy.threshold_for("Points", conformal_set_size=2) == 0.60
     assert policy.threshold_for("Rebounds", conformal_set_size=2) == 0.62
+    assert (
+        policy.threshold_for(
+            "Points", conformal_set_size=2, ambiguous_rate=0.90
+        )
+        == 0.59
+    )
+    assert (
+        policy.threshold_for(
+            "Points", conformal_set_size=2, ambiguous_rate=0.95
+        )
+        == 0.585
+    )
 
 
 def test_fit_selection_policy_handles_empty_input() -> None:

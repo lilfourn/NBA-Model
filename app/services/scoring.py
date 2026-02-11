@@ -21,6 +21,10 @@ from app.core.config import settings
 from app.ml.artifact_store import load_latest_artifact_as_file
 from app.ml.artifacts import load_joblib_artifact, latest_compatible_joblib_path
 from app.ml.infer_baseline import infer_over_probs as infer_lr_over_probs
+from app.ml.inversion_corrections import (
+    load_forecast_stat_inversion_flags,
+    load_inversion_flags,
+)
 from app.ml.lgbm.infer import infer_over_probs as infer_lgbm_over_probs
 from app.ml.nn.infer import (
     infer_over_probs as infer_nn_over_probs,
@@ -1537,9 +1541,38 @@ def score_ensemble(
             "Ensure context_priors artifact is uploaded to DB."
         )
 
-    def _apply_inversions(ep: dict[str, float | None]) -> dict[str, float | None]:
-        """Disabled: systemic inversion signals indicate calibration issues, not individual expert problems."""
-        return ep
+    _inversion_flags = (
+        load_inversion_flags(engine) if _use_db else load_inversion_flags()
+    )
+    _forecast_stat_flip_flags = (
+        load_forecast_stat_inversion_flags(engine)
+        if _use_db
+        else load_forecast_stat_inversion_flags()
+    )
+    if _inversion_flags:
+        logger.info(
+            "Global expert inversion guardrail active for: %s",
+            ", ".join(sorted(_inversion_flags.keys())),
+        )
+    if _forecast_stat_flip_flags:
+        logger.info(
+            "Forecast stat inversion guardrail active for %d stat types.",
+            len(_forecast_stat_flip_flags),
+        )
+
+    def _apply_inversions(
+        ep: dict[str, float | None], *, stat_type: str
+    ) -> tuple[dict[str, float | None], bool]:
+        out = dict(ep)
+        for expert, should_flip in _inversion_flags.items():
+            if not should_flip or expert == "p_forecast_cal":
+                continue
+            if out.get(expert) is not None:
+                out[expert] = 1.0 - float(out[expert])
+        forecast_flip_applied = bool(_forecast_stat_flip_flags.get(stat_type))
+        if forecast_flip_applied and out.get("p_forecast_cal") is not None:
+            out["p_forecast_cal"] = 1.0 - float(out["p_forecast_cal"])
+        return out, forecast_flip_applied
 
     scored: list[dict[str, Any]] = []
     for row in frame.itertuples(index=False):
@@ -1561,7 +1594,9 @@ def score_ensemble(
             "p_xgb": _safe_prob(p_xgb.get(proj_id)),
             "p_lgbm": _safe_prob(p_lgbm.get(proj_id)),
         }
-        expert_probs = _apply_inversions(expert_probs)
+        expert_probs, forecast_flip_applied = _apply_inversions(
+            expert_probs, stat_type=stat_type
+        )
         # Clip to prevent logit-space outlier domination (e.g. TabDL at 8%)
         expert_probs = _clip_expert_probs(expert_probs)
 
@@ -1699,6 +1734,7 @@ def score_ensemble(
                 "policy_version": _selection_policy.version,
                 "calibrator_source": calibrator_source,
                 "calibrator_mode": calibrator_mode,
+                "forecast_inversion_applied": bool(forecast_flip_applied),
                 "is_prior_only": _is_prior_only,
                 "has_diversity": _has_diversity,
                 "has_min_neff": _has_min_neff,
@@ -1722,6 +1758,56 @@ def score_ensemble(
             is_publishable = False
             item["reject_reasons"].append("edge_below_min")
         item["is_publishable"] = is_publishable
+
+    # Adaptive conformal penalty: if most rows are ambiguous, dampen the
+    # threshold penalty to avoid collapsing publishability to near-zero.
+    if scored:
+        ambiguous_rate = float(
+            sum(1 for item in scored if item.get("conformal_set_size") == 2)
+            / len(scored)
+        )
+        for item in scored:
+            conformal_size = item.get("conformal_set_size")
+            selection_threshold = float(
+                _selection_policy.threshold_for(
+                    str(item.get("stat_type") or ""),
+                    conformal_size,
+                    ambiguous_rate=ambiguous_rate,
+                )
+            )
+            selection_margin = float(
+                float(item.get("p_pick") or 0.5) - float(selection_threshold)
+            )
+            item["selection_threshold"] = selection_threshold
+            item["selection_margin"] = selection_margin
+            item["conformal_ambiguous_rate"] = round(ambiguous_rate, 4)
+            item["conformal_penalty_applied"] = (
+                float(
+                    _selection_policy._effective_conformal_penalty(
+                        ambiguous_rate=ambiguous_rate
+                    )
+                )
+                if conformal_size == 2
+                else 0.0
+            )
+            reject_reasons = [
+                reason
+                for reason in list(item.get("reject_reasons") or [])
+                if reason not in {"low_pick_confidence", "edge_below_min"}
+            ]
+            if selection_margin < 0.0:
+                reject_reasons.append("low_pick_confidence")
+            if float(item.get("edge") or 0.0) < MIN_EDGE:
+                reject_reasons.append("edge_below_min")
+            item["reject_reasons"] = list(dict.fromkeys(reject_reasons))
+            item["is_publishable"] = bool(
+                selection_margin >= 0.0
+                and not bool(item.get("is_prior_only"))
+                and bool(item.get("has_diversity"))
+                and bool(item.get("has_min_neff"))
+                and bool(item.get("forecast_edge_ok"))
+                and float(item.get("edge") or 0.0) >= MIN_EDGE
+            )
 
     # --- Spread-based abstention ---
     # If all p_final values are in a narrow band, the model lacks discrimination

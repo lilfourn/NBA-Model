@@ -19,6 +19,9 @@ from sqlalchemy import text
 
 DEFAULT_POLICY_VERSION = "selective_v1"
 DEFAULT_POLICY_PATH = Path(os.environ.get("MODELS_DIR", "models")) / "selection_policy.json"
+AMBIGUOUS_RATE_MODERATE = 0.85
+AMBIGUOUS_RATE_HIGH = 0.90
+AMBIGUOUS_RATE_EXTREME = 0.95
 
 
 @dataclass
@@ -36,10 +39,36 @@ class SelectionPolicy:
     threshold_grid: list[float]
     diagnostics: dict[str, Any]
 
-    def threshold_for(self, stat_type: str, conformal_set_size: int | None = None) -> float:
+    def _effective_conformal_penalty(
+        self, *, ambiguous_rate: float | None = None
+    ) -> float:
+        penalty = float(self.conformal_ambiguous_penalty)
+        if ambiguous_rate is None:
+            return penalty
+        try:
+            rate = max(0.0, min(1.0, float(ambiguous_rate)))
+        except (TypeError, ValueError):
+            return penalty
+        if rate >= AMBIGUOUS_RATE_EXTREME:
+            return penalty * 0.25
+        if rate >= AMBIGUOUS_RATE_HIGH:
+            return penalty * 0.5
+        if rate >= AMBIGUOUS_RATE_MODERATE:
+            return penalty * 0.75
+        return penalty
+
+    def threshold_for(
+        self,
+        stat_type: str,
+        conformal_set_size: int | None = None,
+        *,
+        ambiguous_rate: float | None = None,
+    ) -> float:
         base = float(self.per_stat_thresholds.get(stat_type, self.global_threshold))
         if conformal_set_size == 2:
-            base += float(self.conformal_ambiguous_penalty)
+            base += float(
+                self._effective_conformal_penalty(ambiguous_rate=ambiguous_rate)
+            )
         return float(max(0.5, min(0.99, round(base, 4))))
 
     def to_dict(self) -> dict[str, Any]:
@@ -282,6 +311,9 @@ def fit_selection_policy(
         "per_stat": per_stat_diag,
         "trained_stat_types": int(len(per_stat)),
         "total_stat_types": int(frame["stat_type"].nunique()),
+        "ambiguous_rate": round(
+            float((frame["conformal_set_size"] == 2).mean()), 4
+        ),
     }
 
     return SelectionPolicy(

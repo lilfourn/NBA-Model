@@ -31,6 +31,10 @@ from app.ml.artifacts import (  # noqa: E402
     latest_compatible_joblib_path,
 )  # noqa: E402
 from app.ml.artifact_store import load_latest_artifact_as_file  # noqa: E402
+from app.ml.inversion_corrections import (  # noqa: E402
+    load_forecast_stat_inversion_flags,
+    load_inversion_flags,
+)
 from app.ml.meta_learner import infer_meta_learner  # noqa: E402
 from app.modeling.db_logs import load_db_game_logs  # noqa: E402
 from app.modeling.forecast_calibration import (  # noqa: E402
@@ -593,12 +597,16 @@ def main() -> None:
         else SelectionPolicy.load()
     )
 
-    # Load inversion correction flags
-    from app.ml.inversion_corrections import load_inversion_flags
-
-    _inversion_flags = load_inversion_flags()
+    # Load inversion correction flags.
+    _inversion_flags = load_inversion_flags(engine)
+    _forecast_stat_flip_flags = load_forecast_stat_inversion_flags(engine)
     if _inversion_flags:
         print(f"Inversion auto-correction active for: {list(_inversion_flags.keys())}")
+    if _forecast_stat_flip_flags:
+        print(
+            "Forecast stat inversion guardrail active for "
+            f"{len(_forecast_stat_flip_flags)} stat types"
+        )
 
     scored = []
     skipped_nonfinite = 0
@@ -623,8 +631,19 @@ def main() -> None:
         }
         # Auto-correct inverted experts
         for _inv_expert, _should_flip in _inversion_flags.items():
-            if _should_flip and expert_probs.get(_inv_expert) is not None:
+            if (
+                _should_flip
+                and _inv_expert != "p_forecast_cal"
+                and expert_probs.get(_inv_expert) is not None
+            ):
                 expert_probs[_inv_expert] = 1.0 - expert_probs[_inv_expert]
+        forecast_flip_applied = False
+        if (
+            _forecast_stat_flip_flags.get(stat_type)
+            and expert_probs.get("p_forecast_cal") is not None
+        ):
+            expert_probs["p_forecast_cal"] = 1.0 - expert_probs["p_forecast_cal"]
+            forecast_flip_applied = True
 
         # Meta-learner blends LR/XGB/LGBM
         p_meta_val = None
@@ -742,6 +761,7 @@ def main() -> None:
                 "policy_version": _selection_policy.version,
                 "calibrator_source": calibrator_source,
                 "calibrator_mode": calibrator_mode,
+                "forecast_inversion_applied": bool(forecast_flip_applied),
             }
         )
 
@@ -773,6 +793,35 @@ def main() -> None:
             n_eff=item.get("n_eff"),
         )
         item["grade"] = _grade_from_edge(item["edge"])
+
+    if scored:
+        ambiguous_rate = float(
+            sum(1 for item in scored if item.get("conformal_set_size") == 2)
+            / len(scored)
+        )
+        for item in scored:
+            conformal_size = item.get("conformal_set_size")
+            selection_threshold = float(
+                _selection_policy.threshold_for(
+                    str(item.get("stat_type") or ""),
+                    conformal_size,
+                    ambiguous_rate=ambiguous_rate,
+                )
+            )
+            item["selection_threshold"] = selection_threshold
+            item["selection_margin"] = float(
+                float(item.get("p_pick") or 0.5) - selection_threshold
+            )
+            item["conformal_ambiguous_rate"] = round(ambiguous_rate, 4)
+            item["conformal_penalty_applied"] = (
+                float(
+                    _selection_policy._effective_conformal_penalty(
+                        ambiguous_rate=ambiguous_rate
+                    )
+                )
+                if conformal_size == 2
+                else 0.0
+            )
 
     # Apply publishability filters
     for item in scored:
