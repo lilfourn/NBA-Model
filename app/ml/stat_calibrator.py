@@ -32,6 +32,9 @@ CALIBRATOR_PATH = (
 CALIBRATOR_VERSION = "2.2.0"
 MIN_UNIQUE_OUTPUTS = 4
 MIN_OUTPUT_RANGE = 0.04
+PROBE_GRID = np.linspace(0.35, 0.65, 7, dtype=float)
+MIDBAND_PROBE = np.array([0.45, 0.50, 0.55], dtype=float)
+MAX_MIDBAND_SHIFT = 0.12
 
 # Stat types excluded from calibration (degenerate base rates)
 EXCLUDED_STAT_TYPES: set[str] = {
@@ -42,6 +45,49 @@ EXCLUDED_STAT_TYPES: set[str] = {
     "Personal Fouls",
     "Steals",
 }
+
+
+def _calibrator_shape(cal: Any) -> tuple[int, float, float]:
+    outputs = np.asarray(cal.predict(PROBE_GRID), dtype=float)
+    unique_outputs = int(len(np.unique(np.round(outputs, 6))))
+    output_range = float(np.max(outputs) - np.min(outputs))
+    midband_outputs = np.asarray(cal.predict(MIDBAND_PROBE), dtype=float)
+    max_midband_shift = float(np.max(np.abs(midband_outputs - MIDBAND_PROBE)))
+    return unique_outputs, output_range, max_midband_shift
+
+
+def _degenerate_reason(
+    unique_outputs: int, output_range: float, max_midband_shift: float
+) -> str | None:
+    if unique_outputs < MIN_UNIQUE_OUTPUTS:
+        return "degenerate_low_unique_outputs"
+    if output_range < MIN_OUTPUT_RANGE:
+        return "degenerate_low_output_range"
+    if max_midband_shift > MAX_MIDBAND_SHIFT:
+        return "degenerate_excessive_midband_shift"
+    return None
+
+
+def _auto_detect_degenerate_calibrators(
+    calibrators: dict[str, Any],
+) -> tuple[set[str], dict[str, str]]:
+    degenerate_stats: set[str] = set()
+    degenerate_reason: dict[str, str] = {}
+    for stat_type, cal in (calibrators or {}).items():
+        st = str(stat_type)
+        try:
+            unique_outputs, output_range, max_midband_shift = _calibrator_shape(cal)
+        except Exception:  # noqa: BLE001
+            degenerate_stats.add(st)
+            degenerate_reason[st] = "degenerate_predict_error"
+            continue
+        reason = _degenerate_reason(
+            unique_outputs, output_range, max_midband_shift
+        )
+        if reason is not None:
+            degenerate_stats.add(st)
+            degenerate_reason[st] = reason
+    return degenerate_stats, degenerate_reason
 
 
 class StatTypeCalibrator:
@@ -116,11 +162,24 @@ class StatTypeCalibrator:
             return cls()  # Empty calibrator (pass-through)
         try:
             payload = joblib.load(p)
+            calibrators = payload.get("calibrators", {}) or {}
             meta = payload.get("meta", {}) or {}
             if "calibrator_version" not in meta:
                 meta["calibrator_version"] = str(payload.get("version") or "legacy")
+            existing_degenerate = set(meta.get("degenerate_stats") or [])
+            auto_stats, auto_reasons = _auto_detect_degenerate_calibrators(calibrators)
+            newly_detected = sorted(auto_stats - existing_degenerate)
+            if auto_stats:
+                merged_degenerate = sorted(existing_degenerate | auto_stats)
+                meta["degenerate_stats"] = merged_degenerate
+                merged_reasons = dict(meta.get("degenerate_reason") or {})
+                for stat_type, reason in auto_reasons.items():
+                    merged_reasons.setdefault(str(stat_type), str(reason))
+                meta["degenerate_reason"] = merged_reasons
+            if newly_detected:
+                meta["auto_detected_degenerate_stats"] = newly_detected
             return cls(
-                calibrators=payload.get("calibrators", {}),
+                calibrators=calibrators,
                 global_calibrator=payload.get("global_calibrator"),
                 meta=meta,
             )
@@ -162,7 +221,6 @@ class StatTypeCalibrator:
         stat_meta: dict[str, dict[str, Any]] = {}
         degenerate_stats: list[str] = []
         degenerate_reason: dict[str, str] = {}
-        probe_grid = np.linspace(0.35, 0.65, 7, dtype=float)
         for st, group in valid.groupby("stat_type"):
             st = str(st)
             n = len(group)
@@ -181,30 +239,34 @@ class StatTypeCalibrator:
                 continue
             cal = IsotonicRegression(y_min=0.01, y_max=0.99, out_of_bounds="clip")
             cal.fit(st_probs, st_labels)
-            probe_outputs = np.asarray(cal.predict(probe_grid), dtype=float)
-            unique_outputs = int(len(np.unique(np.round(probe_outputs, 6))))
-            output_range = float(np.max(probe_outputs) - np.min(probe_outputs))
-            if unique_outputs < MIN_UNIQUE_OUTPUTS:
+            try:
+                unique_outputs, output_range, max_midband_shift = _calibrator_shape(cal)
+            except Exception:  # noqa: BLE001
                 stat_meta[st] = {
                     "n": n,
                     "calibrated": False,
-                    "reason": "degenerate_low_unique_outputs",
-                    "unique_outputs": unique_outputs,
-                    "output_range": round(output_range, 6),
+                    "reason": "degenerate_predict_error",
+                    "unique_outputs": 0,
+                    "output_range": 0.0,
+                    "max_midband_shift": 0.0,
                 }
                 degenerate_stats.append(st)
-                degenerate_reason[st] = "degenerate_low_unique_outputs"
+                degenerate_reason[st] = "degenerate_predict_error"
                 continue
-            if output_range < MIN_OUTPUT_RANGE:
+            reason = _degenerate_reason(
+                unique_outputs, output_range, max_midband_shift
+            )
+            if reason is not None:
                 stat_meta[st] = {
                     "n": n,
                     "calibrated": False,
-                    "reason": "degenerate_low_output_range",
+                    "reason": reason,
                     "unique_outputs": unique_outputs,
                     "output_range": round(output_range, 6),
+                    "max_midband_shift": round(max_midband_shift, 6),
                 }
                 degenerate_stats.append(st)
-                degenerate_reason[st] = "degenerate_low_output_range"
+                degenerate_reason[st] = reason
                 continue
 
             calibrators[st] = cal
@@ -213,6 +275,7 @@ class StatTypeCalibrator:
                 "calibrated": True,
                 "unique_outputs": unique_outputs,
                 "output_range": round(output_range, 6),
+                "max_midband_shift": round(max_midband_shift, 6),
             }
 
         meta = {
@@ -228,6 +291,7 @@ class StatTypeCalibrator:
             "fit_window_days": int(fit_window_days) if fit_window_days is not None else None,
             "min_unique_outputs": MIN_UNIQUE_OUTPUTS,
             "min_output_range": MIN_OUTPUT_RANGE,
+            "max_midband_shift": MAX_MIDBAND_SHIFT,
         }
         return cls(calibrators=calibrators, global_calibrator=global_cal, meta=meta)
 

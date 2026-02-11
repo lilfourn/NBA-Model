@@ -219,7 +219,7 @@ def test_build_health_report_includes_collect_guardrail_alerts(monkeypatch) -> N
     monkeypatch.setattr(
         monitor,
         "_load_calibrator_flat_stat_types",
-        lambda _path="models/stat_calibrator.joblib": ["Assists"],
+        lambda *_, **__: ["Assists"],
     )
 
     report = monitor.build_health_report(engine=object())
@@ -230,7 +230,8 @@ def test_build_health_report_includes_collect_guardrail_alerts(monkeypatch) -> N
     assert report["calibrator_flat_stat_types"] == ["Assists"]
 
     alert_types = {a["type"] for a in report["alerts"]}
-    assert "stat_concentration" in alert_types
     assert "expert_coverage_low" in alert_types
     assert "low_publishable_ratio" in alert_types
     assert "calibrator_flat_stats" in alert_types
+    suppressed_types = {a["type"] for a in report["suppressed_alerts"]}
+    assert "stat_concentration" in suppressed_types

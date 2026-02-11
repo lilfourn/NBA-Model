@@ -380,6 +380,32 @@ class TestTopPickDiversityGuardrail:
                 1 for item in selected if item["stat_type"] == "Two Pointers Attempted"
             ),
         }
-        assert len(selected) == 30
-        assert counts["ftm"] == 21
+        assert len(selected) == 45
+        assert counts["ftm"] == 36
         assert counts["tpa"] == 9
+
+    def test_diversity_guardrail_uses_strict_cap_when_sufficient_depth(self) -> None:
+        items = []
+        for idx in range(37):
+            items.append(
+                {
+                    "projection_id": f"a{idx}",
+                    "stat_type": "Free Throws Made",
+                    "edge": 90 - idx,
+                }
+            )
+        for idx in range(20):
+            items.append(
+                {
+                    "projection_id": f"b{idx}",
+                    "stat_type": "Two Pointers Attempted",
+                    "edge": 60 - idx,
+                }
+            )
+
+        selected = _select_diverse_top(items, top=50)
+        dominant = sum(
+            1 for item in selected if item["stat_type"] == "Free Throws Made"
+        )
+        assert len(selected) == 50
+        assert dominant <= 35

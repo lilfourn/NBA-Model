@@ -153,6 +153,8 @@ SHRINK_MAX = 0.25  # low-data picks: 25% pull toward prior
 PICK_THRESHOLD = 0.60
 SELECTION_POLICY_PATH = os.getenv("SELECTION_POLICY_PATH", "models/selection_policy.json")
 MAX_TOP_STAT_SHARE = 0.70
+LOW_SLATE_MAX_TOP_STAT_SHARE = 0.80
+LOW_SLATE_MIN_RETURN_RATIO = 0.75
 
 # Minimum edge score for a pick to be publishable
 MIN_EDGE = 5.0
@@ -470,46 +472,56 @@ def _select_diverse_top(
     top: int,
     max_top_stat_share: float = MAX_TOP_STAT_SHARE,
 ) -> list[Any]:
-    """Apply a per-stat concentration cap to avoid one-stat dominance."""
+    """Apply per-stat concentration cap with a low-slate exception."""
     if top <= 0 or not items:
         return []
     capped_top = min(int(top), len(items))
-    max_share = max(0.05, min(1.0, float(max_top_stat_share)))
     available_by_stat: Counter[str] = Counter(_item_stat_type(item) for item in items)
     if len(available_by_stat) <= 1:
         return items[:capped_top]
 
-    target_total = 0
-    stat_cap = 0
-    for candidate_total in range(capped_top, 0, -1):
-        candidate_cap = max(1, math.floor(candidate_total * max_share))
-        capacity = sum(
-            min(int(count), candidate_cap) for count in available_by_stat.values()
-        )
-        if capacity >= candidate_total:
-            target_total = candidate_total
-            stat_cap = candidate_cap
-            break
-    if target_total <= 0:
-        return []
+    def _select_with_cap(cap_share: float) -> list[Any]:
+        bounded_share = max(0.05, min(1.0, float(cap_share)))
+        target_total = 0
+        stat_cap = 0
+        for candidate_total in range(capped_top, 0, -1):
+            candidate_cap = max(1, math.floor(candidate_total * bounded_share))
+            capacity = sum(
+                min(int(count), candidate_cap) for count in available_by_stat.values()
+            )
+            if capacity >= candidate_total:
+                target_total = candidate_total
+                stat_cap = candidate_cap
+                break
+        if target_total <= 0:
+            return []
 
-    selected: list[Any] = []
-    selected_ids: set[str] = set()
-    stat_counts: Counter[str] = Counter()
+        selected: list[Any] = []
+        selected_ids: set[str] = set()
+        stat_counts: Counter[str] = Counter()
+        for item in items:
+            proj_id = _item_projection_id(item)
+            if proj_id in selected_ids:
+                continue
+            stat_type = _item_stat_type(item)
+            if stat_counts[stat_type] >= stat_cap:
+                continue
+            selected.append(item)
+            selected_ids.add(proj_id)
+            stat_counts[stat_type] += 1
+            if len(selected) >= target_total:
+                break
+        return selected
 
-    for item in items:
-        proj_id = _item_projection_id(item)
-        if proj_id in selected_ids:
-            continue
-        stat_type = _item_stat_type(item)
-        if stat_counts[stat_type] >= stat_cap:
-            continue
-        selected.append(item)
-        selected_ids.add(proj_id)
-        stat_counts[stat_type] += 1
-        if len(selected) >= target_total:
-            return selected
-    return selected
+    strict_selected = _select_with_cap(max_top_stat_share)
+    min_required = max(1, math.ceil(capped_top * LOW_SLATE_MIN_RETURN_RATIO))
+    if len(strict_selected) >= min_required:
+        return strict_selected
+
+    relaxed_selected = _select_with_cap(LOW_SLATE_MAX_TOP_STAT_SHARE)
+    if len(relaxed_selected) >= len(strict_selected):
+        return relaxed_selected
+    return strict_selected
 
 
 def _conformal_set_size(
@@ -1495,11 +1507,21 @@ def score_ensemble(
 
     # --- Artifact availability diagnostic ---
     _n_stat_cals = len(_stat_calibrator.calibrators) if _stat_calibrator else 0
+    _cal_meta = _stat_calibrator.meta if _stat_calibrator else {}
+    _cal_version = str((_cal_meta or {}).get("calibrator_version") or "unknown")
+    _cal_degenerate = len((_cal_meta or {}).get("degenerate_stats") or [])
+    _cal_auto_detected = len(
+        (_cal_meta or {}).get("auto_detected_degenerate_stats") or []
+    )
     _n_ctx_stats = len(_context_priors.get("stat_type_priors", {}))
     logger.info(
         "Scoring artifact status: stat_calibrator=%d stat-types, "
+        "calibrator_version=%s degenerate=%d auto_detected=%d "
         "context_priors=%d stat-types, selection_policy=%s",
         _n_stat_cals,
+        _cal_version,
+        _cal_degenerate,
+        _cal_auto_detected,
         _n_ctx_stats,
         _selection_policy.version,
     )

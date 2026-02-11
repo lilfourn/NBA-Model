@@ -29,6 +29,7 @@ LOGLOSS_ALERT_THRESHOLD = 0.75
 WEIGHT_COLLAPSE_THRESHOLD = 0.80
 MIN_ALERT_EXPERT_WEIGHT = 0.03
 TOP_STAT_SHARE_ALERT_THRESHOLD = 0.70
+MIN_PUBLISHABLE_FOR_CONCENTRATION_ALERT = 50
 MIN_REQUIRED_EXPERT_COVERAGE = 0.90
 REQUIRED_EXPERTS = tuple(EXPERT_COLS)
 MIN_PUBLISHABLE_SHARE = 0.15
@@ -306,11 +307,26 @@ def _load_recent_collect_summaries(engine, *, limit: int = 5) -> list[dict]:
     return out
 
 
-def _load_calibrator_flat_stat_types(path: str = "models/stat_calibrator.joblib") -> list[str]:
+def _load_calibrator_flat_stat_types(
+    path: str = "models/stat_calibrator.joblib", *, engine=None
+) -> list[str]:
     try:
+        calibrator_path = path
+        if engine is not None:
+            try:
+                from app.ml.artifact_store import load_latest_artifact_as_file
+
+                db_path = load_latest_artifact_as_file(
+                    engine, "stat_calibrator", suffix=".joblib"
+                )
+                if db_path:
+                    calibrator_path = str(db_path)
+            except Exception:  # noqa: BLE001
+                pass
+
         from app.ml.stat_calibrator import StatTypeCalibrator
 
-        cal = StatTypeCalibrator.load(path)
+        cal = StatTypeCalibrator.load(calibrator_path)
         meta = cal.meta or {}
         stats = meta.get("degenerate_stats") or []
         if isinstance(stats, list):
@@ -800,7 +816,7 @@ def build_health_report(
     ensemble_weights = _load_ensemble_mean_weights(ensemble_weights_path)
     latest_collect = _compute_latest_collect_metrics(engine)
     recent_collects = _load_recent_collect_summaries(engine, limit=5)
-    calibrator_flat_stat_types = _load_calibrator_flat_stat_types()
+    calibrator_flat_stat_types = _load_calibrator_flat_stat_types(engine=engine)
 
     base_rate = None
     tier_metrics: dict = {}
@@ -822,18 +838,25 @@ def build_health_report(
     all_alerts.extend(weight_alerts)
 
     top_stat_share = float(latest_collect.get("top_stat_share") or 0.0)
+    publishable_count = int(latest_collect.get("publishable_count") or 0)
     if top_stat_share > TOP_STAT_SHARE_ALERT_THRESHOLD:
-        all_alerts.append(
-            {
-                "type": "stat_concentration",
-                "value": round(top_stat_share, 4),
-                "threshold": TOP_STAT_SHARE_ALERT_THRESHOLD,
-                "message": (
-                    f"Top publishable stat share {top_stat_share:.1%} exceeds "
-                    f"{TOP_STAT_SHARE_ALERT_THRESHOLD:.0%}"
-                ),
-            }
-        )
+        payload = {
+            "type": "stat_concentration",
+            "value": round(top_stat_share, 4),
+            "threshold": TOP_STAT_SHARE_ALERT_THRESHOLD,
+            "message": (
+                f"Top publishable stat share {top_stat_share:.1%} exceeds "
+                f"{TOP_STAT_SHARE_ALERT_THRESHOLD:.0%}"
+            ),
+        }
+        if publishable_count >= MIN_PUBLISHABLE_FOR_CONCENTRATION_ALERT:
+            all_alerts.append(payload)
+        else:
+            payload["suppression_reason"] = (
+                "low_slate_exception: publishable_count="
+                f"{publishable_count} < {MIN_PUBLISHABLE_FOR_CONCENTRATION_ALERT}"
+            )
+            suppressed_alerts.append(payload)
 
     expert_coverage = latest_collect.get("expert_coverage") or {}
     for expert in REQUIRED_EXPERTS:
