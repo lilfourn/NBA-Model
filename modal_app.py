@@ -67,9 +67,7 @@ TRAIN_GPU_SPEC = _parse_gpu_spec(TRAIN_GPU)
 BASELINE_TRAIN_TIMEOUT_SECONDS = _env_int(
     "MODAL_BASELINE_TRAIN_TIMEOUT_SECONDS", 90 * 60
 )
-COLLECT_SCORE_TIMEOUT_SECONDS = _env_int(
-    "MODAL_COLLECT_SCORE_TIMEOUT_SECONDS", 45 * 60
-)
+COLLECT_SCORE_TIMEOUT_SECONDS = _env_int("MODAL_COLLECT_SCORE_TIMEOUT_SECONDS", 45 * 60)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -217,8 +215,7 @@ def _run_cmd(
         )
     except subprocess.TimeoutExpired:
         print(
-            "[modal] command timed out"
-            f" after {effective_timeout}s: {' '.join(cmd)}",
+            "[modal] command timed out" f" after {effective_timeout}s: {' '.join(cmd)}",
             file=sys.stderr,
         )
         if not allow_fail:
@@ -322,7 +319,8 @@ def _run_collect_pipeline() -> None:
             "scripts.prizepicks.collect_prizepicks",
             "--output-dir",
             str(REMOTE_DATA_DIR / "snapshots"),
-        ]
+        ],
+        allow_fail=True,
     )
 
     cmd = [

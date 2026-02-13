@@ -136,3 +136,24 @@ class TestCrawlerClientCircuitBreaker:
         assert client.circuit_breaker.is_open
         with pytest.raises(CircuitOpenError):
             client.get("http://localhost:99999/nope")
+
+
+# ---------------------------------------------------------------------------
+# PrizePicks client wiring
+# ---------------------------------------------------------------------------
+class TestPrizePicksClientRetry:
+    def test_429_retry_callback(self):
+        from app.clients.prizepicks import _get_client, _client
+        import app.clients.prizepicks as pp_mod
+
+        prev = pp_mod._client
+        pp_mod._client = None
+        try:
+            client = _get_client()
+            assert client.should_retry is not None
+            assert client.should_retry(429) is True
+            assert client.should_retry(200) is False
+            assert client.should_retry(500) is False
+            assert client.backoff_seconds == 5.0
+        finally:
+            pp_mod._client = prev
